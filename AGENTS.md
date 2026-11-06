@@ -163,6 +163,7 @@ engine/            # 流程编排
   flows/           # 一个阶段一个文件：claim / execute / gate / review / complete
   prompts/         # 默认提示词模板（项目没定制时用它）
   skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
+vendor/agent-tools/ # 自带的 @yogioo/agent-tools 副本（来源见 VENDORED.md）
 ```
 
 新目录出现前先问：它属于工具、还是属于项目？两边都不属于就别建。
@@ -187,7 +188,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - `work` 的参数原样透传：`--dry` / `--id <卡片>` / `--attempts N` / `--allow-dirty`。
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
-- 依赖解析：要用能找到的 `bd` 与 `agent-tools`，找不到时设 `BD_BIN` / `AGENT_TOOLS_BIN`。
+- 依赖解析：要用能找到的 `bd` 与 AI CLI；`agent-tools` 用仓库自带的 `vendor/agent-tools`（`AGENT_TOOLS_BIN` 可覆盖）。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
 - **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「待接 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
 - 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。

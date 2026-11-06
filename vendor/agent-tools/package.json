@@ -1,0 +1,37 @@
+{
+  "name": "@yogioo/agent-tools",
+  "version": "0.1.0",
+  "description": "Private local toolkit: reusable lib modules and executable CLIs for agent workflows.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "agent-tools": "./bin/agent-tools.mjs"
+  },
+  "exports": {
+    "./agent-events": "./lib/agent-events.mjs",
+    "./agent-run": "./lib/agent-run/run-agent-turn.mjs",
+    "./subagent": "./lib/subagent/index.mjs",
+    "./agent-run/runners": "./lib/agent-run/runners/index.mjs",
+    "./work-items": "./lib/work-items/index.mjs",
+    "./runtime": "./lib/run-runtime/index.mjs",
+    "./workspace-diff": "./lib/workspace-diff.mjs",
+    "./prompt-compose": "./lib/prompt-compose.mjs",
+    "./event-inbox": "./lib/event-inbox.mjs",
+    "./requirement-store": "./lib/requirement-store.mjs",
+    "./questionnaire": "./lib/questionnaire.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "tools/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node scripts/test-components.mjs",
+    "test:packaging": "node scripts/test-components.mjs packaging"
+  },
+  "license": "UNLICENSED"
+}

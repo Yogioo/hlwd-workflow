@@ -8,23 +8,26 @@ import { fileURLToPath } from 'node:url';
 import { readProjectConfig, readPrompts } from '../project.mjs';
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const GATE_RUNNER = path.join(ENGINE_DIR, 'gate-run.mjs');
+// 仓库自带的 agent-tools 副本：用户不用先全局装一个私有工具包
+const VENDORED_AGENT_TOOLS = path.join(ENGINE_DIR, '..', 'vendor', 'agent-tools', 'bin', 'agent-tools.mjs');
 // 门禁可能要跑测试/构建，给 10 分钟；用环境变量可改
 const GATE_TIMEOUT_MS = Number(process.env.HLWD_GATE_TIMEOUT_MS ?? 600000);
 
 const WIN = process.platform === 'win32';
 
 /**
- * agent-tools 在 Windows 上只有 .cmd 壳，spawn 不了；
- * 优先用 npm 全局装里的 .mjs 入口（用当前 node 跑），否则回落 PATH。
+ * agent-tools 在哪：AGENT_TOOLS_BIN > 仓库自带副本 > 全局安装/PATH。
+ * 自带副本用当前 node 跑（Windows 上 .cmd 壳 spawn 不了，.mjs 没这问题）。
  */
-function resolveAgentTools() {
+export function agentToolsCommand() {
   if (process.env.AGENT_TOOLS_BIN) return { cmd: process.env.AGENT_TOOLS_BIN, prefix: [] };
+  if (fsSync.existsSync(VENDORED_AGENT_TOOLS)) return { cmd: process.execPath, prefix: [VENDORED_AGENT_TOOLS] };
   if (!WIN) return { cmd: 'agent-tools', prefix: [] };
   const entry = [
     path.join(process.env.APPDATA ?? '', 'npm/node_modules/@yogioo/agent-tools/bin/agent-tools.mjs'),
     path.join(path.dirname(process.execPath), 'node_modules/@yogioo/agent-tools/bin/agent-tools.mjs'),
   ].find((p) => p && fsSync.existsSync(p));
-  if (!entry) throw new Error('找不到 agent-tools，请设 AGENT_TOOLS_BIN 指向可执行文件');
+  if (!entry) throw new Error('找不到 agent-tools：仓库里应该有 vendor/agent-tools，或用 AGENT_TOOLS_BIN 指定');
   return { cmd: process.execPath, prefix: [entry] };
 }
 
@@ -139,7 +142,7 @@ export async function agentTurn({ cfg, workdir, promptFile, outDir }) {
   if (cfg.thinking) args.push('--thinking', cfg.thinking);
   if (cfg.timeoutMs) args.push('--timeout', String(cfg.timeoutMs));
 
-  const { cmd, prefix } = resolveAgentTools();
+  const { cmd, prefix } = agentToolsCommand();
   const { code, out, err } = await run(cmd, [...prefix, ...args], { cwd: workdir });
   let facts = null;
   try {

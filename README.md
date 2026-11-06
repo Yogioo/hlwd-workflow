@@ -18,18 +18,17 @@
 |---|---|---|
 | Node.js **≥ 20** | 跑工具本身 | https://nodejs.org |
 | `bd`（beads） | 工单存储，每个项目一份 | `npm i -g @beads/bd` |
-| `agent-tools` | 真正调用 AI（一次 agent 回合） | 见下方「agent-tools 从哪来」 |
+| AI CLI 一个 | 真正干活（`pi` / `codex` / `cursor-agent`） | 自己装，能命令行跑通就行 |
+| `agent-tools` | 把一次 agent 回合规范化 | **已随仓库自带**，不用装 |
 
-### agent-tools 从哪来
+### agent-tools 为什么自带
 
-`agent-tools` 是作者维护的本地 CLI（未发布到 npm）。它只做一件事：跑**一次** agent 回合并把结果规范化。
+`agent-tools` 是作者本人的工具包（上游 [Yogioo/agent-skills](https://github.com/Yogioo/agent-skills)，未发布到 npm）。
+为了让你 clone 下来就能用，它被复制在 `vendor/agent-tools/`（约 0.5 MB，零依赖），版本与来源见 [vendor/agent-tools/VENDORED.md](vendor/agent-tools/VENDORED.md)。
 
-```bash
-agent-tools agent-run capabilities
-agent-tools agent-run run --runner pi --workdir . --prompt-file /tmp/p.md --out-dir /tmp/out-1 --sandbox workspace-write
-```
+解析顺序：`AGENT_TOOLS_BIN` > `vendor/agent-tools/` > PATH 里的全局安装。
 
-`engine` 只依赖这个命令的**参数约定**，不依赖它的实现：
+想换成自己的实现？`engine` 只依赖这个命令的**参数约定**：
 
 ```
 agent-tools agent-run run --runner <pi|codex|agent> --workdir <目录> \
@@ -39,12 +38,13 @@ agent-tools agent-run run --runner <pi|codex|agent> --workdir <目录> \
 
 - 成功时退出码 `0`，最后一行 stdout 是一段 JSON（工具读其中的 `exitCode` / `timedOut` / `aborted`）
 - `--out-dir` 必须是**新目录**，它会拒绝已存在的目录
-- 没有现成环境时，写个十几行的包装脚本包住你手头的 AI CLI，再用 `AGENT_TOOLS_BIN` 指过去就能用
+- 包装你手头的 AI CLI 成这个形状，用 `AGENT_TOOLS_BIN` 指过去就能用
 
-找不到 `bd` / `agent-tools` 时用环境变量指路：
+自检：
 
 ```bash
-BD_BIN=/path/to/bd AGENT_TOOLS_BIN=/path/to/agent-tools node wf.mjs
+node vendor/agent-tools/bin/agent-tools.mjs agent-run capabilities   # 看支持哪些 runner
+BD_BIN=/path/to/bd AGENT_TOOLS_BIN=/path/to/agent-tools node wf.mjs # 自定义路径
 ```
 
 ---
@@ -178,6 +178,7 @@ node wf.mjs board --lan --token 口令
   wf.mjs                             .hlwd/config.json     状态名 / AI 配置 / 自动流水线开关
   project.mjs                        .hlwd/prompts/*.md    项目定制的提示词
   web/  engine/                      .hlwd/gate.mjs        门禁脚本（默认 always true）
+  vendor/agent-tools/                （工具侧：自带的 agent-tools 副本）
                                      .hlwd/runs/<卡片>-<ts>/ 每次运行的 run.json + 提示词 + 日志
                                      .hlwd/journal.ndjson  事件流（append-only）
                                      .beads/               工单（beads 数据库）
@@ -225,14 +226,14 @@ node wf.mjs board --lan --token 口令
 **门禁一直挡住？**
 看同目录 `gate-<轮次>.log`。最常见的是门禁里跑 `npm test` 而项目本来就有失败用例——先把门禁改准，再放开。
 
-**`bd: command not found` / `agent-tools` 找不到？**
-Windows 上这俩是 `.cmd` 壳，工具会优先找 npm 全局安装里的入口；还可以用 `BD_BIN` / `AGENT_TOOLS_BIN` 指定。
+**`bd: command not found` / AI CLI 跑不通？**
+`bd` 用 `BD_BIN` 指定；`agent-tools` 仓库里已经有了，想换就设 `AGENT_TOOLS_BIN`。AI CLI（`pi` / `codex` / `cursor-agent`）得自己装并在 PATH 里——工具只负责把它叫起来。
 
 **端口被占？**
 `PORT=3101 node wf.mjs board`。
 
 **Windows 上 `node wf.mjs` 报错退出？**
-确保 Node ≥ 20；`bd` 与 `agent-tools` 在 PATH 里（或设上面两个变量）。
+确保 Node ≥ 20；`bd` 在 PATH 里（或设 `BD_BIN`），AI CLI 也一样。
 
 **能同时跑多个项目吗？**
 能。每个项目一份 `.hlwd/` 与 `.beads/`，看板可以切换项目，自动流水线按项目分别启停。

@@ -1,0 +1,100 @@
+/* 两个看板共用的一套皮肤。页面只写自己的布局差异。 */
+body{background:#0b0e14;color:#e6edf3;font:13px/1.55 ui-monospace,Consolas,monospace;margin:0;padding:24px}
+h1{font-size:15px;margin:0 0 4px;letter-spacing:.02em}
+#meta{color:#8b949e;margin-bottom:16px;font-size:12px}
+#warn{background:#3d2b00;color:#f0c674;padding:8px 12px;border-radius:6px;margin-bottom:16px;display:none}
+#filters{display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:12px;color:#8b949e}
+#filters button{background:#11161f;color:#8b949e;border:1px solid #21262d;border-radius:6px;padding:3px 10px;font:inherit;cursor:pointer}
+#filters button:hover{border-color:#30363d;color:#c9d1d9}
+#filters button.on{background:#1f6feb22;border-color:#1f6feb;color:#c9d1d9}
+#filters label{display:flex;align-items:center;gap:5px;cursor:pointer;margin-left:4px}
+#filters input{accent-color:#388bfd}
+
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:8px 10px;border-top:1px solid #21262d;vertical-align:top}
+th{color:#8b949e;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+tr.run,tr.card{cursor:pointer}
+tr.run:hover,tr.card:hover{background:#11161f}
+tr.sel{background:#161d29;box-shadow:inset 2px 0 0 #388bfd}
+tr.faded{opacity:.55}
+tr.stale{opacity:.55}
+.what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.ok{color:#3fb950}.bad{color:#f85149}.warn{color:#d29922}
+.dim{color:#6e7681}.state-run{color:#58a6ff}.say{color:#8fb8d8}
+
+.md{font:12px/1.6 ui-monospace,Consolas,monospace;word-break:break-word;white-space:normal}
+.md pre{white-space:pre}
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:.6em 0 .3em;font-size:1.05em;color:#e6edf3;line-height:1.35}
+.md p{margin:.4em 0}
+.md ul,.md ol{margin:.35em 0;padding-left:1.5em}
+.md li{margin:.15em 0}
+.md code{background:#1b2230;color:#e6edf3;padding:1px 4px;border-radius:3px}
+.md pre.md-code{background:#161b22;padding:8px 10px;border-radius:6px;overflow:auto;margin:.45em 0}
+.md pre.md-code code{background:none;padding:0}
+.md blockquote{border-left:3px solid #30363d;margin:.45em 0;padding-left:10px;color:#8b949e}
+.md a{color:#58a6ff}
+.md img{max-width:100%;border:1px solid #21262d;border-radius:6px;margin:.4em 0}
+.md hr{border:0;border-top:1px solid #21262d;margin:.7em 0}
+
+.tlbar{display:flex;align-items:center;justify-content:space-between;margin:0 0 8px;font-size:12px;color:#8b949e}
+.tlbar label{display:flex;align-items:center;gap:5px;cursor:pointer}
+.tlwrap{border:1px solid #21262d;border-radius:6px;background:#0d1117;overflow:hidden}
+.tlhead,.tl{display:grid;grid-template-columns:66px 62px minmax(0,1fr) 62px;gap:12px;align-items:baseline}
+.tlhead{color:#6e7681;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 12px 6px;border-bottom:1px solid #21262d}
+.tllist{overflow:auto;overscroll-behavior:contain}
+.tl{padding:4px 12px;border-top:1px solid #161b22}
+.tl:first-child{border-top:0}
+.tl>.act{min-width:0;white-space:pre-wrap;word-break:break-word}
+/* say/think 的图标单独占一列：正文第一行就贴在图标那一行，不再先空一行。 */
+.tl.say>.act,.tl.think>.act{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:6px;align-items:baseline}
+.tl.say>.act>.md,.tl.think>.act>.md{min-width:0}
+.tl.say>.act>.md>:first-child,.tl.think>.act>.md>:first-child{margin-top:0}
+.tl.tool>.act{color:#c9d1d9}
+.tl.say>.act{color:#8fb8d8;max-height:5.6em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 72%,transparent);cursor:pointer}
+.tl.say.open>.act{max-height:none;-webkit-mask-image:none}
+.tl.think>.act{color:#7d8590;font-style:italic;max-height:4.6em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 72%,transparent);cursor:pointer}
+.tl.think.open>.act{max-height:none;-webkit-mask-image:none}
+.tl.arm>.act{color:#d2a8ff}
+.tl>span:last-child{text-align:right;color:#6e7681}
+
+.panes{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
+details.pane{margin:0 0 8px;border:1px solid #21262d;border-radius:6px;padding:8px 12px;background:#0d1117}
+details.pane summary{color:#8b949e;font-size:12px;cursor:pointer;outline:none}
+details.pane .body{margin:8px 0 0;max-height:34vh;overflow:auto;color:#c9d1d9}
+.armrow{display:flex;gap:10px;align-items:baseline;padding:6px 4px;border-top:1px solid #161b22;cursor:pointer}
+.armrow:first-child{border-top:0}
+.armrow:hover{background:#11161f}
+.armrow .nm{color:#d2a8ff;min-width:90px}
+.armrow .meta{color:#8b949e;font-size:11px}
+
+#modal{position:fixed;inset:0;background:#05070bcc;display:none;padding:36px;z-index:20}
+#modal.on{display:block}
+#modal .box{max-width:1180px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px 20px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px #0009}
+#modal #mbody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+#modal h3{font-size:14px;margin:0 0 4px}
+#modal .mh{flex:0 0 auto;display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+#modal .sub{color:#8b949e;font-size:12px;margin:0 0 12px}
+#modal .mactions{display:flex;gap:8px;align-items:center}
+#modal #mback{background:#11161f;color:#8b949e;border:1px solid #21262d;border-radius:6px;padding:3px 10px;font:inherit;cursor:pointer;display:none}
+/* 下钻布局：区块区自己滚，时间线吃掉剩下的高度，弹窗本身不出滚动条。 */
+#modal .tlbar{flex:0 0 auto}
+#modal .tlwrap{flex:1 1 40vh;min-height:40vh;display:flex;flex-direction:column}
+#modal .tlhead{flex:0 0 auto}
+#modal .tllist{flex:1 1 auto;min-height:0}
+
+.diff{font:12px/1.45 ui-monospace,Consolas,monospace;background:#0d1117;border:1px solid #21262d;border-radius:6px;overflow:auto}
+.dline{padding:1px 10px;white-space:pre-wrap;word-break:break-word}
+.dline.dadd{background:#12261e;color:#7ee787}
+.dline.ddel{background:#2d1214;color:#ff7b72}
+.dline.dhunk{color:#8b949e;background:#161b22;border-top:1px solid #21262d}
+.dline.dmeta{color:#6e7681}
+.dline.dctx{color:#c9d1d9}
+.drow{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #161b22}
+.drow>span{padding:1px 8px;white-space:pre-wrap;word-break:break-word;min-width:0}
+.drow>.ldel{background:#2d1214;color:#ff7b72}
+.drow>.radd{background:#12261e;color:#7ee787}
+.drow>.lctx,.drow>.rctx{color:#8b949e}
+.diffbar{display:flex;gap:6px;margin:0 0 8px}
+.diffbar button{background:#11161f;color:#8b949e;border:1px solid #21262d;border-radius:6px;padding:2px 10px;font:inherit;cursor:pointer}
+.diffbar button.on{background:#1f6feb22;border-color:#1f6feb;color:#c9d1d9}
