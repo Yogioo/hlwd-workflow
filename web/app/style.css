@@ -1,0 +1,128 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #262b36;
+  --fg: #e6e8ee;
+  --muted: #8b93a7;
+  --accent: #4c8dff;
+  --warn: #ff6b6b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.dot { color: var(--muted); margin: 0 6px; }
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 5;
+  flex-wrap: wrap;
+}
+.top h1 { font-size: 16px; margin: 0; font-weight: 600; }
+.tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hint { margin-left: auto; color: var(--muted); font-size: 12px; }
+.hint.err { color: var(--warn); }
+.chk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+
+input, select, textarea, button {
+  font: inherit;
+  color: inherit;
+  background: #0b0d11;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+input[type="checkbox"] { padding: 0; }
+button { cursor: pointer; background: #1d2230; }
+button:hover { border-color: #3b4357; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.ghost { background: transparent; }
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(240px, 1fr));
+  gap: 12px;
+  padding: 14px 20px 40px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .board { grid-template-columns: 1fr; }
+}
+
+.col h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 6px 0 8px; }
+.count { color: var(--fg); background: #222836; border-radius: 10px; padding: 1px 7px; margin-left: 4px; }
+.col-body { display: flex; flex-direction: column; gap: 8px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+}
+.card:hover { border-color: #3b4357; }
+.card-id { color: var(--muted); }
+.card-title { margin: 4px 0; }
+.card-foot { color: var(--muted); font-size: 12px; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0; }
+.chip { background: #22304a; color: #9fc0ff; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+.empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+
+.panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(560px, 92vw);
+  height: 100vh;
+  overflow: auto;
+  background: #12151c;
+  border-left: 1px solid var(--line);
+  padding: 14px 18px 40px;
+  z-index: 10;
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); }
+.panel h2 { font-size: 16px; margin: 10px 0 6px; }
+.panel h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
+.meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.row { display: flex; gap: 8px; align-items: end; margin: 10px 0; flex-wrap: wrap; }
+.row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.row input, .row select { min-width: 120px; }
+
+.body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0b0d11;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 10px 0 0;
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.comments { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.comment { border-left: 2px solid var(--line); padding-left: 8px; }
+.comment-head { color: var(--muted); font-size: 12px; }
+.comment-text { white-space: pre-wrap; word-break: break-word; }
+textarea { width: 100%; resize: vertical; }
+
+.dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; width: min(640px, 94vw); padding: 18px; }
+.dialog::backdrop { background: #0008; }
+.dialog form { display: flex; flex-direction: column; gap: 10px; }
+.dialog h2 { margin: 0 0 4px; font-size: 16px; }
+.dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.dialog label input, .dialog label select, .dialog label textarea { color: var(--fg); }
+.dialog menu { display: flex; justify-content: end; gap: 8px; padding: 0; margin: 6px 0 0; }

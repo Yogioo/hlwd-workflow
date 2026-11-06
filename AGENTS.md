@@ -46,7 +46,7 @@ run(promptFile, workdir, sandbox) -> {status, outDir, events}
 
 **验收归 engine。** 是否通过由 §4 状态机 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
-## 4. 状态机（就这五个，别加）
+## 4. 状态机（就这四个，别加）
 
 ```
 open ──ready-for-agent──> in_progress ──> review ──> closed
@@ -55,7 +55,8 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
                                             └──审查不通过──> in_progress（同一工作区继续改）
 ```
 
-- 状态用 beads 原生 `status` 承载，`ready-for-agent` 用 label 表达。
+- 状态用 beads 原生 `status` 承载；`review` 是自定义状态，靠 `bd config set status.custom "review:wip"` 注册，不新增字段。
+- `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」，不回答「处在哪一步」。
 - 每次迁移必须留一条 `comment`：谁改的、为什么、产物路径。
 - 卡住的单只能靠评论解释，不允许「人工下线」这种暗门。
 
@@ -63,9 +64,14 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 
 ```
 AGENTS.md
+package.json       # 只有 scripts，没有依赖
 .beads/            # 唯一真相源，进版本库
-web/               # 页面 + 一个 beads 适配层客户端
+web/               # 页面 + beads 适配层
+  beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
+  server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
+  app/             # 单页看板：index.html / app.js / style.css，无构建
 engine/            # 流程编排：claim / execute / review / complete
+  skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
   flows/           # 一个阶段一个文件，一个文件一个职责
   prompts/         # 喂给 AgentRunner 的提示词模板
 ```
@@ -84,11 +90,15 @@ engine/            # 流程编排：claim / execute / review / complete
 ## 7. 跑起来
 
 ```bash
+npm start                             # 看板 → http://127.0.0.1:3100（PORT 可改）
 bd ready                              # 看就绪工单
 bd show <id>                          # 看详情与评论
 agent-tools work-items list --source beads --workdir . --ready --ready-label ready-for-agent
 agent-tools agent-run capabilities    # 确认执行端可用
 ```
+
+- 看板只是 beads 的一层视图：关掉 `npm start` 不影响任何数据与流程。
+- `web/beads.mjs` 默认自动找 `bd`；找不到时设 `BD_BIN` 指向 bd 可执行文件（Windows 用 `bd.exe`）。
 
 `engine` 只在工作区干净时启动；脏工作区的改动会被算进当前这张单的提交里，必须先处理干净。
 
