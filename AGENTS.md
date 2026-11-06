@@ -71,10 +71,19 @@ web/               # 页面 + beads 适配层
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
   app/             # 单页看板：index.html / app.js / style.css，无构建
 engine/            # 流程编排：claim / execute / review / complete
-  skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
+  run.mjs          # 入口：接一张单走完流程，一次只跑一张
+  lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run（不碰 beads）
+  config.json      # runner / sandbox / 重试次数，改这里不改代码
   flows/           # 一个阶段一个文件，一个文件一个职责
-  prompts/         # 喂给 AgentRunner 的提示词模板
+    claim.mjs      #   接单：open + ready → in_progress
+    execute.mjs    #   执行：渲染 prompt → 一次 agent 回合
+    review.mjs     #   审查：另一回合 → 读 verdict JSON
+    complete.mjs   #   收尾：提交+关闭，或回退并说明原因
+  prompts/         # 喂给 AgentRunner 的提示词模板（execute / review）
+  skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
 ```
+
+运行产物写 `.engine/runs/<卡片id>-<时间戳>/`，已 gitignore：里面是 prompt、`verdict-N.json`、每次 agent 回合的 events。
 
 新目录出现前先问：它是不是上面三个模块之一？不是就别建。模块内的分层（`flows/` 怎么拆）由该模块自己的 `AGENTS.md` 决定，本文件不越界。
 
@@ -91,11 +100,17 @@ engine/            # 流程编排：claim / execute / review / complete
 
 ```bash
 npm start                             # 看板 → http://127.0.0.1:3100（PORT 可改）
+npm run engine                        # 接一张就绪单，走完 接单→执行→审查→完成
+node engine/run.mjs --dry             # 只看会接哪张，不动任何数据
+node engine/run.mjs --id <卡片id>     # 指定单（已被接单后重启用）
 bd ready                              # 看就绪工单
 bd show <id>                          # 看详情与评论
 agent-tools work-items list --source beads --workdir . --ready --ready-label ready-for-agent
 agent-tools agent-run capabilities    # 确认执行端可用
 ```
+
+- `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环，调度不写进 engine。
+- 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
 
 - 看板只是 beads 的一层视图：关掉 `npm start` 不影响任何数据与流程。
 - `web/beads.mjs` 默认自动找 `bd`；找不到时设 `BD_BIN` 指向 bd 可执行文件（Windows 用 `bd.exe`）。
