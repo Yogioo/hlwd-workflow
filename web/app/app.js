@@ -17,6 +17,7 @@ const state = {
   filter: { q: '', ready: false },
   dispatching: false,
   watch: { running: false, stopping: false },
+  lastWatchError: null,
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
@@ -145,6 +146,11 @@ function renderWatch() {
   btn.title = w.running
     ? `pid ${w.pid}${w.lastError ? ` · 上次：${w.lastError}` : ''} · 点一下停（跑完手上这张）`
     : `点一下开：有就绪单就自动开干${w.lastError ? ` · 上次：${w.lastError}` : ''}`;
+  // 卡住时别让人靠悬停才发现：错误写进 hint（变更时提醒一次）
+  if (w.lastError && w.lastError !== state.lastWatchError) {
+    state.lastWatchError = w.lastError;
+    setTimeout(() => hint(`自动流水线卡住了：${w.lastError}`, true), 0);
+  }
 }
 
 async function toggleWatch() {

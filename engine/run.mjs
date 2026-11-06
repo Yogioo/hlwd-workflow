@@ -44,13 +44,18 @@ function parseArgs(argv) {
   return args;
 }
 
+// 这些路径的变化是工具与 beads 自己的状态，不算「项目脏改动」
+const TOOL_STATE = /(^|\s)"?\.(hlwd|beads)\//;
+
 async function assertClean(workdir, allowDirty) {
   const res = await run('git', ['status', '--porcelain'], { cwd: workdir });
   if (res.code !== 0) return; // 不是 git 仓库就不拦
-  // .hlwd/ 是工具自身的配置与运行记录，不算"项目脏改动"
+  // 工具与 beads 自己的状态不算“项目脏改动”：
+  //   .hlwd/ 是配置与运行记录，.beads/ 每次 bd 命令都会变（interactions.jsonl、状态迁移），
+  //   把它们算成脏单会让第二张单永远跑不起来。收尾的 git add -A 仍会把它们带进提交。
   const dirty = res.out
     .split('\n')
-    .filter((line) => line.trim() && !/^\s*\S+\s+\.hlwd\//.test(line))
+    .filter((line) => line.trim() && !TOOL_STATE.test(line))
     .join('\n')
     .trim();
   if (dirty && !allowDirty) {
