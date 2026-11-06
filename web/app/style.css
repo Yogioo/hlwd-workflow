@@ -127,6 +127,24 @@ button.ghost { background: transparent; }
 .comment-text { white-space: pre-wrap; word-break: break-word; }
 textarea { width: 100%; resize: vertical; }
 
+/* 附件：图片缩略图 + 文件行；粘贴/拖拽时面板高亮 */
+.attachments { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.attachment { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0f1620; }
+.attachment img.md-img { display: block; width: 100%; max-height: 260px; object-fit: contain; background: #0b111a; cursor: zoom-in; }
+.attachment figcaption,
+.attachment.file { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.attachment.file a { color: var(--accent); text-decoration: none; word-break: break-all; }
+.att-name { max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.mini { font-size: 11px; padding: 2px 6px; }
+.md-img { max-width: 100%; border-radius: 6px; cursor: zoom-in; }
+#panel.dragging { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+/* 图片放大：点任意 .md-img */
+.lightbox { background: transparent; border: 0; padding: 0; max-width: 94vw; max-height: 94vh; }
+.lightbox::backdrop { background: #000c; }
+.lightbox img { max-width: 94vw; max-height: 88vh; display: block; border-radius: 8px; }
+.lightbox .dialog-note { color: #cbd5e1; text-align: center; margin-top: 6px; }
+
 .dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; width: min(640px, 94vw); padding: 18px; }
 .dialog::backdrop { background: #0008; }
 .dialog form { display: flex; flex-direction: column; gap: 10px; }

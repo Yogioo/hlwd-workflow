@@ -4,6 +4,9 @@
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
 
+/** 只有这些来源的图片会被渲染成 <img>：本地路径、/api 下的附件、https、内联图片。 */
+const SAFE_IMG_SRC = /^(https?:\/\/|\/|\.\/|data:image\/(png|jpe?g|gif|webp);base64,)[^\s"'<>]*$/i;
+
 function inline(text) {
   const codes = [];
   let out = text.replace(/`([^`]+)`/g, (_, code) => {
@@ -11,6 +14,10 @@ function inline(text) {
     return `\u0000${codes.length - 1}\u0000`;
   });
   out = out
+    // 图片要先于链接处理：![x](y) 里也包含 [x](y)
+    .replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, (whole, alt, src) =>
+      SAFE_IMG_SRC.test(src) ? `<img src="${src}" alt="${alt}" loading="lazy" class="md-img">` : whole,
+    )
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,，。]|$)/g, '$1<em>$2</em>')
     .replace(/~~([^~]+)~~/g, '<del>$1</del>')

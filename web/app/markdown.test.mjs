@@ -31,3 +31,23 @@ test('表格：表头 + 分隔行渲染成 table', () => {
   assert.match(html, /<th>a<\/th>/);
   assert.match(html, /<td>2<\/td>/);
 });
+
+test('图片：本地/附件/https 地址渲染成 img', () => {
+  const local = md('![截图](/api/attachments/hlwd-abc/1700000000-shot.png)');
+  assert.match(local, /<img src="\/api\/attachments\/hlwd-abc\/1700000000-shot.png" alt="截图" loading="lazy" class="md-img">/);
+  assert.match(md('![](https://example.com/a.png)'), /<img src="https:\/\/example.com\/a.png"/);
+  assert.match(md('![](/x.png)'), /<img src="\/x.png"/);
+});
+
+test('图片：不安全协议不渲染，也不当成链接', () => {
+  const html = md('![x](javascript:alert(1))');
+  assert.ok(!html.includes('<img'), html);
+  assert.ok(!html.includes('<a '), html);
+  assert.match(html, /javascript:alert\(1\)/);
+});
+
+test('图片：alt 里的 HTML 会被转义', () => {
+  const html = md('![<script>x</script>](/a.png)');
+  assert.ok(!html.includes('<script'), html);
+  assert.match(html, /alt="&lt;script&gt;x&lt;\/script&gt;"/);
+});

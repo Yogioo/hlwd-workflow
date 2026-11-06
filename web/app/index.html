@@ -59,6 +59,13 @@
           <button id="panelLabelAdd" type="button">加</button>
         </div>
         <div id="panelBody" class="md"></div>
+        <h3>附件 <span id="attachmentCount" class="count"></span></h3>
+        <div class="row attach-row">
+          <button id="attachPick" type="button" class="ghost">上传图片/文件</button>
+          <input id="attachFile" type="file" multiple hidden />
+          <span class="dialog-note">也可以直接粘贴截图、把文件拖到这个面板</span>
+        </div>
+        <div id="panelAttachments" class="attachments"></div>
         <h3>评论</h3>
         <div id="panelComments" class="comments"></div>
         <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送）"></textarea>
@@ -73,6 +80,11 @@
         <pre id="panelRaw" class="raw mono" hidden></pre>
       </div>
     </aside>
+
+    <dialog id="lightbox" class="lightbox">
+      <img id="lightboxImg" alt="" />
+      <div class="dialog-note">点一下关闭</div>
+    </dialog>
 
     <dialog id="create" class="dialog">
       <form id="createForm" method="dialog">

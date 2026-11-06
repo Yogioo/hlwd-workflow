@@ -2,7 +2,7 @@
 // 缺结论 / 看不懂 / 证据不足，一律算不通过。
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { agentTurn, log, readPrompt, render } from '../lib.mjs';
+import { agentTurn, bodyWithAttachments, log, readPrompt, render } from '../lib.mjs';
 
 export async function review({ cfg, workdir, issue, runDir, attempt }) {
   const outDir = path.join(runDir, `review-${attempt}`);
@@ -14,7 +14,7 @@ export async function review({ cfg, workdir, issue, runDir, attempt }) {
     render(await readPrompt('review', workdir), {
       ID: issue.id,
       TITLE: issue.title,
-      BODY: issue.body || '（工单没有正文，按标题判定）',
+      BODY: await bodyWithAttachments({ workdir, issue, fallback: '（工单没有正文，按标题判定）' }),
       VERDICT: verdictFile,
     }),
     'utf8',

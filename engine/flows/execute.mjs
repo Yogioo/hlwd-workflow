@@ -1,7 +1,7 @@
 // 阶段 2：执行。一次 agent 回合，只负责「把活干出来」，不判对错。
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { agentTurn, log, readPrompt, render } from '../lib.mjs';
+import { agentTurn, bodyWithAttachments, log, readPrompt, render } from '../lib.mjs';
 
 export async function execute({ cfg, workdir, issue, comments, runDir, attempt, feedback }) {
   const outDir = path.join(runDir, `exec-${attempt}`);
@@ -13,7 +13,7 @@ export async function execute({ cfg, workdir, issue, comments, runDir, attempt, 
     render(await readPrompt('execute', workdir), {
       ID: issue.id,
       TITLE: issue.title,
-      BODY: issue.body || '（工单没有正文，按标题执行）',
+      BODY: await bodyWithAttachments({ workdir, issue, fallback: '（工单没有正文，按标题执行）' }),
       HISTORY: history,
       FEEDBACK: feedback ? `## 上一轮审查意见（本轮必须处理）\n${feedback}` : '',
     }),

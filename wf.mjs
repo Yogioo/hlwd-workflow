@@ -433,6 +433,12 @@ async function main() {
   return 2;
 }
 
+// 被 `| head` / `| grep -m1` 截断时别喷栈，安静退出
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') process.exit(0);
+  throw err;
+});
+
 main()
   .then((code) => {
     // 用 exitCode 而不是 process.exit()：刚 spawn 完就硬退会撞上 libuv 的句柄断言

@@ -5,7 +5,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readProjectConfig, readPrompts } from '../project.mjs';
+import { readProjectConfig, readPrompts, attachmentsDir, listAttachments } from '../project.mjs';
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const GATE_RUNNER = path.join(ENGINE_DIR, 'gate-run.mjs');
 // 仓库自带的 agent-tools 副本：用户不用先全局装一个私有工具包
@@ -14,6 +14,20 @@ const VENDORED_AGENT_TOOLS = path.join(ENGINE_DIR, '..', 'vendor', 'agent-tools'
 const GATE_TIMEOUT_MS = Number(process.env.HLWD_GATE_TIMEOUT_MS ?? 600000);
 
 const WIN = process.platform === 'win32';
+
+/**
+ * 提示词里的 BODY：工单正文 + 附件清单（本机路径）。
+ * 附件是这张卡的截图/日志，AI 得能直接打开，所以给绝对路径而不是 URL。
+ */
+export async function bodyWithAttachments({ workdir, issue, fallback }) {
+  const body = String(issue.body ?? '').trim() || fallback;
+  const files = await listAttachments(workdir, issue.id).catch(() => []);
+  if (!files.length) return body;
+  const list = files
+    .map((f) => `- ${path.join(attachmentsDir(workdir, issue.id), f.stored)}  ← ${f.name}（${f.kind}）`)
+    .join('\n');
+  return `${body}\n\n## 附件（本机路径，需要就自己打开看）\n${list}`;
+}
 
 /**
  * agent-tools 在哪：AGENT_TOOLS_BIN > 仓库自带副本 > 全局安装/PATH。

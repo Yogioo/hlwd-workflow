@@ -196,6 +196,122 @@ export default async function gate() {
 // }
 `;
 
+// —— 附件（图片/文件）：存项目里，不进 beads，也不进版本库 ——
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp']);
+const MIME_BY_EXT = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.zip': 'application/zip',
+  '.mp4': 'video/mp4',
+};
+
+const extOf = (name) => path.extname(String(name ?? '')).toLowerCase();
+/** 卡片 id 进目录名前先洗一遗：不许拼路径。 */
+export function safeCardId(cardId) {
+  const cleaned = String(cardId ?? '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 80);
+  return cleaned || 'card';
+}
+
+/** 用户给的文件名：丢目录、丢控制字符，保留中文与空格。 */
+export function safeFileName(name) {
+  const base = String(name ?? '').replace(/\\/g, '/').split('/').pop() ?? '';
+  const cleaned = base.replace(/[^\w.\- \u4e00-\u9fa5]+/g, '_').replace(/\s+/g, ' ').trim();
+  return (cleaned || 'file').slice(0, 80);
+}
+
+export const attachmentsDir = (projectDir, cardId = '') =>
+  path.join(hlwdDir(projectDir), 'attachments', cardId ? safeCardId(cardId) : '');
+
+export const attachmentKind = (name) => (IMAGE_EXT.has(extOf(name)) ? 'image' : 'file');
+export const attachmentMime = (name) => MIME_BY_EXT[extOf(name)] ?? 'application/octet-stream';
+export const attachmentUrl = (cardId, stored) =>
+  `/api/attachments/${encodeURIComponent(safeCardId(cardId))}/${encodeURIComponent(stored)}`;
+
+function attachmentMeta(stored) {
+  const name = stored.replace(/^\d+-/, '');
+  return { stored, name, kind: attachmentKind(name) };
+}
+
+async function uniqueStoredName(dir, base) {
+  let stored = base;
+  for (let n = 2; ; n += 1) {
+    const exists = await fsp
+      .access(path.join(dir, stored))
+      .then(() => true)
+      .catch(() => false);
+    if (!exists) return stored;
+    stored = `${base.replace(/(\.[^.]+)?$/, `-${n}$1`)}`;
+  }
+}
+
+/** 存一个附件：返回 {stored, name, kind, size, at}。 */
+export async function saveAttachment(projectDir, cardId, { name, data }) {
+  const bytes = data?.length ?? 0;
+  if (!bytes) throw new Error('空文件');
+  if (bytes > MAX_ATTACHMENT_BYTES) throw new Error(`附件太大（上限 ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB）`);
+  const dir = attachmentsDir(projectDir, cardId);
+  await fsp.mkdir(dir, { recursive: true });
+  const at = Date.now();
+  const stored = await uniqueStoredName(dir, `${at}-${safeFileName(name)}`);
+  await fsp.writeFile(path.join(dir, stored), data);
+  const file = path.join(dir, stored);
+  void file;
+  return { ...attachmentMeta(stored), size: bytes, at };
+}
+
+/** 列一张卡的附件（新的在后）。 */
+export async function listAttachments(projectDir, cardId) {
+  const dir = attachmentsDir(projectDir, cardId);
+  let names = [];
+  try {
+    names = await fsp.readdir(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const stored of names.sort()) {
+    const stat = await fsp.stat(path.join(dir, stored)).catch(() => null);
+    if (!stat?.isFile()) continue;
+    const at = Number(/(\d+)-/.exec(stored)?.[1] ?? 0);
+    out.push({ ...attachmentMeta(stored), size: stat.size, at });
+  }
+  return out;
+}
+
+/** 读一个附件；返回 null 表示不存在或路径越界。 */
+export async function readAttachment(projectDir, cardId, stored) {
+  const dir = attachmentsDir(projectDir, cardId);
+  const file = path.resolve(dir, String(stored ?? ''));
+  if (!file.startsWith(path.resolve(dir) + path.sep)) return null;
+  const data = await fsp.readFile(file).catch(() => null);
+  return data ? { data, meta: { ...attachmentMeta(path.basename(file)), size: data.length } } : null;
+}
+
+export async function removeAttachment(projectDir, cardId, stored) {
+  const dir = attachmentsDir(projectDir, cardId);
+  const file = path.resolve(dir, String(stored ?? ''));
+  if (!file.startsWith(path.resolve(dir) + path.sep)) return false;
+  return fsp
+    .rm(file, { force: true })
+    .then(() => true)
+    .catch(() => false);
+}
+
 // —— 打开项目：缺什么补什么，绝不覆盖已有内容 ——
 function bdBin() {
   if (process.env.BD_BIN) return process.env.BD_BIN;
@@ -261,11 +377,17 @@ export async function ensureProject(inputDir) {
     await bd(['init', '--prefix', prefixOf(dir), '--non-interactive', '--skip-agents', '--skip-hooks'], dir);
     created.push('.beads/（bd init）');
   }
-  // 运行记录是产物：用 .hlwd/.gitignore 排除，不动项目自己的 .gitignore
+  // 运行记录与附件是产物：用 .hlwd/.gitignore 排除，不动项目自己的 .gitignore
   const hlwdIgnore = path.join(hlwdDir(dir), '.gitignore');
-  if (!fs.existsSync(hlwdIgnore)) {
-    await fsp.writeFile(hlwdIgnore, 'runs/\njournal.ndjson\n', 'utf8');
+  const ignoreLines = ['runs/', 'journal.ndjson', 'attachments/'];
+  const currentIgnore = await fsp.readFile(hlwdIgnore, 'utf8').catch(() => null);
+  if (currentIgnore === null) {
+    await fsp.writeFile(hlwdIgnore, `${ignoreLines.join('\n')}\n`, 'utf8');
     created.push('.hlwd/.gitignore');
+  } else {
+    // 老项目补上新条目（只追加，不覆盖已有内容）
+    const missing = ignoreLines.filter((line) => !currentIgnore.split('\n').includes(line));
+    if (missing.length) await fsp.writeFile(hlwdIgnore, `${currentIgnore.replace(/\n?$/, '\n')}${missing.join('\n')}\n`, 'utf8');
   }
 
   // review 是工作流用的自定义状态；已配置过就跳过

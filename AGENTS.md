@@ -29,12 +29,13 @@
   wf.mjs                             .hlwd/config.json     状态/优先级中文名 + engine 配置
   project.mjs                        .hlwd/prompts/*.md    项目定制的提示词
   web/  engine/                      .hlwd/gate.mjs        项目门禁（默认 always true）
+                                     .hlwd/attachments/<卡片>/  图片/附件（gitignore）
                                      .hlwd/runs/           每次运行一个目录（gitignore）
   .hlwd/  .beads/  ← 它自己也是        .hlwd/journal.ndjson  事件流（gitignore）
      一个可以被打开的项目             .beads/               工单
 ```
 
-`.hlwd/.gitignore` 由工具生成，只排 `runs/` 与 `journal.ndjson`——配置、提示词和门禁都要进版本库。
+`.hlwd/.gitignore` 由工具生成，排 `runs/`、`journal.ndjson`、`attachments/`——配置、提示词和门禁要进版本库，运行产物和附件不进。
 
 ## 4. 契约（改这里要先改文档）
 

@@ -6,7 +6,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { DEFAULT_CONFIG, GATE_TEMPLATE, ensureProject, gateFile, readProjectConfig, readPrompts, saveProjectConfig, savePrompts } from './project.mjs';
+import {
+  DEFAULT_CONFIG,
+  GATE_TEMPLATE,
+  MAX_ATTACHMENT_BYTES,
+  attachmentMime,
+  attachmentsDir,
+  ensureProject,
+  gateFile,
+  listAttachments,
+  readAttachment,
+  readProjectConfig,
+  readPrompts,
+  removeAttachment,
+  safeFileName,
+  saveAttachment,
+  saveProjectConfig,
+  savePrompts,
+} from './project.mjs';
 
 /** 临时"项目"：预建 .beads 目录，避免测试里去 bd init。 */
 async function withTempProject(fn) {
@@ -91,4 +108,49 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
 
 test('ensureProject 拒绝不存在的目录', async () => {
   await assert.rejects(() => ensureProject(path.join(os.tmpdir(), 'hlwd-不存在-目录-xyz')), /目录不存在/);
+});
+
+test('附件：存 / 列 / 读 / 删都在项目 .hlwd/attachments 下', async () => {
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+    const saved = await saveAttachment(dir, 'hlwd-abc', { name: '截图 1.png', data: Buffer.from('png-bytes') });
+
+    assert.match(saved.stored, /^\d+-截图 1\.png$/);
+    assert.equal(saved.name, '截图 1.png');
+    assert.equal(saved.kind, 'image');
+    assert.ok((await fs.stat(path.join(attachmentsDir(dir, 'hlwd-abc'), saved.stored))).isFile());
+
+    const ignore = await fs.readFile(path.join(dir, '.hlwd', '.gitignore'), 'utf8');
+    assert.match(ignore, /attachments\//, '附件目录不进版本库');
+
+    const list = await listAttachments(dir, 'hlwd-abc');
+    assert.equal(list.length, 1);
+    assert.equal(list[0].size, 9);
+
+    const hit = await readAttachment(dir, 'hlwd-abc', saved.stored);
+    assert.equal(hit.data.toString(), 'png-bytes');
+    assert.equal(attachmentMime(saved.name), 'image/png');
+
+    assert.equal(await readAttachment(dir, 'hlwd-abc', '../config.json'), null, '不许路径穿越');
+    assert.equal(await readAttachment(dir, '../../etc/passwd', saved.stored), null);
+
+    assert.equal(await removeAttachment(dir, 'hlwd-abc', saved.stored), true);
+    assert.deepEqual(await listAttachments(dir, 'hlwd-abc'), []);
+  });
+});
+
+test('附件：文件名洗掉路径，空文件与超大文件被拒', async () => {
+  assert.equal(safeFileName('../../etc/passwd'), 'passwd');
+  assert.equal(safeFileName('a/b/c.log'), 'c.log');
+  assert.equal(safeFileName(''), 'file');
+  assert.equal(safeFileName('截图.png'), '截图.png');
+
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+    await assert.rejects(() => saveAttachment(dir, 'x', { name: 'e.txt', data: Buffer.alloc(0) }), /空文件/);
+    await assert.rejects(
+      () => saveAttachment(dir, 'x', { name: 'big.bin', data: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1) }),
+      /太大/,
+    );
+  });
 });

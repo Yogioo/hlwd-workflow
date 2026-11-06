@@ -9,10 +9,17 @@ import { fileURLToPath } from 'node:url';
 import {
   ensureProject,
   gateFile,
+  MAX_ATTACHMENT_BYTES,
+  attachmentMime,
+  attachmentUrl,
+  listAttachments,
+  readAttachment,
   readProjectConfig,
   readPrompts,
   readState,
   rememberProject,
+  removeAttachment,
+  saveAttachment,
   saveProjectConfig,
   savePrompts,
 } from '../project.mjs';
@@ -89,6 +96,18 @@ async function readBody(req) {
   }
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+/** 附件走原始字节（不包 JSON，避免 base64 膨胀），大小上限由调用方给。 */
+async function readRaw(req, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw new Error(`附件超过 ${Math.round(limit / 1024 / 1024)}MB`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function serveStatic(res, urlPath) {
@@ -450,9 +469,27 @@ async function route(req, res, url) {
     return json(res, 405, { error: 'method not allowed' });
   }
 
-  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history|\/journal)?$/);
+  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history|\/journal|\/attachments)?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
+    if (m[2] === '/attachments') {
+      const p = await project();
+      if (req.method === 'GET') {
+        const files = await listAttachments(p.dir, id);
+        return json(res, 200, { attachments: files.map((f) => ({ ...f, url: attachmentUrl(id, f.stored) })) });
+      }
+      if (req.method === 'POST') {
+        const filename = decodeURIComponent(String(req.headers['x-filename'] ?? 'file'));
+        const data = await readRaw(req, MAX_ATTACHMENT_BYTES);
+        try {
+          const meta = await saveAttachment(p.dir, id, { name: filename, data });
+          return json(res, 201, { attachment: { ...meta, url: attachmentUrl(id, meta.stored) } });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      return json(res, 405, { error: 'method not allowed' });
+    }
     if (m[2] === '/comments') {
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
       const body = await readBody(req);
@@ -477,6 +514,28 @@ async function route(req, res, url) {
       return json(res, 200, { issue });
     }
     return json(res, 405, { error: 'method not allowed' });
+  }
+
+  // 附件字节：GET 看/下载，DELETE 删
+  const att = pathname.match(/^\/api\/attachments\/([^/]+)\/([^/]+)$/);
+  if (att) {
+    const p = await project();
+    const cardId = decodeURIComponent(att[1]);
+    const stored = decodeURIComponent(att[2]);
+    if (req.method === 'DELETE') {
+      const ok = await removeAttachment(p.dir, cardId, stored);
+      return ok ? json(res, 200, { ok: true }) : json(res, 404, { error: '附件不存在' });
+    }
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    const hit = await readAttachment(p.dir, cardId, stored);
+    if (!hit) return json(res, 404, { error: '附件不存在' });
+    res.writeHead(200, {
+      'content-type': attachmentMime(hit.meta.name),
+      'content-length': hit.data.length,
+      'cache-control': 'private, max-age=3600',
+      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(hit.meta.name)}`,
+    });
+    return res.end(hit.data);
   }
 
   if (pathname === '/api/runs') {

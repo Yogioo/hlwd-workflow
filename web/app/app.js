@@ -18,6 +18,7 @@ const state = {
   dispatching: false,
   watch: { running: false, stopping: false },
   lastWatchError: null,
+  attachments: [],
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
@@ -180,7 +181,12 @@ async function toggleWatch() {
 }
 
 async function openPanel(id, { quiet = false } = {}) {
-  const { issue, comments } = await api(`/api/issues/${encodeURIComponent(id)}`);
+  const [{ issue, comments }, attachments] = await Promise.all([
+    api(`/api/issues/${encodeURIComponent(id)}`),
+    api(`/api/issues/${encodeURIComponent(id)}/attachments`)
+      .then((d) => d.attachments)
+      .catch(() => []),
+  ]);
   state.current = issue;
   $('#panel').hidden = false;
   $('#panelId').textContent = issue.id;
@@ -197,6 +203,7 @@ async function openPanel(id, { quiet = false } = {}) {
   fillPrioritySelect($('#panelPriority'), issue.priority);
   renderDispatch(issue);
   $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
+  renderAttachments(attachments);
   $('#panelComments').innerHTML =
     comments
       .map(
@@ -270,6 +277,92 @@ async function dispatchCurrent() {
     state.dispatching = false;
     btn.disabled = false;
   }
+}
+
+/** 附件：图片/文件，存在项目的 .hlwd/attachments/ 里（不进 beads，也不进 git）。 */
+const fmtSize = (n) =>
+  n == null ? '' : n < 1024 ? `${n}B` : n < 1024 * 1024 ? `${Math.round(n / 1024)}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`;
+const mdFor = (a) => (a.kind === 'image' ? `![${a.name}](${a.url})` : `[${a.name}](${a.url})`);
+
+function renderAttachments(list) {
+  state.attachments = list ?? [];
+  $('#attachmentCount').textContent = state.attachments.length ? String(state.attachments.length) : '';
+  if (!state.attachments.length) {
+    $('#panelAttachments').innerHTML = '<div class="empty">还没有附件（截图、日志、设计图都可以丢进来）</div>';
+    return;
+  }
+  $('#panelAttachments').innerHTML = state.attachments
+    .map((a) => {
+      const actions = `<button type="button" class="ghost mini" data-act="insert">插入评论</button><button type="button" class="ghost mini" data-act="delete">删除</button>`;
+      const head = `<span class="att-name" title="${esc(a.name)}">${esc(a.name)}</span><span class="dot">·</span>${esc(fmtSize(a.size))}`;
+      return a.kind === 'image'
+        ? `<figure class="attachment" data-stored="${esc(a.stored)}">
+             <img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy" class="md-img" />
+             <figcaption>${head}${actions}</figcaption>
+           </figure>`
+        : `<div class="attachment file" data-stored="${esc(a.stored)}">
+             <a href="${esc(a.url)}" target="_blank" rel="noreferrer">${head}</a>${actions}
+           </div>`;
+    })
+    .join('');
+}
+
+async function refreshAttachments() {
+  if (!state.current) return;
+  const { attachments } = await api(`/api/issues/${encodeURIComponent(state.current.id)}/attachments`).catch(() => ({
+    attachments: [],
+  }));
+  renderAttachments(attachments);
+}
+
+/** 把 markdown 插到光标处（没光标就追加），粘贴上传后自动用。 */
+function insertComment(text) {
+  const box = $('#panelComment');
+  const start = box.selectionStart ?? box.value.length;
+  const end = box.selectionEnd ?? start;
+  box.value = `${box.value.slice(0, start)}${text}${box.value.slice(end)}`;
+  const pos = start + text.length;
+  box.focus();
+  try {
+    box.setSelectionRange(pos, pos);
+  } catch {
+    // 不支持的浏览器就算了
+  }
+}
+
+async function uploadFiles(files, { insert = false } = {}) {
+  const issue = state.current;
+  const list = [...(files ?? [])];
+  if (!issue || !list.length) return [];
+  const done = [];
+  for (const file of list) {
+    try {
+      const res = await fetch(`/api/issues/${encodeURIComponent(issue.id)}/attachments`, {
+        method: 'POST',
+        headers: { 'x-filename': encodeURIComponent(file.name || '粘贴的图片.png') },
+        body: file,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      done.push(data.attachment);
+    } catch (err) {
+      hint(`上传失败：${err.message}`, true);
+    }
+  }
+  await refreshAttachments();
+  if (done.length) {
+    hint(`已上传 ${done.length} 个附件`);
+    if (insert) insertComment(`${done.map(mdFor).join(' ')} `);
+  }
+  return done;
+}
+
+/** 从粘贴事件里取文件（截图就是这条路径）。 */
+function pastedFiles(event) {
+  return [...(event.clipboardData?.items ?? [])]
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
 }
 
 async function loadTrace() {
@@ -498,6 +591,51 @@ $('#showRaw').addEventListener('click', () => {
 $('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
 $('#watch').addEventListener('click', toggleWatch);
 $('#panelDispatch').addEventListener('click', dispatchCurrent);
+$('#attachPick').addEventListener('click', () => $('#attachFile').click());
+$('#attachFile').addEventListener('change', async (e) => {
+  await uploadFiles(e.target.files);
+  e.target.value = '';
+});
+$('#panel').addEventListener('dragover', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  $('#panel').classList.add('dragging');
+});
+$('#panel').addEventListener('dragleave', () => $('#panel').classList.remove('dragging'));
+$('#panel').addEventListener('drop', async (e) => {
+  e.preventDefault();
+  $('#panel').classList.remove('dragging');
+  await uploadFiles(e.dataTransfer?.files);
+});
+$('#panel').addEventListener('paste', (e) => {
+  const files = pastedFiles(e);
+  if (!files.length) return;
+  e.preventDefault();
+  uploadFiles(files, { insert: true }).catch((err) => hint(`上传失败：${err.message}`, true));
+});
+$('#panelAttachments').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const holder = btn.closest('[data-stored]');
+  const att = state.attachments.find((a) => a.stored === holder?.dataset.stored);
+  if (!att) return;
+  if (btn.dataset.act === 'insert') return insertComment(`${mdFor(att)} `);
+  if (btn.dataset.act === 'delete') {
+    if (!window.confirm(`删除附件「${att.name}」？正文/评论里引用它的图片会变成裂图`)) return;
+    const res = await fetch(att.url, { method: 'DELETE' });
+    if (!res.ok) return hint('删除失败', true);
+    await refreshAttachments();
+    hint(`已删除 ${att.name}`);
+  }
+});
+// 点图放大：正文、评论、附件缩略图都一样
+document.addEventListener('click', (e) => {
+  const img = e.target.closest?.('.md-img');
+  if (!img) return;
+  $('#lightboxImg').src = img.getAttribute('src');
+  $('#lightbox').showModal();
+});
+$('#lightbox').addEventListener('click', () => $('#lightbox').close());
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
 $('#panelLabelAdd').addEventListener('click', () => {
   const labels = $('#panelLabel')

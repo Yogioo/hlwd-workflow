@@ -87,3 +87,40 @@ test('静态页也要口令（否则页面能开、接口 401 会莫名其妙）
     assert.equal((await fetch(`${base}/index.html?token=${TOKEN}`)).status, 200);
   });
 });
+
+test('附件：上传 → 列表 → 取回 → 删除', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+    const up = await fetch(`${base}/api/issues/hlwd-img1/attachments${t}`, {
+      method: 'POST',
+      headers: { 'x-filename': encodeURIComponent('截图.png') },
+      body: bytes,
+    });
+    assert.equal(up.status, 201);
+    const { attachment } = await up.json();
+    assert.equal(attachment.kind, 'image');
+    assert.equal(attachment.name, '截图.png');
+    assert.equal(attachment.size, bytes.length);
+    assert.match(attachment.url, /^\/api\/attachments\/hlwd-img1\//);
+
+    const list = await (await fetch(`${base}/api/issues/hlwd-img1/attachments${t}`)).json();
+    assert.equal(list.attachments.length, 1);
+    assert.equal(list.attachments[0].stored, attachment.stored);
+
+    const got = await fetch(`${base}${attachment.url}${t}`);
+    assert.equal(got.status, 200);
+    assert.match(got.headers.get('content-type'), /image\/png/);
+    assert.equal((await got.arrayBuffer()).byteLength, bytes.length);
+
+    const del = await fetch(`${base}${attachment.url}${t}`, { method: 'DELETE' });
+    assert.equal(del.status, 200);
+    const after = await (await fetch(`${base}/api/issues/hlwd-img1/attachments${t}`)).json();
+    assert.deepEqual(after.attachments, []);
+
+    // 越界与不存在的都按 404 处理，不吐栈
+    assert.equal((await fetch(`${base}/api/attachments/hlwd-img1/..%2F..%2Fconfig.json${t}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/issues/hlwd-img1/attachments/nope${t}`)).status, 404);
+  });
+});
