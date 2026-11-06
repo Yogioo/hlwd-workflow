@@ -5,6 +5,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readProjectConfig, readPrompts } from '../project.mjs';
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const WIN = process.platform === 'win32';
@@ -36,15 +37,10 @@ const DEFAULTS = {
   gitCommit: true,
 };
 
-/** 配置在仓库根的 config.json（看板里的「设置」写的就是它），engine 只读。 */
-export async function loadConfig() {
-  let raw = {};
-  try {
-    raw = JSON.parse(await fs.readFile(path.join(ENGINE_DIR, '..', 'config.json'), 'utf8'));
-  } catch {
-    // 没有配置文件就用默认值，不拦流程
-  }
-  return { ...DEFAULTS, ...(raw.engine ?? {}) };
+/** 配置在项目的 .hlwd/config.json（看板里的「设置」写的就是它），engine 只读。 */
+export async function loadConfig(projectDir = process.cwd()) {
+  const cfg = await readProjectConfig(projectDir).catch(() => ({ engine: {} }));
+  return { ...DEFAULTS, ...(cfg.engine ?? {}) };
 }
 
 export function log(message) {
@@ -70,8 +66,10 @@ export function render(template, vars) {
   return template.replace(/\{\{(\w+)\}\}/g, (whole, key) => (key in vars ? String(vars[key]) : whole));
 }
 
-export async function readPrompt(name) {
-  return fs.readFile(path.join(ENGINE_DIR, 'prompts', `${name}.md`), 'utf8');
+/** 项目自定义提示词在 .hlwd/prompts/；没写就回落到工具自带模板。 */
+export async function readPrompt(name, projectDir = process.cwd()) {
+  const prompts = await readPrompts(projectDir).catch(() => ({}));
+  return prompts[name] ?? '';
 }
 
 /**

@@ -10,7 +10,7 @@ export async function execute({ cfg, workdir, issue, comments, runDir, attempt, 
   const history = comments.map((c) => `- ${c.author}：${c.text}`).join('\n') || '（无）';
   await fs.writeFile(
     promptFile,
-    render(await readPrompt('execute'), {
+    render(await readPrompt('execute', workdir), {
       ID: issue.id,
       TITLE: issue.title,
       BODY: issue.body || '（工单没有正文，按标题执行）',

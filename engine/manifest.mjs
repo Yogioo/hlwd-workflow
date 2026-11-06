@@ -2,6 +2,7 @@
 // 只写文件，不改 beads；beads 仍是唯一真相源，这两样是产物。
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { journalFile, runsDir } from '../project.mjs';
 
 const iso = () => new Date().toISOString();
 
@@ -12,7 +13,7 @@ export function clip(text, max = 160) {
 }
 
 export async function appendJournal(workdir, event) {
-  const file = path.join(workdir, '.engine', 'journal.ndjson');
+  const file = journalFile(workdir);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.appendFile(file, `${JSON.stringify(event)}\n`, 'utf8');
 }
@@ -20,7 +21,7 @@ export async function appendJournal(workdir, event) {
 /** 建运行目录 + 初始 run.json；返回 save() 供各阶段落盘。 */
 export async function createManifest({ workdir, cfg, issue }) {
   const runId = `${issue.id}-${Date.now()}`;
-  const dir = path.join(workdir, '.engine', 'runs', runId);
+  const dir = path.join(runsDir(workdir), runId);
 
   const manifest = {
     runId,

@@ -12,6 +12,7 @@ const state = {
   readyLabel: 'ready-for-agent',
   current: null,
   trace: null,
+  project: { dir: '', recent: [] },
   filter: { q: '', ready: false },
 };
 
@@ -53,6 +54,21 @@ function applyConfig(cfg) {
   else if (cfg.engine?.readyLabel) state.readyLabel = cfg.engine.readyLabel;
   fillPrioritySelect($('#createPriority'), 2);
   fillPrioritySelect($('#panelPriority'), state.current?.priority ?? 2);
+}
+
+/** /api/project 的返回：{dir, config, prompts, recent, created} */
+function applyProject(payload) {
+  if (payload.dir) {
+    state.project = { dir: payload.dir, recent: payload.recent ?? [] };
+    const el = $('#projectPath');
+    if (el) {
+      el.textContent = payload.dir;
+      el.title = payload.dir;
+    }
+  }
+  const cfg = payload.config ?? payload;
+  applyConfig({ statuses: cfg.columns, labels: cfg.labels, readyLabel: cfg.engine?.readyLabel ?? cfg.readyLabel });
+  return payload;
 }
 
 function fillPrioritySelect(select, selected) {
@@ -261,7 +277,7 @@ async function tick() {
 
 // —— 设置 ——
 async function openSettings() {
-  const cfg = await api('/api/settings');
+  const { config: cfg, prompts } = await api('/api/settings');
   $('#statusLabels').innerHTML = (cfg.columns ?? state.statuses)
     .map((s) => `<label>${esc(s)}<input name="status:${esc(s)}" value="${esc(cfg.labels?.statuses?.[s] ?? '')}" /></label>`)
     .join('');
@@ -278,6 +294,8 @@ async function openSettings() {
   f.actor.value = e.actor ?? 'ai';
   f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
   f.gitCommit.checked = e.gitCommit !== false;
+  f.prompt_execute.value = prompts?.execute ?? '';
+  f.prompt_review.value = prompts?.review ?? '';
   $('#settingsDialog').showModal();
 }
 
@@ -289,6 +307,10 @@ async function saveSettings(event) {
     if (key.startsWith('status:')) payload.labels.statuses[key.slice(7)] = String(value);
     else if (key.startsWith('prio:')) payload.labels.priorities[key.slice(5)] = String(value);
   }
+  payload.prompts = {
+    execute: String(f.get('prompt_execute') ?? ''),
+    review: String(f.get('prompt_review') ?? ''),
+  };
   payload.engine = {
     runner: f.get('runner'),
     sandbox: f.get('sandbox'),
@@ -301,7 +323,7 @@ async function saveSettings(event) {
   };
   try {
     const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    applyConfig(saved);
+    applyConfig({ statuses: saved.config.columns, labels: saved.config.labels, engine: saved.config.engine });
     $('#settingsDialog').close();
     await load();
     if (state.current) await openPanel(state.current.id, { quiet: true });
@@ -390,12 +412,52 @@ $('#settings').addEventListener('click', () => openSettings().catch((err) => hin
 $('#settingsCancel').addEventListener('click', () => $('#settingsDialog').close());
 $('#settingsForm').addEventListener('submit', saveSettings);
 
-api('/api/meta')
-  .then((m) => {
-    applyConfig(m);
-    hint(`工作区 ${m.workspace}`);
+// —— 项目切换 ——
+function renderRecent(recent = state.project.recent) {
+  $('#recentProjects').innerHTML = recent.length
+    ? recent.map((d) => `<button type="button" class="recent-item mono" data-dir="${esc(d)}">${esc(d)}</button>`).join('')
+    : '<div class="empty">还没有最近打开的项目</div>';
+}
+
+async function openProjectDialog() {
+  const p = await api('/api/project').catch(() => state.project);
+  state.project = { dir: p.dir ?? state.project.dir, recent: p.recent ?? [] };
+  renderRecent(state.project.recent);
+  $('#projectForm').dir.value = state.project.dir;
+  $('#projectDialog').showModal();
+}
+
+async function submitProject(event) {
+  event.preventDefault();
+  const dir = String(new FormData(event.target).get('dir') ?? '').trim();
+  try {
+    const p = await api('/api/project', { method: 'POST', body: JSON.stringify({ dir }) });
+    applyProject(p);
+    $('#projectDialog').close();
+    $('#panel').hidden = true;
+    state.current = null;
+    await load();
+    const created = p.created?.length ? `，补充了 ${p.created.join('、')}` : '';
+    hint(`已打开 ${p.dir}${created}`);
+  } catch (err) {
+    hint(`打开失败：${err.message}`, true);
+  }
+}
+
+$('#openProject').addEventListener('click', () => openProjectDialog().catch((e) => hint(e.message, true)));
+$('#projectCancel').addEventListener('click', () => $('#projectDialog').close());
+$('#projectForm').addEventListener('submit', submitProject);
+$('#recentProjects').addEventListener('click', (e) => {
+  const item = e.target.closest('.recent-item');
+  if (item) $('#projectForm').dir.value = item.dataset.dir;
+});
+
+api('/api/project')
+  .then((p) => {
+    applyProject(p);
+    hint(`项目 ${p.dir}`);
   })
-  .catch(() => {});
+  .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
 
 load();
 setInterval(tick, AUTO_REFRESH_MS);

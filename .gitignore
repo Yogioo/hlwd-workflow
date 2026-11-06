@@ -10,3 +10,7 @@
 
 # bd 审计日志：每条命令都会追加，属运行时状态
 .beads/interactions.jsonl
+
+# 项目运行记录不进版本库（配置与提示词要进）
+.hlwd/runs/
+.hlwd/journal.ndjson

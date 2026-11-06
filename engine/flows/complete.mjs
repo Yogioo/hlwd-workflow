@@ -12,7 +12,9 @@ const oneLine = (text, max = 80) => {
 
 export async function complete({ cfg, workdir, issue, runDir, checks = [] }) {
   let commit = null;
-  if (cfg.gitCommit) {
+  const isRepo = (await run('git', ['rev-parse', '--is-inside-work-tree'], { cwd: workdir })).code === 0;
+  if (cfg.gitCommit && !isRepo) log('不是 git 仓库，跳过提交');
+  if (cfg.gitCommit && isRepo) {
     await run('git', ['add', '-A'], { cwd: workdir });
     const staged = await run('git', ['diff', '--cached', '--quiet'], { cwd: workdir });
     if (staged.code !== 0) {

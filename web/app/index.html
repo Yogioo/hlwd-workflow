@@ -124,9 +124,33 @@
           <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
         </div>
 
+        <h3>提示词（存在项目的 .hlwd/prompts/）</h3>
+        <div class="settings-grid one">
+          <label>执行提示词 execute.md
+            <textarea name="prompt_execute" rows="10" spellcheck="false"></textarea>
+          </label>
+          <label>审查提示词 review.md
+            <textarea name="prompt_review" rows="10" spellcheck="false"></textarea>
+          </label>
+        </div>
+
         <menu>
           <button type="button" class="ghost" id="settingsCancel">取消</button>
           <button type="submit" class="primary">保存</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="projectDialog" class="dialog">
+      <form id="projectForm" method="dialog">
+        <h2>打开项目</h2>
+        <p class="dialog-note">填一个本地目录的绝对路径。目录里没有 <code>.hlwd/</code> 就自动建，并把配置与提示词写进去；没有 <code>.beads/</code> 就顺手 <code>bd init</code>。</p>
+        <label>项目目录<input name="dir" placeholder="C:\\projects\\my-app" required /></label>
+        <p class="dialog-note">最近打开</p>
+        <div id="recentProjects" class="recent"></div>
+        <menu>
+          <button type="button" class="ghost" id="projectCancel">取消</button>
+          <button type="submit" class="primary">打开</button>
         </menu>
       </form>
     </dialog>

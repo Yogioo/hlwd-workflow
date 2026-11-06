@@ -1,12 +1,20 @@
-// web 黑盒：把 beads 适配层暴露成一个 HTTP JSON 接口 + 单页看板。
-// 不跑 AI、不写 git、不碰 .beads 里的数据文件。
+// web 黑盒：把「当前项目」的 beads 适配层暴露成 HTTP JSON 接口 + 单页看板。
+// 不跑 AI、不写 git、不碰 .beads 里的数据文件；项目可以随时切换。
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  ensureProject,
+  readProjectConfig,
+  readPrompts,
+  readState,
+  rememberProject,
+  saveProjectConfig,
+  savePrompts,
+} from '../project.mjs';
 import * as beads from './beads.mjs';
-import { readConfig, saveConfig } from './config.mjs';
-import { getRun, journalFor, listRuns } from './runs.mjs';
+import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const PORT = Number(process.env.PORT ?? 3100);
@@ -33,7 +41,7 @@ async function readBody(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 1024 * 1024) throw new Error('请求体超过 1MB');
+    if (size > 4 * 1024 * 1024) throw new Error('请求体超过 4MB');
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
@@ -54,6 +62,37 @@ async function serveStatic(res, urlPath) {
   } catch {
     json(res, 404, { error: `not found: ${urlPath}` });
   }
+}
+
+// —— 当前项目 ——
+let current = null;
+
+function applyProject(dir) {
+  beads.setWorkdir(dir);
+  setProjectDir(dir);
+  commentCache.clear(); // 卡片 id 在不同项目里可能撞车
+}
+
+async function openProject(dir, { remember = false } = {}) {
+  const info = await ensureProject(dir);
+  applyProject(info.dir);
+  current = info;
+  if (remember) await rememberProject(info.dir).catch(() => {});
+  return info;
+}
+
+async function project() {
+  if (!current) {
+    const state = await readState().catch(() => ({ project: null }));
+    await openProject(process.env.HLWD_PROJECT ?? state.project ?? process.cwd());
+  }
+  return current;
+}
+
+async function projectPayload() {
+  const p = await project();
+  const [config, prompts, state] = await Promise.all([readProjectConfig(p.dir), readPrompts(p.dir), readState()]);
+  return { dir: p.dir, created: p.created ?? [], config, prompts, recent: state.recent };
 }
 
 // 搜索：标题 + 描述 + 评论。评论按 issue.updated 缓存，避免每敲一个字都重跑 bd。
@@ -88,26 +127,50 @@ async function route(req, res, url) {
   const { pathname, searchParams } = url;
 
   if (pathname === '/api/meta') {
-    const cfg = await readConfig();
+    const p = await project();
+    const cfg = await readProjectConfig(p.dir);
     return json(res, 200, {
       statuses: cfg.columns,
       labels: cfg.labels,
-      readyLabel: cfg.engine.readyLabel ?? beads.READY_LABEL,
-      workspace: process.cwd(),
+      readyLabel: cfg.engine.readyLabel,
+      workspace: p.dir,
     });
   }
 
-  if (pathname === '/api/settings') {
-    if (req.method === 'GET') return json(res, 200, await readConfig());
-    if (req.method === 'PUT') {
+  if (pathname === '/api/project') {
+    if (req.method === 'GET') return json(res, 200, await projectPayload());
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.dir || typeof body.dir !== 'string') return json(res, 400, { error: '缺少项目目录 dir' });
       try {
-        return json(res, 200, await saveConfig(await readBody(req)));
+        const info = await openProject(body.dir, { remember: true });
+        return json(res, 200, { ...(await projectPayload()), created: info.created });
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
     }
     return json(res, 405, { error: 'method not allowed' });
   }
+
+  if (pathname === '/api/settings') {
+    const p = await project();
+    if (req.method === 'GET') {
+      return json(res, 200, { config: await readProjectConfig(p.dir), prompts: await readPrompts(p.dir) });
+    }
+    if (req.method === 'PUT') {
+      const body = await readBody(req);
+      try {
+        const config = await saveProjectConfig(p.dir, body);
+        const prompts = body.prompts ? await savePrompts(p.dir, body.prompts) : await readPrompts(p.dir);
+        return json(res, 200, { config, prompts });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
+
+  await project(); // 以下接口都作用于当前项目
 
   if (pathname === '/api/issues') {
     if (req.method === 'GET') {
@@ -212,7 +275,13 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`看板：http://${HOST}:${PORT}   （Ctrl+C 停止）`);
-  console.log(`工作区：${process.cwd()}`);
+server.listen(PORT, HOST, async () => {
+  console.log(`看板：http://${HOST}:${PORT}`);
+  try {
+    const p = await project();
+    console.log(`当前项目：${p.dir}`);
+    if (p.created?.length) console.log(`已补齐：${p.created.join('、')}`);
+  } catch (err) {
+    console.error(`项目初始化失败：${err.message}`);
+  }
 });

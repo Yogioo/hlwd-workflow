@@ -1,33 +1,38 @@
 #!/usr/bin/env node
 // 唯一入口。这里只做分发，不含业务逻辑：所有事情都由 beads / web / engine 三个黑盒完成。
+//   node wf.mjs [--project <dir>] [动词]
 //   node wf.mjs            我现在该干什么
-//   node wf.mjs board      看板（建单 / 看追溯）
+//   node wf.mjs board      看板（建单 / 看全链路）
 //   node wf.mjs work       让 AI 干下一张就绪单
 //   node wf.mjs trace <id> 终端看一张单的全链路
 //   node wf.mjs new "标题" [描述]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureProject, readProjectConfig, readState, rememberProject } from './project.mjs';
 import * as beads from './web/beads.mjs';
-import { listRuns } from './web/runs.mjs';
+import { listRuns, setProjectDir } from './web/runs.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST ?? '127.0.0.1';
 const PORT = Number(process.env.PORT ?? 3100);
-const READY = beads.READY_LABEL;
-const LABELS = { open: '待接', in_progress: '执行中', review: '待审', closed: '已完成' };
+const STATE_DIR = path.join(os.homedir(), '.hlwd');
+const PID_FILE = path.join(STATE_DIR, 'board.pid');
+const BOARD_LOG = path.join(STATE_DIR, 'board.log');
 
-const HELP = `用法：node wf.mjs <动词>
+const HELP = `用法：node wf.mjs [--project <目录>] <动词>
 
   （不带参数）        我现在该干什么：工单概况 + 下一步
-  board [--bg]       看板（建单、看追溯）；--bg 后台启动，马上返回
+  board [--bg]       看板（建单、看全链路）；--bg 后台启动，马上返回
   stop               停掉后台看板
   work [参数]        让 AI 干下一张就绪单（--dry / --id <卡片> / --attempts N 原样透传）
   trace <卡片id>     在终端看一张单的执行全链路
-  new <标题> [描述]  建一张单，自动打 ${READY} 标签
+  new <标题> [描述]  建一张单，自动打可派标签
 
-npm start = board，npm run engine = work
+--project 不给就用上次打开的项目（~/.hlwd/state.json），首次打开会自动建 .hlwd/ 与 .beads/。
+npm start = board --bg，npm run engine = work
 `;
 
 const time = (at) => {
@@ -67,37 +72,53 @@ async function boardOnline() {
   }
 }
 
-async function status() {
-  const issues = await beads.listIssues({ all: true });
-  const counts = beads.STATUSES.map((s) => [s, issues.filter((i) => i.status === s).length]);
-  const ready = issues.filter((i) => i.status === 'open' && i.labels.includes(READY));
-  const running = issues.filter((i) => i.status !== 'open' && i.status !== 'closed' && i.labels.includes(READY));
+/** 解析项目：--project > 上次打开的项目 > 当前目录；顺手补齐 .hlwd/ 与 .beads/。 */
+async function useProject(explicitDir) {
+  const state = await readState();
+  const dir = path.resolve(explicitDir ?? state.project ?? process.cwd());
+  const info = await ensureProject(dir);
+  beads.setWorkdir(dir);
+  setProjectDir(dir);
+  const cfg = await readProjectConfig(dir);
+  return { dir, info, cfg };
+}
 
-  console.log(`工单 ${issues.length} 张：${counts.map(([s, n]) => `${LABELS[s]} ${n}`).join(' · ')}`);
+const statusName = (cfg, s) => cfg.labels.statuses[s] ?? s;
+const prioName = (cfg, p) => cfg.labels.priorities[p] ?? `P${p}`;
+
+async function status({ dir, cfg, info }) {
+  const issues = await beads.listIssues({ all: true });
+  const readyLabel = cfg.engine.readyLabel;
+  const counts = cfg.columns.map((s) => [s, issues.filter((i) => i.status === s).length]);
+  const ready = issues.filter((i) => i.status === 'open' && i.labels.includes(readyLabel));
+  const running = issues.filter((i) => i.status !== 'open' && i.status !== 'closed' && i.labels.includes(readyLabel));
+
+  console.log(`项目 ${dir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
+  console.log(`工单 ${issues.length} 张：${counts.map(([s, n]) => `${statusName(cfg, s)} ${n}`).join(' · ')}`);
   console.log(`就绪 ${ready.length} 张${running.length ? `，另有 ${running.length} 张在流水线里` : ''}`);
-  for (const issue of ready.slice(0, 5)) console.log(`  · ${issue.id}  ${issue.title}`);
+  for (const issue of ready.slice(0, 5)) console.log(`  · ${issue.id}  ${issue.title}  [${prioName(cfg, issue.priority)}]`);
   if (ready.length > 5) console.log(`  … 还有 ${ready.length - 5} 张`);
 
   const online = await boardOnline();
   console.log(`\n看板 ${online ? `在线 http://${HOST}:${PORT}` : '未启动'}`);
 
   console.log('\n下一步');
-  if (!online) console.log('  node wf.mjs board            起看板，建单 / 看追溯');
+  if (!online) console.log('  node wf.mjs board            起看板，建单 / 看全链路');
   if (ready.length) console.log('  node wf.mjs work             让 AI 干下一张就绪单');
   else console.log('  先在看板里建单（或 node wf.mjs new "标题"），再 work');
 }
 
-async function trace(id) {
-  if (!id) throw new Error('用法：node wf.mjs trace <卡片id>');
-  const { issue } = await beads.getIssue(id);
-  const [history, runs] = await Promise.all([beads.listStatusHistory(id), listRuns(id)]);
+async function trace(cardId, cfg) {
+  if (!cardId) throw new Error('用法：node wf.mjs trace <卡片id>');
+  const { issue } = await beads.getIssue(cardId);
+  const [history, runs] = await Promise.all([beads.listStatusHistory(cardId), listRuns(cardId)]);
 
   console.log(`${issue.id}  ${issue.title}`);
-  console.log(`状态 ${LABELS[issue.status] ?? issue.status}（${issue.status}） · 负责人 ${issue.assignee || '—'} · P${issue.priority}`);
+  console.log(`状态 ${statusName(cfg, issue.status)}（${issue.status}） · 负责人 ${issue.assignee || '—'} · 优先级 ${prioName(cfg, issue.priority)}`);
 
   if (history.length) {
     console.log('\n状态变更');
-    for (const h of history) console.log(`  ${time(h.at)}  ${h.status}${h.assignee ? ` · ${h.assignee}` : ''}`);
+    for (const h of history) console.log(`  ${time(h.at)}  ${statusName(cfg, h.status)}${h.assignee ? ` · ${h.assignee}` : ''}`);
   }
 
   if (!runs.length) {
@@ -119,11 +140,11 @@ async function trace(id) {
       if ((r.checks ?? []).length > 3) console.log(`       … 共 ${r.checks.length} 条验证，见 run.json`);
     }
     if (run.reason) console.log(`  结局 ${run.outcome} — ${String(run.reason).split('\n')[0].slice(0, 150)}`);
-    console.log(`  产物 .engine/runs/${run.runId}/`);
+    console.log(`  产物 .hlwd/runs/${run.runId}/`);
   }
 }
 
-async function newCard(args) {
+async function newCard(args, cfg) {
   const [title, ...rest] = args;
   if (!title) throw new Error('用法：node wf.mjs new "标题" [描述]');
   const issue = await beads.createIssue({
@@ -131,87 +152,115 @@ async function newCard(args) {
     description: rest.join(' '),
     type: 'task',
     priority: 2,
-    labels: [READY],
+    labels: [cfg.engine.readyLabel],
   });
   console.log(`已建单 ${issue.id}  ${issue.title}`);
   console.log(`下一步：node wf.mjs work         （或 node wf.mjs work --id ${issue.id}）`);
 }
 
-async function main() {
-  const [verb, ...rest] = process.argv.slice(2);
+async function board(projectDir, bg) {
+  const url = `http://${HOST}:${PORT}`;
 
+  if (await boardOnline()) {
+    console.log(`看板已经在跑：${url}`);
+    openBrowser(url);
+    return 0;
+  }
+
+  if (bg) {
+    await fs.mkdir(STATE_DIR, { recursive: true });
+    const log = await fs.open(BOARD_LOG, 'a');
+    const env = { ...process.env, HLWD_PROJECT: projectDir };
+    const proc = spawn(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
+      cwd: projectDir,
+      detached: true,
+      stdio: ['ignore', log.fd, log.fd],
+      env,
+    });
+    proc.unref();
+    await fs.writeFile(PID_FILE, String(proc.pid), 'utf8');
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (await boardOnline()) break;
+    }
+    console.log(`看板已在后台启动：${url}`);
+    console.log(`项目 ${projectDir}`);
+    console.log(`日志 ${BOARD_LOG}    停止 node wf.mjs stop`);
+    openBrowser(url);
+    return 0;
+  }
+
+  setTimeout(() => openBrowser(url), 700);
+  return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
+    cwd: projectDir,
+    env: { ...process.env, HLWD_PROJECT: projectDir },
+  });
+}
+
+async function stop() {
+  let pid = 0;
+  try {
+    pid = Number((await fs.readFile(PID_FILE, 'utf8')).trim());
+  } catch {
+    // 没 pid 文件，靠端口判断
+  }
+  if (pid) {
+    try {
+      process.kill(pid);
+    } catch {
+      // 进程已经不在了
+    }
+    await fs.rm(PID_FILE, { force: true });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  console.log((await boardOnline()) ? '没停掉（可能是前台启动的）：用 Ctrl+C 或关掉那个终端' : '看板已停止');
+  return 0;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  let explicitProject = null;
+  const rest = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const [flag, inline] = argv[i].split('=');
+    if (flag === '--project') {
+      explicitProject = inline ?? argv[i + 1];
+      if (inline === undefined) i += 1;
+    } else {
+      rest.push(argv[i]);
+    }
+  }
+
+  const [verb, ...verbArgs] = rest;
   if (verb === '-h' || verb === '--help' || verb === 'help') {
     console.log(HELP);
     return 0;
   }
   if (!verb) {
-    await status();
+    await status(await useProject(explicitProject));
     return 0;
   }
 
   if (verb === 'board') {
-    const url = `http://${HOST}:${PORT}`;
-    const pidFile = path.join(ROOT, '.engine', 'board.pid');
+    const { dir } = await useProject(explicitProject);
+    await rememberProject(dir).catch(() => {});
+    return board(dir, verbArgs.includes('--bg'));
+  }
+  if (verb === 'stop') return stop();
 
-    if (await boardOnline()) {
-      console.log(`看板已经在跑：${url}`);
-      openBrowser(url);
-      return 0;
-    }
-
-    if (rest.includes('--bg')) {
-      await fs.mkdir(path.dirname(pidFile), { recursive: true });
-      const logFile = path.join(path.dirname(pidFile), 'board.log');
-      const log = await fs.open(logFile, 'a');
-      const proc = spawn(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
-        cwd: process.cwd(),
-        detached: true,
-        stdio: ['ignore', log.fd, log.fd],
-      });
-      proc.unref();
-      await fs.writeFile(pidFile, String(proc.pid), 'utf8');
-      for (let i = 0; i < 40; i += 1) {
-        await new Promise((r) => setTimeout(r, 100));
-        if (await boardOnline()) break;
-      }
-      console.log(`看板已在后台启动：${url}`);
-      console.log(`日志 .engine/board.log    停止 node wf.mjs stop`);
-      openBrowser(url);
-      return 0;
-    }
-
-    setTimeout(() => openBrowser(url), 700);
-    return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')]);
+  if (verb === 'work' || verb === 'run') {
+    const { dir } = await useProject(explicitProject);
+    await rememberProject(dir).catch(() => {});
+    return child(process.execPath, [path.join(ROOT, 'engine', 'run.mjs'), '--project', dir, ...verbArgs]);
   }
 
-  if (verb === 'stop') {
-    const pidFile = path.join(ROOT, '.engine', 'board.pid');
-    let pid = 0;
-    try {
-      pid = Number((await fs.readFile(pidFile, 'utf8')).trim());
-    } catch {
-      // 没 pid 文件，靠端口判断
-    }
-    if (pid) {
-      try {
-        process.kill(pid);
-      } catch {
-        // 进程已经不在了
-      }
-      await fs.rm(pidFile, { force: true });
-    }
-    await new Promise((r) => setTimeout(r, 300));
-    console.log((await boardOnline()) ? '没停掉（可能是前台启动的）：用 Ctrl+C 或关掉那个终端' : '看板已停止');
-    return 0;
-  }
-
-  if (verb === 'work' || verb === 'run') return child(process.execPath, [path.join(ROOT, 'engine', 'run.mjs'), ...rest]);
+  const project = await useProject(explicitProject);
   if (verb === 'trace') {
-    await trace(rest[0]);
+    await trace(verbArgs[0], project.cfg);
     return 0;
   }
   if (verb === 'new') {
-    await newCard(rest);
+    await newCard(verbArgs, project.cfg);
     return 0;
   }
 

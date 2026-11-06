@@ -11,7 +11,7 @@ export async function review({ cfg, workdir, issue, runDir, attempt }) {
 
   await fs.writeFile(
     promptFile,
-    render(await readPrompt('review'), {
+    render(await readPrompt('review', workdir), {
       ID: issue.id,
       TITLE: issue.title,
       BODY: issue.body || '（工单没有正文，按标题判定）',

@@ -2,9 +2,11 @@
 // engine 入口：接一张单，走完 接单 → 执行 → 审查 → 完成。
 //   node engine/run.mjs                 # 接下一张 ready 单
 //   node engine/run.mjs --dry           # 只看会接哪张，不动数据
+//   node engine/run.mjs --project <dir> # 指定项目目录（默认当前目录）
 //   node engine/run.mjs --id hlwd-abc   # 指定工单（已被接单时用）
 //   node engine/run.mjs --attempts 1 --allow-dirty
 import path from 'node:path';
+import { ensureProject } from '../project.mjs';
 import * as beads from '../web/beads.mjs';
 import { complete, handback } from './flows/complete.mjs';
 import { claim, claimNext, listCandidates } from './flows/claim.mjs';
@@ -14,15 +16,29 @@ import { loadConfig, log, run } from './lib.mjs';
 import { clip, createManifest, finish } from './manifest.mjs';
 
 function parseArgs(argv) {
-  const args = { dry: false, id: null, attempts: null, allowDirty: false };
+  const args = { dry: false, id: null, attempts: null, allowDirty: false, project: null };
   for (let i = 0; i < argv.length; i += 1) {
-    const [flag, inline] = argv[i].split('=');
-    const value = inline ?? argv[i + 1];
-    if (flag === '--dry') args.dry = true;
-    else if (flag === '--allow-dirty') args.allowDirty = true;
-    else if (flag === '--id') args.id = value;
-    else if (flag === '--attempts') args.attempts = Number(value);
-    else throw new Error(`未知参数：${argv[i]}`);
+    const token = argv[i];
+    const flag = token.split('=')[0];
+    if (flag === '--dry') {
+      args.dry = true;
+      continue;
+    }
+    if (flag === '--allow-dirty') {
+      args.allowDirty = true;
+      continue;
+    }
+    if (['--project', '--id', '--attempts'].includes(flag)) {
+      const inline = token.includes('=') ? token.slice(flag.length + 1) : null;
+      const value = inline ?? argv[i + 1];
+      if (inline === null) i += 1; // 吃掉值，别把它当参数
+      if (value === undefined) throw new Error(`${flag} 需要一个值`);
+      if (flag === '--project') args.project = value;
+      else if (flag === '--id') args.id = value;
+      else args.attempts = Number(value);
+      continue;
+    }
+    throw new Error(`未知参数：${token}`);
   }
   return args;
 }
@@ -30,7 +46,12 @@ function parseArgs(argv) {
 async function assertClean(workdir, allowDirty) {
   const res = await run('git', ['status', '--porcelain'], { cwd: workdir });
   if (res.code !== 0) return; // 不是 git 仓库就不拦
-  const dirty = res.out.trim();
+  // .hlwd/ 是工具自身的配置与运行记录，不算"项目脏改动"
+  const dirty = res.out
+    .split('\n')
+    .filter((line) => line.trim() && !/^\s*\S+\s+\.hlwd\//.test(line))
+    .join('\n')
+    .trim();
   if (dirty && !allowDirty) {
     console.error('工作区不干净，脏改动会被算进这张单的提交。先处理，或加 --allow-dirty。\n');
     console.error(dirty);
@@ -40,8 +61,14 @@ async function assertClean(workdir, allowDirty) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const cfg = await loadConfig();
-  const workdir = process.cwd();
+  const workdir = path.resolve(args.project ?? process.cwd());
+
+  // 项目缺 .hlwd/ 或 .beads/ 就补齐；engine 的所有路径都以项目目录为基准
+  const info = await ensureProject(workdir);
+  beads.setWorkdir(workdir);
+  log(`项目 ${workdir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
+
+  const cfg = await loadConfig(workdir);
   const attempts = args.attempts ?? cfg.attempts;
 
   if (args.dry) {

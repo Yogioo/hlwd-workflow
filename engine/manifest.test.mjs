@@ -26,7 +26,7 @@ test('createManifest 落盘 run.json，初始 outcome 为 running', async () => 
   await withTempWorkdir(async (workdir) => {
     const { manifest, dir } = await createManifest({ workdir, cfg, issue });
 
-    assert.equal(dir, path.join(workdir, '.engine', 'runs', manifest.runId));
+    assert.equal(dir, path.join(workdir, '.hlwd', 'runs', manifest.runId));
     const saved = await readRunJson(dir);
     assert.equal(saved.card.id, 't-1');
     assert.equal(saved.outcome, 'running');
@@ -40,7 +40,7 @@ test('journal 追加一行合法 JSON，带 event/card/run/at', async () => {
 
     await journal('start', { mode: 'queue' });
 
-    const file = path.join(workdir, '.engine', 'journal.ndjson');
+    const file = path.join(workdir, '.hlwd', 'journal.ndjson');
     const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean);
     assert.equal(lines.length, 1);
 

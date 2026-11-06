@@ -202,3 +202,10 @@ textarea { width: 100%; resize: vertical; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 8px 12px; }
 .settings-grid .chk-row { flex-direction: row; align-items: center; gap: 6px; }
 .settings-grid label input, .settings-grid label select { width: 100%; }
+
+/* 项目栏 */
+.project { color: var(--muted); max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.recent-item { text-align: left; padding: 6px 8px; font-size: 12px; }
+.settings-grid.one { grid-template-columns: 1fr; }
+.settings-grid textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }

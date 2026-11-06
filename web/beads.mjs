@@ -19,6 +19,17 @@ export class BeadsError extends Error {
 
 const WIN = process.platform === 'win32';
 
+// 当前项目目录：所有 bd 命令都在它下面跑。多项目靠 setWorkdir 切换。
+let workdir = process.cwd();
+
+export function setWorkdir(dir) {
+  workdir = path.resolve(dir);
+}
+
+export function getWorkdir() {
+  return workdir;
+}
+
 // bd 在 Windows 上只是 .cmd 壳，spawn 不了；优先用 npm 包里的原生 exe。
 function bdBin() {
   if (process.env.BD_BIN) return process.env.BD_BIN;
@@ -31,7 +42,7 @@ function bdBin() {
 }
 
 // 参数走数组、正文走 stdin，不经过 shell，因此中文/引号/管道符都安全。
-function run(args, { input, cwd = process.cwd() } = {}) {
+function run(args, { input, cwd = workdir } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(bdBin(), args, { cwd, windowsHide: true });
     let out = '';
