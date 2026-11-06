@@ -52,6 +52,11 @@ test('心跳写入后能读回来；pid 已死则 running=false', async () => {
     assert.equal(dead.running, false, '进程不在了就不能算在跑');
     assert.equal(dead.pid, 999999);
     assert.equal(dead.card, 'hlwd-abc');
+
+    // pid 活着但已经收工：别谎报「还在跑」，否则看板挡着不让重新启动
+    await writeWatch(dir, { pid: process.pid, state: 'stopped', stoppedAt: new Date().toISOString() });
+    const done = await readWatch(dir);
+    assert.equal(done.running, false, 'state=stopped 就不算在跑，哪怕 pid 被复用');
   });
 });
 

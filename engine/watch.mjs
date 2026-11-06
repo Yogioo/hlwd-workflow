@@ -54,12 +54,13 @@ const readJson = async (file) => {
   }
 };
 
-/** 读状态：running 以「pid 还活着」为准，文件只是线索；stopping 看有没有 stop 文件。 */
+/** 读状态：running 要 pid 活着**且**没被标成 stopped；文件只是线索，stopping 看有没有 stop 文件。
+ *  只看 pid 会撒谎：进程退了但 pid 被别人复用，看板就会显示「已开」，还会挡住下一次启动。 */
 export async function readWatch(dir) {
   const raw = (await readJson(stateFile(dir))) ?? null;
   const stopping = await stopRequested(dir);
   if (!raw) return { running: false, stopping: false, state: 'stopped', project: path.resolve(dir) };
-  return { ...raw, stopping, running: alive(raw.pid) };
+  return { ...raw, stopping, running: raw.state !== 'stopped' && alive(raw.pid) };
 }
 
 export async function writeWatch(dir, patch) {
