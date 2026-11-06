@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as beads from './beads.mjs';
+import { getRun, listRuns } from './runs.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const PORT = Number(process.env.PORT ?? 3100);
@@ -90,15 +91,17 @@ async function route(req, res, url) {
     return json(res, 405, { error: 'method not allowed' });
   }
 
-  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments)?$/);
+  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history)?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
-    if (m[2]) {
+    if (m[2] === '/comments') {
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
       const body = await readBody(req);
       const comments = await beads.commentIssue(id, body.text);
       return json(res, 200, { comments });
     }
+    if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
+    if (m[2] === '/history') return json(res, 200, { history: await beads.listStatusHistory(id) });
     if (req.method === 'GET') return json(res, 200, await beads.getIssue(id));
     if (req.method === 'PATCH') {
       const body = await readBody(req);
@@ -114,6 +117,18 @@ async function route(req, res, url) {
       return json(res, 200, { issue });
     }
     return json(res, 405, { error: 'method not allowed' });
+  }
+
+  if (pathname === '/api/runs') {
+    const cardId = searchParams.get('card');
+    if (!cardId) return json(res, 400, { error: '缺少 card 参数' });
+    return json(res, 200, { runs: await listRuns(cardId) });
+  }
+
+  const runMatch = pathname.match(/^\/api\/runs\/([^/]+)$/);
+  if (runMatch) {
+    const run = await getRun(decodeURIComponent(runMatch[1]));
+    return run ? json(res, 200, { run }) : json(res, 404, { error: '运行记录不存在' });
   }
 
   if (pathname.startsWith('/api/')) return json(res, 404, { error: 'unknown api' });

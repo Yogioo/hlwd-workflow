@@ -86,6 +86,58 @@ async function openPanel(id) {
   $('#panelComments').innerHTML = comments
     .map((c) => `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="comment-text">${esc(c.text)}</div></div>`)
     .join('') || '<div class="empty">还没有评论</div>';
+
+  const [runs, history] = await Promise.all([
+    api(`/api/issues/${encodeURIComponent(id)}/runs`).then((d) => d.runs).catch(() => []),
+    api(`/api/issues/${encodeURIComponent(id)}/history`).then((d) => d.history).catch(() => []),
+  ]);
+  renderTrace({ runs, history });
+}
+
+const fmtTime = (at) => String(at ?? '').replace('T', ' ').slice(0, 16) || '—';
+const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
+
+// 追溯面板：beads 的状态变更（bd history）+ engine 的 run.json 时间线
+function renderTrace({ runs, history }) {
+  const blocks = [];
+
+  if (history.length) {
+    blocks.push(`<div class="trace-block">
+      <div class="trace-title">状态变更（bd history）</div>
+      ${history.map((h) => `<div class="trace-line"><span class="mono">${fmtTime(h.at)}</span> <b>${esc(h.status)}</b>${h.assignee ? `<span class="dot">·</span>${esc(h.assignee)}` : ''}</div>`).join('')}
+    </div>`);
+  }
+
+  if (!runs.length) {
+    blocks.push('<div class="trace-block"><div class="empty">还没有 engine 运行记录（.engine/runs）</div></div>');
+  }
+
+  for (const run of runs) {
+    const steps = [`<div class="trace-line"><span class="mono">${fmtTime(run.startedAt)}</span> 接单（${esc(run.actor ?? '')} / ${esc(run.runner ?? '')}）</div>`];
+    for (const a of run.attempts ?? []) {
+      const e = a.execute ?? {};
+      steps.push(`<div class="trace-line"><span class="mono">${fmtTime(e.startedAt)}</span> 执行 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(e.ms)}<span class="dot">·</span>${e.ok ? 'ok' : '<b class="fail">失败</b>'}</div>`);
+      if (!e.ok && e.error) steps.push(`<div class="trace-sub">${esc(e.error)}</div>`);
+
+      const r = a.review;
+      if (r) {
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${esc(r.reason ?? '')}</div>`);
+        if (r.checks?.length) {
+          steps.push(`<details class="trace-checks"><summary>验证 ${r.checks.length} 条</summary>${r.checks.map((c) => `<div>${esc(c)}</div>`).join('')}</details>`);
+        }
+      }
+    }
+    if (run.commit) steps.push(`<div class="trace-line">提交 <span class="mono">${esc(run.commit)}</span></div>`);
+    steps.push(`<div class="trace-line">结局 <b>${esc(run.outcome)}</b>${run.reason ? `<span class="dot">·</span>${esc(run.reason)}` : ''}</div>`);
+
+    blocks.push(`<div class="trace-block">
+      <div class="trace-title mono">${esc(run.runId)}</div>
+      ${steps.join('')}
+      <div class="trace-foot">.engine/runs/${esc(run.runId)}/</div>
+    </div>`);
+  }
+
+  $('#panelTrace').innerHTML = blocks.join('');
 }
 
 async function patch(fields) {

@@ -126,3 +126,21 @@ textarea { width: 100%; resize: vertical; }
 .dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .dialog label input, .dialog label select, .dialog label textarea { color: var(--fg); }
 .dialog menu { display: flex; justify-content: end; gap: 8px; padding: 0; margin: 6px 0 0; }
+
+/* 追溯面板：beads 状态变更 + engine 运行时间线 */
+.trace { display: flex; flex-direction: column; gap: 10px; }
+.trace-block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #0b0d11;
+}
+.trace-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.trace-line { padding: 2px 0; word-break: break-word; }
+.trace-sub { color: var(--muted); font-size: 12px; padding-left: 12px; }
+.trace-foot { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.trace-checks { color: var(--muted); font-size: 12px; margin: 4px 0 4px 12px; }
+.trace-checks summary { cursor: pointer; }
+.trace-checks div { padding: 2px 0 2px 10px; border-left: 1px solid var(--line); }
+.pass { color: #4ade80; }
+.fail { color: var(--warn); }

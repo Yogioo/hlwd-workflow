@@ -145,3 +145,22 @@ export async function commentIssue(id, text) {
   await run(['comment', id, '--stdin'], { input: text });
   return listComments(id);
 }
+
+/** 状态变更时间轴：只保留 status 变了的节点，老 → 新。bd history 自带，零额外存储。 */
+export async function listStatusHistory(id, limit = 50) {
+  const rows = await bdJson(['history', id, '--json', '--limit', String(limit)]);
+  const entries = (Array.isArray(rows) ? rows : [])
+    .map((r) => ({
+      at: r.CommitDate ?? '',
+      status: r.Issue?.status ?? '',
+      priority: r.Issue?.priority ?? '',
+      assignee: r.Issue?.assignee ?? '',
+    }))
+    .reverse();
+  const changes = [];
+  for (const entry of entries) {
+    const prev = changes[changes.length - 1];
+    if (!prev || prev.status !== entry.status) changes.push(entry);
+  }
+  return changes;
+}

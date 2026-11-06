@@ -46,6 +46,17 @@ run(promptFile, workdir, sandbox) -> {status, outDir, events}
 
 **验收归 engine。** 是否通过由 §4 状态机 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
+**RunTrace**（只读端口：`web` 读 engine 的运行记录）
+
+```
+.engine/runs/<cardId>-<ts>/run.json   # 一次运行：卡片快照 / attempts / verdict / commit / outcome
+.engine/journal.ndjson                # 全部运行的事件流，append-only，一行一事件
+```
+
+- 这两处是**产物，不是状态**：真相源仍然只有 beads。删掉它们，工单照样成立（只是追溯变模糊）。
+- 写方只有 `engine`（append-only，不改历史）；读方只有 `web`。`web` 不读 engine 的代码，只读这两个路径。
+- 归档/清理是人的事，engine 不自动删。
+
 ## 4. 状态机（就这四个，别加）
 
 ```
@@ -68,11 +79,13 @@ package.json       # 只有 scripts，没有依赖
 .beads/            # 唯一真相源，进版本库
 web/               # 页面 + beads 适配层
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
+  runs.mjs         # 只读端口：把 .engine/runs/*/run.json 给看板
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
   app/             # 单页看板：index.html / app.js / style.css，无构建
 engine/            # 流程编排：claim / execute / review / complete
   run.mjs          # 入口：接一张单走完流程，一次只跑一张
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run（不碰 beads）
+  manifest.mjs     # 写 run.json 与 journal.ndjson（可追溯）
   config.json      # runner / sandbox / 重试次数，改这里不改代码
   flows/           # 一个阶段一个文件，一个文件一个职责
     claim.mjs      #   接单：open + ready → in_progress
@@ -83,7 +96,7 @@ engine/            # 流程编排：claim / execute / review / complete
   skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
 ```
 
-运行产物写 `.engine/runs/<卡片id>-<时间戳>/`，已 gitignore：里面是 prompt、`verdict-N.json`、每次 agent 回合的 events。
+运行产物写 `.engine/runs/<卡片id>-<时间戳>/`，已 gitignore：里面是 prompt、`verdict-N.json`、每次 agent 回合的 events，以及人类读的 `run.json`。提交信息带 `Card:` / `Run:` 两个 trailer，反查用 `git log --grep='^Card: <id>'`。
 
 新目录出现前先问：它是不是上面三个模块之一？不是就别建。模块内的分层（`flows/` 怎么拆）由该模块自己的 `AGENTS.md` 决定，本文件不越界。
 
