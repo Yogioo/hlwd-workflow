@@ -49,8 +49,15 @@ async function api(path, options = {}) {
 
 function hint(text, isError = false) {
   const el = $('#hint');
+  const changed = el.textContent !== text;
   el.textContent = text;
   el.classList.toggle('err', isError);
+  // 自动刷新每 5s 会调一次，只有内容真的变了才闪，否则一直闪像坏了
+  if (changed) {
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
 }
 
 function applyConfig(cfg) {
@@ -90,26 +97,90 @@ function fillPrioritySelect(select, selected) {
     .join('');
 }
 
+// 空列不是「—」，是告诉你这一列现在该放什么
+const laneEmpty = (status) => {
+  if (state.filter.ready || state.filter.q) return '没有符合当前筛选的单。';
+  return (
+    {
+      open: '没有待接的单。新建一张，或把别的卡拖过来。',
+      in_progress: '没有在跑的单。',
+      review: '没有等验收的单。',
+      closed: '还没有完成的单。',
+    }[status] ?? '这里空着。'
+  );
+};
+
+/** 一张卡：标题是主体，id 和类型退到脚注，别抢视线。 */
 function card(issue) {
   const labels = issue.labels.map(chip).join('');
-  return `<article class="card" data-id="${esc(issue.id)}">
-    <div class="card-id mono">${esc(issue.id)}</div>
-    <div class="card-title">${esc(issue.title)}</div>
+  return `<article class="card" data-id="${esc(issue.id)}" tabindex="0" draggable="true" title="拖到别的列就能改状态">
+    <div class="card-top">
+      <div class="card-title">${esc(issue.title)}</div>
+      <span class="card-prio mono" data-prio="${esc(issue.priority)}">${esc(prioLabel(issue.priority))}</span>
+    </div>
     ${labels ? `<div class="chips">${labels}</div>` : ''}
-    <div class="card-foot">${esc(issue.type)} · ${esc(prioLabel(issue.priority))} · 💬 ${esc(issue.commentCount)}</div>
+    <div class="card-foot">
+      <span class="mono">${esc(issue.type)}</span>
+      ${issue.commentCount ? `<span class="mono">${esc(issue.commentCount)} 条评论</span>` : ''}
+      <span class="card-id mono">${esc(issue.id)}</span>
+    </div>
   </article>`;
 }
 
+/** 卡片换列时从旧位置滑到新位置：只动真正挪窝的那几张。 */
+function animateMoves(prev) {
+  if (!prev.size || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  for (const el of $('#board').querySelectorAll('.card')) {
+    const before = prev.get(el.dataset.id);
+    if (!before) continue;
+    const after = el.getBoundingClientRect();
+    const dx = before.left - after.left;
+    const dy = before.top - after.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], {
+      duration: 340,
+      easing: 'cubic-bezier(.2,.7,.3,1)',
+    });
+  }
+}
+
 function render() {
+  const board = $('#board');
+  const prev = new Map();
+  for (const el of board.querySelectorAll('.card')) prev.set(el.dataset.id, el.getBoundingClientRect());
+
   const issues = state.issues.filter((i) => !state.filter.ready || i.labels.includes(state.readyLabel));
-  $('#board').innerHTML = state.statuses
-    .map((status) => {
+  board.innerHTML = state.statuses
+    .map((status, i) => {
       const list = issues.filter((i) => i.status === status);
-      return `<section class="col">
-        <h2>${esc(statusLabel(status))} <span class="count">${list.length}</span></h2>
-        <div class="col-body">${list.map(card).join('') || '<div class="empty">—</div>'}</div>
+      return `<section class="col" data-status="${esc(status)}" style="--i:${i}">
+        <div class="col-head">
+          <h2 class="col-name">${esc(statusLabel(status))}</h2>
+          <span class="col-count mono">${list.length}</span>
+        </div>
+        <div class="col-body${list.length ? '' : ' is-empty'}">${list.map(card).join('') || `<div class="col-empty">${esc(laneEmpty(status))}</div>`}</div>
       </section>`;
     })
+    .join('');
+  delete board.dataset.loading;
+  animateMoves(prev);
+}
+
+/** 数据没回来之前先把四条列画出来，不让人对着一片空白的板。 */
+function renderSkeleton() {
+  const board = $('#board');
+  if (board.querySelector('.card')) return;
+  board.dataset.loading = '1';
+  board.innerHTML = state.statuses
+    .map(
+      (status, i) => `<section class="col" data-status="${esc(status)}" style="--i:${i}">
+        <div class="col-head">
+          <h2 class="col-name">${esc(statusLabel(status))}</h2>
+          <span class="col-count mono">·</span>
+        </div>
+        <div class="col-body"></div>
+      </section>`,
+    )
     .join('');
 }
 
@@ -135,9 +206,10 @@ async function load() {
 /** 自动流水线开关：关 → 点一下开；开 → 点一下请求停（跑完手上这张）；停不下来再点就强杀 */
 function renderWatch() {
   const btn = $('#watch');
+  const label = $('#watchText');
   const w = state.watch ?? { running: false };
   const busy = w.running && w.state === 'running' && w.card;
-  btn.textContent = w.stopping
+  label.textContent = w.stopping
     ? '自动流水线：停止中（点一下强杀）'
     : w.running
       ? `自动流水线：开${busy ? `（${w.card}）` : '（等单）'}`
@@ -159,7 +231,7 @@ async function toggleWatch() {
   const action = w.stopping ? 'force' : w.running ? 'stop' : 'start';
   const btn = $('#watch');
   btn.disabled = true;
-  btn.textContent = action === 'start' ? '启动中…' : '停止中…';
+  $('#watchText').textContent = action === 'start' ? '启动中…' : '停止中…';
   try {
     const { watch } = await api('/api/watch', { method: 'POST', body: JSON.stringify({ action }) });
     state.watch = watch;
@@ -180,23 +252,32 @@ async function toggleWatch() {
   }
 }
 
+// 面板开了又关、或者换了一张卡时，早先发出的请求回来不能让面板又弹开
+let panelToken = 0;
+
 async function openPanel(id, { quiet = false } = {}) {
+  const token = ++panelToken;
   const [{ issue, comments }, attachments] = await Promise.all([
     api(`/api/issues/${encodeURIComponent(id)}`),
     api(`/api/issues/${encodeURIComponent(id)}/attachments`)
       .then((d) => d.attachments)
       .catch(() => []),
   ]);
+  if (token !== panelToken) return; // 拉数据这期间面板被关了 / 换了别的卡
+  const panel = $('#panel');
+  const wasHidden = panel.hidden;
   state.current = issue;
-  $('#panel').hidden = false;
+  panel.hidden = false;
+  panel.dataset.status = issue.status; // 面板顶上那道状态线
+  if (wasHidden) requestAnimationFrame(() => panel.classList.add('is-open'));
   $('#panelId').textContent = issue.id;
   $('#panelTitle').textContent = issue.title;
   $('#panelMeta').innerHTML = [
-    `类型 ${esc(issue.type)}`,
-    `负责人 ${esc(issue.assignee || '—')}`,
-    `更新 ${esc(issue.updated)}`,
-    issue.labels.map(chip).join(' '),
-  ].join('<span class="dot">·</span>');
+    `<span class="meta-item"><i>类型</i>${esc(issue.type)}</span>`,
+    `<span class="meta-item"><i>负责人</i>${esc(issue.assignee || '—')}</span>`,
+    `<span class="meta-item"><i>更新</i>${esc(fmtTime(issue.updated))}</span>`,
+    issue.labels.map(chip).join(''),
+  ].join('');
   $('#panelStatus').innerHTML = state.statuses
     .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
     .join('');
@@ -208,7 +289,7 @@ async function openPanel(id, { quiet = false } = {}) {
     comments
       .map(
         (c) =>
-          `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="md">${md(c.text)}</div></div>`,
+          `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(fmtTime(c.created))}</div><div class="md">${md(c.text)}</div></div>`,
       )
       .join('') || '<div class="empty">还没有评论</div>';
 
@@ -452,14 +533,15 @@ function renderTrace({ runs, history }) {
   $('#panelTrace').innerHTML = blocks.join('');
 }
 
-async function patch(fields) {
-  if (!state.current) return false;
+async function patch(fields, id = state.current?.id) {
+  if (!id) return false;
   try {
-    await api(`/api/issues/${encodeURIComponent(state.current.id)}`, {
+    await api(`/api/issues/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(fields),
     });
-    await Promise.all([load(), openPanel(state.current.id, { quiet: true })]);
+    await load();
+    if (state.current?.id === id) await openPanel(id, { quiet: true });
     return true;
   } catch (e) {
     hint(`改动失败：${e.message}`, true);
@@ -560,9 +642,75 @@ async function saveSettings(event) {
   }
 }
 
+/** 关面板：先播退场动画，真的关掉了才隐藏（否则动画看不到）。 */
+function closePanel() {
+  const panel = $('#panel');
+  panelToken += 1; // 作废在飞的刷新
+  panel.classList.remove('is-open');
+  state.current = null;
+  state.trace = null;
+  setTimeout(() => {
+    if (state.current) return; // 280ms 内又点开了别的卡，别把它藏了
+    panel.hidden = true;
+  }, 280);
+}
+
 $('#board').addEventListener('click', (e) => {
   const el = e.target.closest('.card');
   if (el) openPanel(el.dataset.id).catch((err) => hint(err.message, true));
+});
+// 卡片可以用键盘打开：Tab 过去，回车 / 空格
+$('#board').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const el = e.target.closest?.('.card');
+  if (!el) return;
+  e.preventDefault();
+  openPanel(el.dataset.id).catch((err) => hint(err.message, true));
+});
+
+// —— 拖卡片到别的列 = 改状态 ——
+let dragId = null;
+const clearDropMarks = () => {
+  for (const el of document.querySelectorAll('.card.is-dragging')) el.classList.remove('is-dragging');
+  for (const el of document.querySelectorAll('.col.is-drop-target')) el.classList.remove('is-drop-target');
+};
+$('#board').addEventListener('dragstart', (e) => {
+  const el = e.target.closest?.('.card');
+  if (!el) return;
+  dragId = el.dataset.id;
+  el.classList.add('is-dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', dragId);
+});
+$('#board').addEventListener('dragend', () => {
+  dragId = null;
+  clearDropMarks();
+});
+$('#board').addEventListener('dragover', (e) => {
+  if (!dragId) return;
+  const col = e.target.closest?.('.col');
+  if (!col) return;
+  e.preventDefault(); // 不拦住就不允许松手
+  e.dataTransfer.dropEffect = 'move';
+  for (const other of document.querySelectorAll('.col.is-drop-target')) if (other !== col) other.classList.remove('is-drop-target');
+  col.classList.add('is-drop-target');
+});
+$('#board').addEventListener('drop', async (e) => {
+  if (!dragId) return;
+  const col = e.target.closest?.('.col');
+  e.preventDefault();
+  const id = dragId;
+  dragId = null;
+  clearDropMarks();
+  const status = col?.dataset.status;
+  const issue = state.issues.find((i) => i.id === id);
+  // 拖回原列、拖到不认识的列：当没发生
+  if (!col || !status || !issue || issue.status === status) return;
+  const from = statusLabel(issue.status);
+  issue.status = status; // 先在本地翻面，手一松就能看到它落到哪一列
+  render();
+  const ok = await patch({ status }, id);
+  hint(ok ? `「${issue.title}」从「${from}」移到「${statusLabel(status)}」` : '改状态失败', !ok);
 });
 $('#q').addEventListener('input', (e) => {
   state.filter.q = e.target.value.trim();
@@ -573,11 +721,7 @@ $('#readyOnly').addEventListener('change', (e) => {
   state.filter.ready = e.target.checked;
   render();
 });
-$('#panelClose').addEventListener('click', () => {
-  $('#panel').hidden = true;
-  state.current = null;
-  state.trace = null;
-});
+$('#panelClose').addEventListener('click', closePanel);
 $('#tabIssue').addEventListener('click', () => showTab('issue'));
 $('#tabTrace').addEventListener('click', () => showTab('trace'));
 $('#showRaw').addEventListener('click', () => {
@@ -606,11 +750,33 @@ $('#panel').addEventListener('dragover', (e) => {
   e.preventDefault();
   $('#panel').classList.add('dragging');
 });
+// 文件拖到看板空白处：拦下来，否则浏览器会直接把页面换成那张图
+for (const type of ['dragover', 'drop']) {
+  document.addEventListener(type, (e) => {
+    if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+  });
+}
 $('#panel').addEventListener('dragleave', () => $('#panel').classList.remove('dragging'));
 $('#panel').addEventListener('drop', async (e) => {
   e.preventDefault();
   $('#panel').classList.remove('dragging');
   await uploadFiles(e.dataTransfer?.files);
+});
+// 键盘：/ 搜索，n 新建，Esc 关面板（都不抢输入框里的键）
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  const typing = t?.closest?.('input, textarea, select, [contenteditable="true"]');
+  const dialogOpen = $('#create').open || $('#settingsDialog').open || $('#projectDialog').open || $('#lightbox').open;
+  if (e.key === 'Escape' && !dialogOpen && !$('#panel').hidden) return closePanel();
+  if (typing || dialogOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === '/') {
+    e.preventDefault();
+    $('#q').focus();
+    $('#q').select();
+  } else if (e.key === 'n' || e.key === 'N') {
+    e.preventDefault();
+    $('#create').showModal();
+  }
 });
 $('#panel').addEventListener('paste', (e) => {
   const files = pastedFiles(e);
@@ -733,8 +899,7 @@ async function submitProject(event) {
     const p = await api('/api/project', { method: 'POST', body: JSON.stringify({ dir }) });
     applyProject(p);
     $('#projectDialog').close();
-    $('#panel').hidden = true;
-    state.current = null;
+    closePanel();
     await load();
     const created = p.created?.length ? `，补充了 ${p.created.join('、')}` : '';
     hint(`已打开 ${p.dir}${created}`);
@@ -758,5 +923,6 @@ api('/api/project')
   })
   .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
 
+renderSkeleton();
 load();
 setInterval(tick, AUTO_REFRESH_MS);

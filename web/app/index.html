@@ -8,76 +8,107 @@
   </head>
   <body>
     <header class="top">
-      <h1>工单看板</h1>
-      <div class="projectbar">
-        <span class="project-label">项目</span>
-        <span class="mono" id="projectPath" title="当前项目">—</span>
-        <button id="openProject" type="button">打开项目</button>
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 3v18" />
+          <circle cx="5" cy="7" r="2.1" />
+          <circle cx="5" cy="14" r="2.1" />
+          <circle cx="5" cy="20" r="2.1" />
+          <path d="M10 7h9M10 14h6M10 20h8" />
+        </svg>
+        <h1>工单看板</h1>
       </div>
+
+      <div class="projectbar" title="当前项目">
+        <span class="project-label">项目</span>
+        <span class="mono" id="projectPath">—</span>
+        <button id="openProject" type="button" class="ghost tiny">换</button>
+      </div>
+
       <div class="tools">
-        <input id="q" type="search" placeholder="搜标题 / 描述 / 评论…" />
-        <label class="chk"><input id="readyOnly" type="checkbox" /> 只看可派给 AI</label>
-        <button id="watch" type="button" class="ghost" title="自动流水线">自动流水线：关</button>
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+          <input id="q" type="search" placeholder="搜标题、描述、评论" />
+          <kbd>/</kbd>
+        </label>
+        <label class="switch">
+          <input id="readyOnly" type="checkbox" />
+          <span class="switch-track" aria-hidden="true"></span>
+          只看可派
+        </label>
+        <button id="watch" type="button" class="ghost" title="自动流水线">
+          <span class="live-dot" aria-hidden="true"></span><span id="watchText">自动流水线：关</span>
+        </button>
         <button id="settings" type="button" class="ghost">设置</button>
         <button id="new" type="button" class="primary">新建工单</button>
-      </div>
-      <div id="hint" class="hint"></div>
-      <div class="legend">
-        <span class="dot">·</span>
-        <b>待接</b> 可以派给 AI（右上角「自动流水线」或 <code>node wf.mjs work</code>）<span class="dot">·</span>
-        <b>执行中</b> AI 在改<span class="dot">·</span>
-        <b>待审</b> 改完了，等验收<span class="dot">·</span>
-        <b>已完成</b> 已提交并关闭。点开任意卡片看全链路。
       </div>
     </header>
 
     <main id="board" class="board"></main>
 
+    <footer class="statusbar">
+      <div id="hint" class="hint"></div>
+      <details class="legend">
+        <summary>怎么看这张板</summary>
+        <div class="legend-body">
+          <p><b>待接</b> 可以派给 AI。开「自动流水线」或跑 <code>node wf.mjs work</code>。</p>
+          <p><b>执行中</b> AI 正在改这个工作区。</p>
+          <p><b>待审</b> 改完并通过门禁，等人验收。</p>
+          <p><b>已完成</b> 已提交并关闭，点开卡片看全链路。</p>
+          <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 卡片可拖到别的列改状态</p>
+        </div>
+      </details>
+    </footer>
+
     <aside id="panel" class="panel" hidden>
-      <div class="panel-head">
-        <span id="panelId" class="mono"></span>
+      <header class="panel-head">
+        <span id="panelId" class="mono panel-id"></span>
         <div class="seg" role="tablist">
           <button id="tabIssue" class="seg-btn active" type="button">工单</button>
           <button id="tabTrace" class="seg-btn" type="button">全链路</button>
         </div>
-        <button id="panelClose" type="button" class="ghost">关闭</button>
-      </div>
+        <button id="panelClose" type="button" class="ghost tiny">关闭</button>
+      </header>
 
-      <div id="viewIssue">
-        <h2 id="panelTitle"></h2>
-        <div id="panelMeta" class="meta"></div>
-        <div class="row">
-          <label>状态 <select id="panelStatus"></select></label>
-          <label>优先级 <select id="panelPriority"></select></label>
+      <div class="panel-body">
+        <div id="viewIssue">
+          <h2 id="panelTitle"></h2>
+          <div id="panelMeta" class="meta"></div>
+          <div class="row">
+            <label>状态 <select id="panelStatus"></select></label>
+            <label>优先级 <select id="panelPriority"></select></label>
+          </div>
+          <div class="row dispatch">
+            <button id="panelDispatch" type="button" class="primary">让 AI 干这个</button>
+            <span id="panelDispatchHint" class="dialog-note"></span>
+          </div>
+          <div class="row">
+            <input id="panelLabel" placeholder="加标签，逗号分隔" />
+            <button id="panelLabelAdd" type="button">加</button>
+          </div>
+          <div id="panelBody" class="md"></div>
+          <h3>附件 <span id="attachmentCount" class="count"></span></h3>
+          <div class="row attach-row">
+            <button id="attachPick" type="button" class="ghost">上传图片/文件</button>
+            <input id="attachFile" type="file" multiple hidden />
+            <span class="dialog-note">也可以直接粘贴截图、把文件拖到这个面板</span>
+          </div>
+          <div id="panelAttachments" class="attachments"></div>
+          <h3>评论</h3>
+          <div id="panelComments" class="comments"></div>
+          <div class="composer">
+            <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送；截图可以直接粘进来，会作为评论里的图片）"></textarea>
+            <button id="panelCommentSend" type="button" class="primary">发送</button>
+          </div>
         </div>
-        <div class="row dispatch">
-          <button id="panelDispatch" type="button" class="primary">让 AI 干这个</button>
-          <span id="panelDispatchHint" class="dialog-note"></span>
-        </div>
-        <div class="row">
-          <input id="panelLabel" placeholder="加标签，逗号分隔" />
-          <button id="panelLabelAdd" type="button">加</button>
-        </div>
-        <div id="panelBody" class="md"></div>
-        <h3>附件 <span id="attachmentCount" class="count"></span></h3>
-        <div class="row attach-row">
-          <button id="attachPick" type="button" class="ghost">上传图片/文件</button>
-          <input id="attachFile" type="file" multiple hidden />
-          <span class="dialog-note">也可以直接粘贴截图、把文件拖到这个面板</span>
-        </div>
-        <div id="panelAttachments" class="attachments"></div>
-        <h3>评论</h3>
-        <div id="panelComments" class="comments"></div>
-        <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送）"></textarea>
-        <button id="panelCommentSend" type="button" class="primary">发送</button>
-      </div>
 
-      <div id="viewTrace" hidden>
-        <div id="panelTrace" class="trace"></div>
-        <div class="row">
-          <button id="showRaw" type="button">原始记录（给程序看）</button>
+        <div id="viewTrace" hidden>
+          <div id="panelTrace" class="trace"></div>
+          <div class="row">
+            <button id="showRaw" type="button">原始记录（给程序看）</button>
+          </div>
+          <pre id="panelRaw" class="raw mono" hidden></pre>
         </div>
-        <pre id="panelRaw" class="raw mono" hidden></pre>
       </div>
     </aside>
 
@@ -112,7 +143,7 @@
       </form>
     </dialog>
 
-    <dialog id="settingsDialog" class="dialog">
+    <dialog id="settingsDialog" class="dialog wide">
       <form id="settingsForm" method="dialog">
         <h2>设置</h2>
         <p class="dialog-note">改的是仓库根的 <code>config.json</code>：状态/优先级中文名 + AI 执行配置。保存后看板立即生效，engine 下次执行也用它。</p>
