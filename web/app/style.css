@@ -1759,6 +1759,10 @@ body.needs-auth .panel {
   font-size: 11.5px;
   color: var(--dim);
 }
+/* 有 display 的规则会顶掉 [hidden]，登录模式下「显示名」就是这么漏出来的 */
+.auth-card [hidden] {
+  display: none;
+}
 .auth-card label input {
   height: 34px;
   font-size: 13.5px;
