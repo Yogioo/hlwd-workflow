@@ -908,7 +908,11 @@ function setAuthMode(mode) {
   const reg = mode === 'register';
   $('#authTabLogin').classList.toggle('active', !reg);
   $('#authTabRegister').classList.toggle('active', reg);
-  $('#authDisplayRow').hidden = !reg;
+  // 显示名只在注册时出现。除了 hidden 属性再上 inline style：
+  // 标签页可能还拿着旧样式表（改完没刷新），那也得藏住
+  const displayRow = $('#authDisplayRow');
+  displayRow.hidden = !reg;
+  displayRow.style.display = reg ? '' : 'none';
   $('#authTitle').textContent = reg ? '注册' : '登录';
   $('#authSubmit').textContent = reg ? '注册并进入' : '登录';
   $('#authIntro').textContent = reg
