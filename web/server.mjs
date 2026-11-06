@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -21,6 +22,21 @@ import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const PORT = Number(process.env.PORT ?? 3100);
 const HOST = process.env.HOST ?? '127.0.0.1';
+// 设了口令就全站要口令：内网分享时至少不是裸奔（?token= 会记成 cookie，之后不用再带）
+const TOKEN = String(process.env.WF_TOKEN ?? '').trim();
+const isLoopbackAddr = (addr = '') => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+
+/** 内网可访问的地址：绑 0.0.0.0 时给同事的就是这些。 */
+function lanUrls(port) {
+  const urls = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const nic of list ?? []) {
+      if (nic.family !== 'IPv4' || nic.internal) continue;
+      urls.push(`http://${nic.address}:${port}`);
+    }
+  }
+  return urls;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -36,6 +52,29 @@ function json(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(body);
+}
+
+// —— 访问口令（可选，内网分享时建议开） ——
+function cookieValue(req, name) {
+  for (const part of String(req.headers.cookie ?? '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return rest.join('=');
+  }
+  return '';
+}
+
+function tokenGiven(req, url) {
+  return url.searchParams.get('token') ?? req.headers['x-wf-token'] ?? cookieValue(req, 'wf_token');
+}
+
+function needToken(res) {
+  res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(
+    '<meta charset="utf-8"><body style="font:14px system-ui;padding:2rem">' +
+      '<h2>需要访问口令</h2>' +
+      '<p>地址后面加上 <code>?token=口令</code> 再打开（只第一次需要，之后会记住）。</p>' +
+      '<p style="color:#888">口令由启动看板的人设置：<code>WF_TOKEN=口令 node wf.mjs board --lan</code></p></body>',
+  );
 }
 
 async function readBody(req) {
@@ -215,6 +254,14 @@ async function searchIssues(issues, query) {
 async function route(req, res, url) {
   const { pathname, searchParams } = url;
 
+  if (TOKEN) {
+    if (tokenGiven(req, url) !== TOKEN) return needToken(res);
+    if (searchParams.get('token') === TOKEN) {
+      // 第一次带对了就记住，刷新/切页不用一直挂着口令
+      res.setHeader('set-cookie', `wf_token=${TOKEN}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`);
+    }
+  }
+
   if (pathname === '/api/meta') {
     const p = await project();
     const cfg = await readProjectConfig(p.dir);
@@ -223,6 +270,7 @@ async function route(req, res, url) {
       labels: cfg.labels,
       readyLabel: cfg.engine.readyLabel,
       workspace: p.dir,
+      share: { host: HOST, port: PORT, token: Boolean(TOKEN), lan: lanUrls(PORT) },
     });
   }
 
@@ -268,6 +316,10 @@ async function route(req, res, url) {
   // 设置里的「门禁」按钮：把用户送到 <项目>/.hlwd/gate.mjs
   if (pathname === '/api/gate/open') {
     if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    // 这个接口会在这台机器上调起编辑器：内网分享时只能是本机自己点
+    if (!isLoopbackAddr(req.socket.remoteAddress)) {
+      return json(res, 403, { error: '只允许在本机打开门禁脚本；远程请直接改文件' });
+    }
     const body = await readBody(req);
     const target = body.target === 'folder' ? 'folder' : 'editor';
     const p = await project();
@@ -366,7 +418,7 @@ const server = http.createServer((req, res) => {
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${PORT} 已被占用（很可能看板已经在跑）。`);
-    console.error(`→ 直接打开 http://${HOST}:${PORT}`);
+    console.error(`→ 直接打开 http://127.0.0.1:${PORT}`);
     console.error(`→ 或换个端口：PORT=3101 npm start`);
     process.exit(1);
   }
@@ -382,7 +434,12 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 server.listen(PORT, HOST, async () => {
-  console.log(`看板：http://${HOST}:${PORT}`);
+  console.log(`看板：http://127.0.0.1:${PORT}`);
+  if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
+    const urls = lanUrls(PORT);
+    console.log(`内网分享（绑 ${HOST}）：${urls.join('  ') || '没找到内网地址'}`);
+    console.log(TOKEN ? '访问口令：已开启（WF_TOKEN）' : '注意：没设 WF_TOKEN，本网段的人都能建单/改单');
+  }
   try {
     const p = await project();
     console.log(`当前项目：${p.dir}`);

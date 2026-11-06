@@ -19,7 +19,7 @@
 | `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
-当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。
+当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。看板进程信息（端口 / 绑的地址 / 口令探活用）记在 `~/.hlwd/board.json`，同属全局运行期信息。
 
 ## 3. 产物布局
 
@@ -120,6 +120,7 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 
 - 状态用 beads 原生 `status`；`review` 是自定义状态，靠 `bd config set status.custom "review:wip"` 注册。
 - 门禁不通过等同审查不通过：**留在 `in_progress`**，原因回灌执行端，不单独引入新状态。
+- 看板绑内网时（`--lan`）只是多了一个入口，状态机不变；谁能改单由 `--token` 决定。
 - `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」。
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。
 
@@ -154,6 +155,7 @@ engine/            # 流程编排
 ```bash
 node wf.mjs                       # 我现在该干什么：当前项目 + 工单概况 + 下一步
 node wf.mjs board [--bg]          # 看板（npm start = --bg）
+node wf.mjs board --lan           # 同上，绑 0.0.0.0 让内网同事打开（npm run start:lan）
 node wf.mjs stop                  # 停掉后台看板（npm run stop）
 node wf.mjs work                  # 让 AI 干下一张就绪单（npm run engine）
 node wf.mjs trace <卡片id>        # 终端看一张单的全链路
@@ -168,6 +170,20 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
 - 依赖解析：要用能找到的 `bd` 与 `agent-tools`，找不到时设 `BD_BIN` / `AGENT_TOOLS_BIN`。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
+
+**内网分享**（给同网段的同事看/建/改单）
+
+```bash
+node wf.mjs board --bg --lan --token 口令      # 推荐：带口令，打印每个网卡的分享地址
+node wf.mjs board --lan                        # 不带口令：本网段谁都能改单
+node wf.mjs board --host 192.168.1.7 --bg      # 只绑某块网卡
+```
+
+- 分享地址由 `/api/meta.share` 给出（每个非内网回环 IPv4 一条），终端里 `board` 与 `node wf.mjs` 都会打印。
+- 设了 `WF_TOKEN` / `--token` 就全站要口令：`http://ip:port/?token=口令` 打开一次，之后靠 cookie，不用一直带。
+- 即使开了口令，「设置 → 打开脚本/打开所在目录」也只允许**本机**调（`/api/gate/open` 校验 loopback 来源），远程只能改文件。
+- 看板进程的信息（端口 / 绑的地址 / 口令）记在 `~/.hlwd/board.json`，`node wf.mjs` 用它探活和打印分享地址；`stop` 会删。
+
 
 `engine` 只在工作区干净时启动（`.hlwd/` 不算脏）；脏改动的后果是被算进这张单的提交。
 

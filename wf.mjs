@@ -18,14 +18,19 @@ import { listRuns, setProjectDir } from './web/runs.mjs';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST ?? '127.0.0.1';
 const PORT = Number(process.env.PORT ?? 3100);
+// 本机探活固定走 loopback：绑 0.0.0.0 时 0.0.0.0 不是能 fetch 的地址
+const PROBE = `http://127.0.0.1:${PORT}`;
 const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const PID_FILE = path.join(STATE_DIR, 'board.pid');
+const BOARD_FILE = path.join(STATE_DIR, 'board.json');
 const BOARD_LOG = path.join(STATE_DIR, 'board.log');
 
 const HELP = `用法：node wf.mjs [--project <目录>] <动词>
 
   （不带参数）        我现在该干什么：工单概况 + 下一步
   board [--bg]       看板（建单、看全链路）；--bg 后台启动，马上返回
+                     --lan 绑 0.0.0.0 让内网同事打开；--token <口令> 加访问口令
+                     --host <ip> 绑指定网卡（等价自选内网地址）
   stop               停掉后台看板
   work [参数]        让 AI 干下一张就绪单（--dry / --id <卡片> / --attempts N 原样透传）
   trace <卡片id>     在终端看一张单的执行全链路
@@ -63,13 +68,68 @@ function openBrowser(url) {
   }
 }
 
-async function boardOnline() {
+// 看板进程的信息（绑了哪个地址、有没有口令）：本机自己知道，别人才需要问
+async function readBoardInfo() {
   try {
-    const res = await fetch(`http://${HOST}:${PORT}/api/meta`, { signal: AbortSignal.timeout(400) });
-    return res.ok;
+    return JSON.parse(await fs.readFile(BOARD_FILE, 'utf8'));
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function saveBoardInfo(info) {
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.writeFile(BOARD_FILE, `${JSON.stringify(info, null, 2)}\n`, 'utf8');
+}
+
+async function boardMeta() {
+  const info = await readBoardInfo();
+  const headers = info?.token ? { 'x-wf-token': info.token } : {};
+  try {
+    const res = await fetch(`${PROBE}/api/meta`, { headers, signal: AbortSignal.timeout(500) });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+const boardOnline = async () => (await boardMeta()) !== null;
+
+/** 本机自己开就看带口令的地址，不然会先看到“需要访问口令”。 */
+const localUrl = (token) => (token ? `${PROBE}/?token=${encodeURIComponent(token)}` : PROBE);
+
+/** 看板绑在局域网时，告诉人同事该打开哪个地址。 */
+function printShare(meta, token = '') {
+  const share = meta?.share;
+  if (!share || share.host === '127.0.0.1' || share.host === 'localhost') return false;
+  const urls = share.lan ?? [];
+  console.log(`\n分享（内网，绑 ${share.host}）：${share.token ? '需要访问口令' : '没设口令，本网段谁都能建单/改单'}`);
+  if (!urls.length) console.log('  （没找到内网地址，检查网卡）');
+  for (const url of urls) console.log(`  ${share.token ? `${url}/?token=${token || '<口令>'}` : url}`);
+  return true;
+}
+
+/** board 的参数：--bg 后台 / --lan 绑 0.0.0.0 / --host <ip> 指定网卡 / --token <口令>。 */
+function boardFlags(args = []) {
+  const flags = { bg: false, lan: false, host: null, token: String(process.env.WF_TOKEN ?? '').trim() };
+  const value = (i, flag, inline) => {
+    const v = inline ?? args[i + 1];
+    if (v === undefined || String(v).trim() === '') throw new Error(`${flag} 需要一个值`);
+    return String(v).trim();
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const [flag, inline] = args[i].split('=');
+    if (flag === '--bg') flags.bg = true;
+    else if (flag === '--lan') flags.lan = true;
+    else if (flag === '--host') {
+      flags.host = value(i, flag, inline);
+      if (inline === undefined) i += 1;
+    } else if (flag === '--token') {
+      flags.token = value(i, flag, inline);
+      if (inline === undefined) i += 1;
+    }
+  }
+  return flags;
 }
 
 /** 解析项目：--project > 上次打开的项目 > 当前目录；顺手补齐 .hlwd/ 与 .beads/。 */
@@ -99,11 +159,14 @@ async function status({ dir, cfg, info }) {
   for (const issue of ready.slice(0, 5)) console.log(`  · ${issue.id}  ${issue.title}  [${prioName(cfg, issue.priority)}]`);
   if (ready.length > 5) console.log(`  … 还有 ${ready.length - 5} 张`);
 
-  const online = await boardOnline();
-  console.log(`\n看板 ${online ? `在线 http://${HOST}:${PORT}` : '未启动'}`);
+  const meta = await boardMeta();
+  const boardInfo = await readBoardInfo();
+  console.log(`\n看板 ${meta ? `在线 ${PROBE}` : '未启动'}`);
+  if (meta) printShare(meta, boardInfo?.token);
 
   console.log('\n下一步');
-  if (!online) console.log('  node wf.mjs board            起看板，建单 / 看全链路');
+  if (!meta) console.log('  node wf.mjs board            起看板，建单 / 看全链路');
+  if (!meta) console.log('  node wf.mjs board --lan      同上，并暴露到内网给同事（可加 --token 口令）');
   if (ready.length) console.log('  node wf.mjs work             让 AI 干下一张就绪单');
   else console.log('  先在看板里建单（或 node wf.mjs new "标题"），再 work');
 }
@@ -160,19 +223,28 @@ async function newCard(args, cfg) {
   console.log(`下一步：node wf.mjs work         （或 node wf.mjs work --id ${issue.id}）`);
 }
 
-async function board(projectDir, bg) {
-  const url = `http://${HOST}:${PORT}`;
+async function board(projectDir, flags) {
+  const bindHost = flags.host ?? (flags.lan ? '0.0.0.0' : HOST);
 
   if (await boardOnline()) {
-    console.log(`看板已经在跑：${url}`);
-    openBrowser(url);
+    const [meta, info] = [await boardMeta(), await readBoardInfo()];
+    console.log(`看板已经在跑：${localUrl(info?.token)}`);
+    if (!printShare(meta, info?.token || flags.token)) {
+      if (bindHost !== '127.0.0.1' && bindHost !== 'localhost') {
+        console.log('它现在只绑在本机；先 node wf.mjs stop，再起：node wf.mjs board --lan');
+      }
+    }
+    openBrowser(localUrl(info?.token));
     return 0;
   }
 
-  if (bg) {
+  const env = { ...process.env, HLWD_PROJECT: projectDir, HOST: bindHost };
+  if (flags.token) env.WF_TOKEN = flags.token;
+  const info = { pid: null, port: PORT, host: bindHost, token: flags.token ?? '', startedAt: new Date().toISOString() };
+
+  if (flags.bg) {
     await fs.mkdir(STATE_DIR, { recursive: true });
     const log = await fs.open(BOARD_LOG, 'a');
-    const env = { ...process.env, HLWD_PROJECT: projectDir };
     const proc = spawn(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
       cwd: projectDir,
       detached: true,
@@ -180,23 +252,28 @@ async function board(projectDir, bg) {
       env,
     });
     proc.unref();
+    await log.close(); // fd 已经给子进程了，父进程别攥着
     await fs.writeFile(PID_FILE, String(proc.pid), 'utf8');
+    await saveBoardInfo({ ...info, pid: proc.pid });
     for (let i = 0; i < 40; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
       if (await boardOnline()) break;
     }
-    console.log(`看板已在后台启动：${url}`);
+    console.log(`看板已在后台启动：${localUrl(flags.token)}`);
     console.log(`项目 ${projectDir}`);
+    printShare(await boardMeta(), flags.token);
     console.log(`日志 ${BOARD_LOG}    停止 node wf.mjs stop`);
-    openBrowser(url);
+    openBrowser(localUrl(flags.token));
     return 0;
   }
 
-  setTimeout(() => openBrowser(url), 700);
-  return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
-    cwd: projectDir,
-    env: { ...process.env, HLWD_PROJECT: projectDir },
-  });
+  setTimeout(() => openBrowser(localUrl(flags.token)), 700);
+  console.log(`看板：${localUrl(flags.token)}`);
+  if (bindHost !== '127.0.0.1' && bindHost !== 'localhost') {
+    console.log(`暴露到内网（绑 ${bindHost}）${flags.token ? '，已设访问口令' : '；没设 --token / WF_TOKEN，本网段谁都能改单'}`);
+  }
+  await saveBoardInfo(info);
+  return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], { cwd: projectDir, env });
 }
 
 async function stop() {
@@ -215,7 +292,13 @@ async function stop() {
     await fs.rm(PID_FILE, { force: true });
   }
   await new Promise((r) => setTimeout(r, 300));
-  console.log((await boardOnline()) ? '没停掉（可能是前台启动的）：用 Ctrl+C 或关掉那个终端' : '看板已停止');
+  // 只有真的没了才删探活信息（带着口令），不然前台跑着的看板就探不到了
+  if (await boardOnline()) {
+    console.log('没停掉（可能是前台启动的）：用 Ctrl+C 或关掉那个终端');
+  } else {
+    await fs.rm(BOARD_FILE, { force: true });
+    console.log('看板已停止');
+  }
   return 0;
 }
 
@@ -246,7 +329,7 @@ async function main() {
   if (verb === 'board') {
     const { dir } = await useProject(explicitProject);
     await rememberProject(dir).catch(() => {});
-    return board(dir, verbArgs.includes('--bg'));
+    return board(dir, boardFlags(verbArgs));
   }
   if (verb === 'stop') return stop();
 
@@ -272,8 +355,11 @@ async function main() {
 }
 
 main()
-  .then((code) => process.exit(code ?? 0))
+  .then((code) => {
+    // 用 exitCode 而不是 process.exit()：刚 spawn 完就硬退会撞上 libuv 的句柄断言
+    process.exitCode = code ?? 0;
+  })
   .catch((err) => {
     console.error(err.message);
-    process.exit(1);
+    process.exitCode = 1;
   });

@@ -7,8 +7,9 @@
   "scripts": {
     "wf": "node wf.mjs",
     "start": "node wf.mjs board --bg",
+    "start:lan": "node wf.mjs board --bg --lan",
     "engine": "node wf.mjs work",
-    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs engine/gate.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs project.test.mjs",
+    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs engine/gate.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs web/server.test.mjs project.test.mjs",
     "stop": "node wf.mjs stop"
   },
   "engines": {
