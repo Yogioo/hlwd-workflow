@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as beads from './beads.mjs';
-import { getRun, listRuns } from './runs.mjs';
+import { getRun, journalFor, listRuns } from './runs.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const PORT = Number(process.env.PORT ?? 3100);
@@ -92,7 +92,7 @@ async function route(req, res, url) {
     return json(res, 405, { error: 'method not allowed' });
   }
 
-  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history)?$/);
+  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history|\/journal)?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     if (m[2] === '/comments') {
@@ -102,6 +102,7 @@ async function route(req, res, url) {
       return json(res, 200, { comments });
     }
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
+    if (m[2] === '/journal') return json(res, 200, { journal: await journalFor(id) });
     if (m[2] === '/history') return json(res, 200, { history: await beads.listStatusHistory(id) });
     if (req.method === 'GET') return json(res, 200, await beads.getIssue(id));
     if (req.method === 'PATCH') {

@@ -29,25 +29,38 @@
     <aside id="panel" class="panel" hidden>
       <div class="panel-head">
         <span id="panelId" class="mono"></span>
+        <div class="seg" role="tablist">
+          <button id="tabIssue" class="seg-btn active" type="button">工单</button>
+          <button id="tabTrace" class="seg-btn" type="button">全链路</button>
+        </div>
         <button id="panelClose" type="button" class="ghost">关闭</button>
       </div>
-      <h2 id="panelTitle"></h2>
-      <div id="panelMeta" class="meta"></div>
-      <div class="row">
-        <label>状态 <select id="panelStatus"></select></label>
-        <label>优先级 <input id="panelPriority" type="number" min="0" max="4" /></label>
+
+      <div id="viewIssue">
+        <h2 id="panelTitle"></h2>
+        <div id="panelMeta" class="meta"></div>
+        <div class="row">
+          <label>状态 <select id="panelStatus"></select></label>
+          <label>优先级 <input id="panelPriority" type="number" min="0" max="4" /></label>
+        </div>
+        <div class="row">
+          <input id="panelLabel" placeholder="加标签，逗号分隔" />
+          <button id="panelLabelAdd" type="button">加</button>
+        </div>
+        <div id="panelBody" class="md"></div>
+        <h3>评论</h3>
+        <div id="panelComments" class="comments"></div>
+        <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送）"></textarea>
+        <button id="panelCommentSend" type="button" class="primary">发送</button>
       </div>
-      <div class="row">
-        <input id="panelLabel" placeholder="加标签，逗号分隔" />
-        <button id="panelLabelAdd" type="button">加</button>
+
+      <div id="viewTrace" hidden>
+        <div id="panelTrace" class="trace"></div>
+        <div class="row">
+          <button id="showRaw" type="button">原始记录（给程序看）</button>
+        </div>
+        <pre id="panelRaw" class="raw mono" hidden></pre>
       </div>
-      <pre id="panelBody" class="body"></pre>
-      <h3>追溯</h3>
-      <div id="panelTrace" class="trace"></div>
-      <h3>评论</h3>
-      <div id="panelComments" class="comments"></div>
-      <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送）"></textarea>
-      <button id="panelCommentSend" type="button" class="primary">发送</button>
     </aside>
 
     <dialog id="create" class="dialog">

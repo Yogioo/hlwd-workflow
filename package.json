@@ -2,6 +2,7 @@
   "name": "hlwd-workflow",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "接单 → 执行 → 审查 → 完成工单：beads + 网页看板 + AI 工作流",
   "scripts": {
     "wf": "node wf.mjs",

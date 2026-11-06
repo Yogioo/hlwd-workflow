@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RUNS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.engine', 'runs');
+const JOURNAL_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.engine', 'journal.ndjson');
 const SAFE = /^[A-Za-z0-9._-]+$/;
 
 /** 该卡片的所有运行记录，新的在前。 */
@@ -36,4 +37,26 @@ export async function getRun(runId) {
   } catch {
     return null;
   }
+}
+
+/** 该卡片在全局 journal 里的事件（原始行，给「全链路」用）。 */
+export async function journalFor(cardId, limit = 200) {
+  if (!SAFE.test(cardId)) return [];
+  let text = '';
+  try {
+    text = await fs.readFile(JOURNAL_FILE, 'utf8');
+  } catch {
+    return [];
+  }
+  const events = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event.card === cardId) events.push(event);
+    } catch {
+      // 半行/损坏行跳过
+    }
+  }
+  return events.slice(-limit);
 }

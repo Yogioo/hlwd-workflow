@@ -149,6 +149,11 @@ async function main() {
 
   if (verb === 'board') {
     const url = `http://${HOST}:${PORT}`;
+    if (await boardOnline()) {
+      console.log(`看板已经在跑：${url}`);
+      openBrowser(url);
+      return 0;
+    }
     setTimeout(() => openBrowser(url), 700);
     return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')]);
   }

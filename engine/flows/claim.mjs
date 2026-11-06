@@ -9,10 +9,7 @@ export async function listCandidates({ cfg }) {
 
 export async function claim({ issue, cfg }) {
   await beads.updateIssue(issue.id, { status: 'in_progress', assignee: cfg.actor });
-  await beads.commentIssue(
-    issue.id,
-    `接单：engine(${cfg.actor} / ${cfg.runner})，open → in_progress。执行中，勿重复派单。`,
-  );
+  await beads.commentIssue(issue.id, 'AI 接单，开始执行。');
   log(`接单 ${issue.id} — ${issue.title}`);
   return beads.getIssue(issue.id);
 }

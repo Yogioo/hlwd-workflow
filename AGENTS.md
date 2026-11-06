@@ -69,6 +69,7 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 - 状态用 beads 原生 `status` 承载；`review` 是自定义状态，靠 `bd config set status.custom "review:wip"` 注册，不新增字段。
 - `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」，不回答「处在哪一步」。
 - 每次迁移必须留一条 `comment`：谁改的、为什么、产物路径。
+- **评论只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件一律进 `run.json` / 全链路，不往评论里塞。
 - 卡住的单只能靠评论解释，不允许「人工下线」这种暗门。
 
 ## 5. 目录
@@ -82,7 +83,8 @@ web/               # 页面 + beads 适配层
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
   runs.mjs         # 只读端口：把 .engine/runs/*/run.json 给看板
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
-  app/             # 单页看板：index.html / app.js / style.css，无构建
+  app/             # 单页看板：index.html / app.js / markdown.js / style.css，无构建
+                   #   工单页（人看，markdown 渲染）/ 全链路页（程序看，含原始 JSON）
 engine/            # 流程编排：claim / execute / review / complete
   run.mjs          # 入口：接一张单走完流程，一次只跑一张
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run（不碰 beads）

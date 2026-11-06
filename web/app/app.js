@@ -1,4 +1,6 @@
 // 单页看板：只做「看 + 建 + 改状态 + 评论」，全部走 /api/*。
+import { esc, md } from './markdown.js';
+
 const COLUMNS = [
   ['open', '待接'],
   ['in_progress', '执行中'],
@@ -7,16 +9,13 @@ const COLUMNS = [
 ];
 
 const $ = (s) => document.querySelector(s);
-const state = { issues: [], statuses: COLUMNS.map(([s]) => s), current: null, filter: { q: '', ready: false } };
+const state = { issues: [], statuses: COLUMNS.map(([s]) => s), current: null, filter: { q: '', ready: false }, trace: null };
 
 // ready-for-agent 对人没意义，直接说「可派给 AI」
 const chip = (label) =>
   label === 'ready-for-agent'
     ? '<span class="chip chip-ready">可派给 AI</span>'
     : `<span class="chip">${esc(label)}</span>`;
-
-const esc = (s) =>
-  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -87,16 +86,30 @@ async function openPanel(id) {
     .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${s}</option>`)
     .join('');
   $('#panelPriority').value = issue.priority;
-  $('#panelBody').textContent = issue.body || '（无描述）';
+  $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
   $('#panelLabel').value = '';
   $('#panelComments').innerHTML = comments
-    .map((c) => `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="comment-text">${esc(c.text)}</div></div>`)
+    .map((c) => `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="md">${md(c.text)}</div></div>`)
     .join('') || '<div class="empty">还没有评论</div>';
 
-  const [runs, history] = await Promise.all([
+  // 全链路是给程序/工程看的，打开才拉数据
+  state.trace = null;
+  $('#panelTrace').innerHTML = '';
+  $('#panelRaw').hidden = true;
+  $('#panelRaw').textContent = '';
+  showTab('issue');
+}
+
+async function loadTrace() {
+  if (!state.current || state.trace?.loading) return;
+  const id = state.current.id;
+  state.trace = { loading: true };
+  const [runs, history, journal] = await Promise.all([
     api(`/api/issues/${encodeURIComponent(id)}/runs`).then((d) => d.runs).catch(() => []),
     api(`/api/issues/${encodeURIComponent(id)}/history`).then((d) => d.history).catch(() => []),
+    api(`/api/issues/${encodeURIComponent(id)}/journal`).then((d) => d.journal).catch(() => []),
   ]);
+  state.trace = { runs, history, journal, loading: false };
   renderTrace({ runs, history });
 }
 
@@ -106,6 +119,15 @@ const fmtTime = (at) => {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false }).slice(0, 16);
 };
 const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
+
+function showTab(name) {
+  const isTrace = name === 'trace';
+  $('#tabIssue').classList.toggle('active', !isTrace);
+  $('#tabTrace').classList.toggle('active', isTrace);
+  $('#viewIssue').hidden = isTrace;
+  $('#viewTrace').hidden = !isTrace;
+  if (isTrace) loadTrace();
+}
 
 // 追溯面板：beads 的状态变更（bd history）+ engine 的 run.json 时间线
 function renderTrace({ runs, history }) {
@@ -200,6 +222,23 @@ $('#readyOnly').addEventListener('change', (e) => {
 $('#panelClose').addEventListener('click', () => {
   $('#panel').hidden = true;
   state.current = null;
+  state.trace = null;
+});
+$('#tabIssue').addEventListener('click', () => showTab('issue'));
+$('#tabTrace').addEventListener('click', () => showTab('trace'));
+$('#showRaw').addEventListener('click', () => {
+  const pre = $('#panelRaw');
+  if (!pre.hidden) {
+    pre.hidden = true;
+    return;
+  }
+  const payload = {
+    card: state.current,
+    runs: state.trace?.runs ?? [],
+    journal: state.trace?.journal ?? [],
+  };
+  pre.textContent = JSON.stringify(payload, null, 2);
+  pre.hidden = false;
 });
 $('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));

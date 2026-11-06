@@ -1,9 +1,14 @@
-// 阶段 4：收尾。通过就提交+关闭；不通过就退回 open 并写清楚原因。
+// 阶段 4：收尾。通过就提交+关闭；不通过就退回并写清楚原因。
+// 评论只写一句 AI 结论；细节（验证命令、运行目录、原始事件）留在 run.json / 全链路里。
 import path from 'node:path';
 import * as beads from '../../web/beads.mjs';
 import { log, run } from '../lib.mjs';
 
 const rel = (workdir, p) => path.relative(workdir, p).replaceAll('\\', '/');
+const oneLine = (text, max = 80) => {
+  const s = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+};
 
 export async function complete({ cfg, workdir, issue, runDir, checks = [] }) {
   let commit = null;
@@ -23,30 +28,16 @@ export async function complete({ cfg, workdir, issue, runDir, checks = [] }) {
   }
 
   await beads.updateIssue(issue.id, { status: 'closed' });
-  await beads.commentIssue(
-    issue.id,
-    [
-      '审查通过，关闭工单。',
-      `- 提交：${commit ?? '无代码改动'}`,
-      `- 运行记录：${rel(workdir, path.join(runDir, 'run.json'))}`,
-      `- 验证：${checks.length ? checks.join('；') : '审查端未列出验证命令'}`,
-    ].join('\n'),
-  );
+  await beads.commentIssue(issue.id, commit ? `AI 已完成并提交 ${commit}。` : 'AI 已完成（无代码改动）。');
   log(`关闭 ${issue.id}`);
+  void checks;
   return commit;
 }
 
 /** 退回：执行失败回 open（可以重派），审查不通过留在 in_progress（需要人看）。 */
-export async function handback({ issue, runDir, reason, status, workdir }) {
+export async function handback({ issue, reason, status }) {
   await beads.updateIssue(issue.id, { status });
-  await beads.commentIssue(
-    issue.id,
-    [
-      `engine 回退：in_progress → ${status}`,
-      `- 原因：${reason}`,
-      `- 运行记录：${rel(workdir, path.join(runDir, 'run.json'))}`,
-      status === 'open' ? '- 处理方式：修好环境或提示词后可重新派单。' : '- 处理方式：人工查看运行记录后决定继续改还是重派。',
-    ].join('\n'),
-  );
+  const head = status === 'open' ? 'AI 执行中断，已退回待接' : 'AI 审查未通过，留待人工处理';
+  await beads.commentIssue(issue.id, `${head}：${oneLine(reason)}`);
   log(`回退 ${issue.id} → ${status}`);
 }
