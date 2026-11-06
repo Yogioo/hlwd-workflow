@@ -22,6 +22,8 @@
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
 当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。看板进程信息（端口 / 绑的地址 / 口令探活用）记在 `~/.hlwd/board.json`，自动流水线的心跳记在 `~/.hlwd/watch/<项目>.json`；都是全局运行期信息，不是业务数据。
 
+**账号也属于这台机器，不属于项目**：`~/.hlwd/users.json`（密码只存 scrypt 加盐哈希）与 `~/.hlwd/sessions.json`（登录会话，重启不踢人）。一个人一个身份，切项目还是他。
+
 ## 3. 产物布局
 
 ```
@@ -77,8 +79,25 @@ update(id, patch) -> Issue     # 含状态迁移
 comment(id, text) -> void
 ```
 
-- `Issue` 最小字段集：`id, title, body, status, labels, assignee, created, updated`。
+- `Issue` 最小字段集：`id, title, body, status, labels, assignee, created, updated, createdBy`。
+- `createdBy` 是 bd 原生字段：建单时把 `--actor` 传进去，谁建的就是谁。
+- 写操作都能带 `actor`（`createIssue / updateIssue / commentIssue`）。没带就用 `setActor()` 设的默认值（engine 设成 `cfg.actor`）；都没有就不带，由 bd 回落到 git user。
 - 只能用 `bd` CLI（或 beads 官方 HTTP 接口）。禁止直连 `.beads/*.db` 写数据。
+
+**Identity**（`web/auth.mjs`；web 与 engine 共用一个「actor」的说法）
+
+```
+register({name, display, password}) -> user    # 第一个注册的人是 owner，其余 member
+verify({name, password}) -> user              # 失败抛 AuthError(401)，不区分「没这人」和「密码错」
+createSession(name) -> token / readSession(token) -> user / dropSession(token)
+changePassword(name, old, next, keepToken)    # 换密码顺手踢掉其他设备
+publicUser(user) -> {name, display, role, createdAt}   # 对外的唯一形状（不含 salt/hash）
+```
+
+- 身份是**全局**的（`~/.hlwd/users.json`），HTTP 面只有 `GET /api/auth/me` 与 `POST /api/auth/{register,login,logout}`；cookie 里是随机 token，不是密码。
+- 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，改状态补一条 `状态：A → B` 的评论。
+- `WF_AUTH=off` 关掉登录（单机自用）：不拦接口，写操作不带 actor，评论按 bd 的默认值记。
+- 权限**还没做**：`role` 已经存在（owner / member），以后判权限只改 auth.mjs，不动页面。
 
 **AgentRunner**（`engine` 内部，对外只暴露一个函数）
 
@@ -150,6 +169,7 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 - 看板绑内网时（`--lan`）只是多了一个入口，状态机不变；谁能改单由 `--token` 决定。
 - `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」。
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。
+- **谁改的**：人工在看板改状态时，web 自动补一条 `状态：待接 → 执行中` 的评论，作者就是登录的人（bd 的 update 本身不记变更人）；engine 的迁移用 `cfg.actor`，评论由各阶段写。
 
 ## 6. 目录
 
@@ -198,6 +218,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 ```
 
 - 不给 `--project` 就用上次打开的项目；首次打开会自动建 `.hlwd/` 与 `.beads/`。
+- 看板默认要登录（部署在没人守的机器上时，同事从内网访问各自注册）：第一个访问的人看到的是「注册」，第一个账号是管理员；单机自用想省这一步就 `WF_AUTH=off`。
 - `work` 的参数原样透传：`--dry` / `--id <卡片>` / `--attempts N` / `--allow-dirty`。
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。

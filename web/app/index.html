@@ -7,7 +7,37 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <header class="top">
+    <section id="authScreen" class="auth" hidden>
+      <form id="authForm" class="auth-card" autocomplete="on">
+        <div class="auth-brand">
+          <svg class="auth-mark" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 3v18" />
+            <circle cx="5" cy="7" r="2.1" />
+            <circle cx="5" cy="14" r="2.1" />
+            <circle cx="5" cy="20" r="2.1" />
+            <path d="M10 7h9M10 14h6M10 20h8" />
+          </svg>
+          <span>工单看板</span>
+        </div>
+        <h2 id="authTitle">登录</h2>
+        <p id="authIntro" class="auth-intro">这台机器上的工单是几个人共用的。登录后，谁建的、谁改的状态、谁评论的都会留下名字。</p>
+
+        <div class="seg auth-tabs" role="tablist">
+          <button id="authTabLogin" class="seg-btn active" type="button">登录</button>
+          <button id="authTabRegister" class="seg-btn" type="button">注册</button>
+        </div>
+
+        <label>用户名<input name="name" required maxlength="24" autocomplete="username" spellcheck="false" /></label>
+        <label id="authDisplayRow" hidden>显示名（可选）<input name="display" maxlength="32" placeholder="别人看到的名字" /></label>
+        <label>密码<input name="password" type="password" required minlength="6" autocomplete="current-password" /></label>
+
+        <div id="authError" class="auth-error" hidden></div>
+        <button id="authSubmit" class="primary" type="submit">登录</button>
+        <p id="authHint" class="auth-hint"></p>
+      </form>
+    </section>
+
+    <header class="top" id="topbar">
       <div class="brand">
         <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M5 3v18" />
@@ -41,6 +71,11 @@
         </button>
         <button id="settings" type="button" class="ghost">设置</button>
         <button id="new" type="button" class="primary">新建工单</button>
+        <span id="userChip" class="user-chip" hidden title="当前登录的账号">
+          <span id="userInitial" class="user-initial" aria-hidden="true"></span>
+          <span id="userName"></span>
+        </span>
+        <button id="logout" type="button" class="ghost tiny" hidden>退出</button>
       </div>
     </header>
 

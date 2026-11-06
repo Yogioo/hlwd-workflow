@@ -19,6 +19,9 @@ const state = {
   watch: { running: false, stopping: false },
   lastWatchError: null,
   attachments: [],
+  auth: { auth: false, user: null, firstRun: false },
+  authed: false,
+  timer: null,
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
@@ -43,6 +46,11 @@ async function api(path, options = {}) {
     headers: { 'content-type': 'application/json', ...(options.headers ?? {}) },
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && data.needsLogin) {
+    // 会话过期 / 在另一个窗口退了：直接回登录页，别让页面卡在一堆报错里
+    showAuth();
+    throw new Error(data.error ?? '需要登录');
+  }
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
   return data;
 }
@@ -274,6 +282,7 @@ async function openPanel(id, { quiet = false } = {}) {
   $('#panelTitle').textContent = issue.title;
   $('#panelMeta').innerHTML = [
     `<span class="meta-item"><i>类型</i>${esc(issue.type)}</span>`,
+    issue.createdBy ? `<span class="meta-item"><i>创建</i>${esc(issue.createdBy)}</span>` : '',
     `<span class="meta-item"><i>负责人</i>${esc(issue.assignee || '—')}</span>`,
     `<span class="meta-item"><i>更新</i>${esc(fmtTime(issue.updated))}</span>`,
     issue.labels.map(chip).join(''),
@@ -876,6 +885,7 @@ function panelBusy() {
 }
 
 async function tick() {
+  if (!state.authed) return; // 停在登录页时别空转
   if ($('#create').open || $('#settingsDialog').open) return;
   await load();
   if (!$('#panel').hidden && state.current) {
@@ -883,6 +893,87 @@ async function tick() {
     if (!panelBusy()) await openPanel(state.current.id, { quiet: true }).catch(() => {});
   }
 }
+
+// —— 登录 / 注册 ——
+// 部署在没人的机器上时，同事从内网进来先登录；WF_AUTH=off 时整段不生效。
+function authError(text) {
+  const el = $('#authError');
+  el.textContent = text ?? '';
+  el.hidden = !text;
+}
+
+const authMode = () => ($('#authTabRegister').classList.contains('active') ? 'register' : 'login');
+
+function setAuthMode(mode) {
+  const reg = mode === 'register';
+  $('#authTabLogin').classList.toggle('active', !reg);
+  $('#authTabRegister').classList.toggle('active', reg);
+  $('#authDisplayRow').hidden = !reg;
+  $('#authTitle').textContent = reg ? '注册' : '登录';
+  $('#authSubmit').textContent = reg ? '注册并进入' : '登录';
+  $('#authIntro').textContent = reg
+    ? state.auth?.firstRun
+      ? '第一个注册的账号是管理员。填个名字就能开始派活了。'
+      : '注册之后，你建的工单、改的状态、发的评论都会记在你名下。'
+    : '这台机器上的工单是几个人共用的。登录后，谁建的、谁改的状态、谁评论的都会留下名字。';
+  $('#authForm').password.autocomplete = reg ? 'new-password' : 'current-password';
+  $('#authHint').textContent = reg ? '密码至少 6 位，用户名以后改不了。' : '还没有账号？切到「注册」。';
+  authError('');
+}
+
+function applyAuth(me) {
+  state.auth = me ?? { auth: false, user: null, firstRun: false };
+  const authed = Boolean(me?.auth && me.user);
+  const needsLogin = Boolean(me?.auth && !me.user);
+  state.authed = authed;
+  document.body.classList.toggle('needs-auth', needsLogin);
+  $('#authScreen').hidden = !needsLogin;
+  $('#userChip').hidden = !authed;
+  $('#logout').hidden = !authed;
+  if (authed) {
+    const name = me.user.display || me.user.name;
+    $('#userName').textContent = name;
+    $('#userInitial').textContent = [...name][0]?.toUpperCase() ?? '?';
+    $('#userChip').title = `${me.user.name} · ${me.user.role === 'owner' ? '管理员' : '成员'}`;
+  }
+  if (needsLogin) setAuthMode(me.firstRun ? 'register' : 'login');
+  return authed;
+}
+
+/** 会话过期时从任何地方掉回登录页。 */
+function showAuth() {
+  applyAuth({ auth: true, user: null, firstRun: state.auth?.firstRun });
+  $('#authForm').name?.focus?.();
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  const form = event.target;
+  const f = new FormData(form);
+  const mode = authMode();
+  const payload = { name: String(f.get('name') ?? ''), password: String(f.get('password') ?? '') };
+  if (mode === 'register') payload.display = String(f.get('display') ?? '');
+  const btn = $('#authSubmit');
+  btn.disabled = true;
+  authError('');
+  try {
+    const out = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify(payload) });
+    applyAuth({ auth: true, user: out.user, firstRun: false });
+    form.reset();
+    await enterBoard();
+    hint(mode === 'register' ? `注册好了，欢迎 ${out.user.display}` : `欢迎回来，${out.user.display}`);
+  } catch (err) {
+    authError(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function logout() {
+  await api('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
+  location.reload(); // 重走一遍启动流程，顺便清掉内存里的旧状态
+}
+
 
 // —— 设置 ——
 async function openSettings() {
@@ -1235,13 +1326,35 @@ $('#recentProjects').addEventListener('click', (e) => {
   if (item) $('#projectForm').dir.value = item.dataset.dir;
 });
 
-api('/api/project')
-  .then((p) => {
-    applyProject(p);
-    hint(`项目 ${p.dir}`);
-  })
-  .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
+// —— 登录页 ——
+$('#authTabLogin').addEventListener('click', () => setAuthMode('login'));
+$('#authTabRegister').addEventListener('click', () => setAuthMode('register'));
+$('#authForm').addEventListener('submit', submitAuth);
+$('#logout').addEventListener('click', logout);
 
-renderSkeleton();
-load();
-setInterval(tick, AUTO_REFRESH_MS);
+/** 登录之后才进看板：这里做的事就是原来的启动流程，只是可以被重复调用。 */
+async function enterBoard() {
+  document.body.classList.remove('needs-auth');
+  state.authed = true;
+  await api('/api/project')
+    .then((p) => {
+      applyProject(p);
+      hint(`项目 ${p.dir}`);
+    })
+    .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
+  renderSkeleton();
+  await load();
+  if (!state.timer) state.timer = setInterval(tick, AUTO_REFRESH_MS);
+}
+
+(async function boot() {
+  let me = { auth: false, user: null, firstRun: false };
+  try {
+    me = await api('/api/auth/me');
+  } catch {
+    // 老版本看板没有这个接口：直接进，当作没开登录
+  }
+  applyAuth(me);
+  if (me.auth && !me.user) return; // 停在登录/注册
+  await enterBoard();
+})();

@@ -75,6 +75,8 @@ async function main() {
   log(`项目 ${workdir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
 
   const cfg = await loadConfig(workdir);
+  // 之后的 bd 写操作（接单 / 评论 / 改状态）都算「ai」干的：审计轨迹里一眼能分消人和 AI
+  beads.setActor(cfg.actor);
   const attempts = args.attempts ?? cfg.attempts;
 
   if (args.dry) {

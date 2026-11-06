@@ -22,9 +22,27 @@ const WIN = process.platform === 'win32';
 // 当前项目目录：所有 bd 命令都在它下面跑。多项目靠 setWorkdir 切换。
 let workdir = process.cwd();
 
+// 默认「谁干的」：bd 的 --actor 会记进 created_by / 评论作者 / 审计轨迹。
+// engine 启动时设一次（cfg.actor）；web 每个写请求按登录用户传，不用这个默认值。
+let defaultActor = '';
+
 export function setWorkdir(dir) {
   workdir = path.resolve(dir);
 }
+
+export function setActor(name) {
+  defaultActor = String(name ?? '').trim();
+}
+
+export function getActor() {
+  return defaultActor;
+}
+
+/** 带上 --actor：显式传的优先，否则用默认的；都没有就不带（bd 自己回落到 git user）。 */
+const withActor = (args, actor) => {
+  const who = String(actor ?? defaultActor ?? '').trim();
+  return who ? [...args, '--actor', who] : args;
+};
 
 export function getWorkdir() {
   return workdir;
@@ -100,13 +118,14 @@ export function normalize(raw) {
     body: raw.description ?? '',
     status: raw.status ?? 'open',
     labels: raw.labels ?? [],
-    assignee: raw.assignee ?? raw.owner ?? '',
+    assignee: raw.assignee ?? '', // 只认真的指派人；bd 的 owner（git user）不是负责人
     owner: raw.owner ?? '',
     type: raw.issue_type ?? '',
     priority: raw.priority ?? 2,
     commentCount: raw.comment_count ?? 0,
     created: raw.created_at ?? '',
     updated: raw.updated_at ?? '',
+    createdBy: raw.created_by ?? '', // bd 原生字段：创建时的 --actor
     parent: raw.parent ?? null,
   };
 }
@@ -142,20 +161,21 @@ export async function listComments(id) {
   }));
 }
 
-export async function createIssue({ title, description = '', type, priority, labels = [], assignee } = {}) {
+export async function createIssue({ title, description = '', type, priority, labels = [], assignee, actor } = {}) {
   if (!title || !title.trim()) throw new BeadsError('title 不能为空');
-  const args = ['create', title, '--stdin', '--json'];
+  let args = ['create', title, '--stdin', '--json'];
   if (type) args.push('-t', type);
   if (priority !== undefined && priority !== '') args.push('-p', String(priority));
   if (labels.length) args.push('-l', labels.join(','));
   if (assignee) args.push('-a', assignee);
+  args = withActor(args, actor);
   const raw = await bdJson(args, { input: description });
   return normalize(Array.isArray(raw) ? raw[0] : raw);
 }
 
 export async function updateIssue(id, patch = {}) {
-  const { status, priority, assignee, title, description, addLabels = [], removeLabels = [] } = patch;
-  const args = ['update', id];
+  const { status, priority, assignee, title, description, addLabels = [], removeLabels = [], actor } = patch;
+  let args = ['update', id];
   let input;
   if (status) args.push('--status', status);
   if (priority !== undefined && priority !== '') args.push('--priority', String(priority));
@@ -167,13 +187,13 @@ export async function updateIssue(id, patch = {}) {
   }
   for (const l of addLabels) args.push('--add-label', l);
   for (const l of removeLabels) args.push('--remove-label', l);
-  if (args.length > 2) await run(args, { input });
+  if (args.length > 2) await run(withActor(args, actor), { input });
   return (await getIssue(id)).issue;
 }
 
-export async function commentIssue(id, text) {
+export async function commentIssue(id, text, { actor } = {}) {
   if (!text || !text.trim()) throw new BeadsError('评论不能为空');
-  await run(['comment', id, '--stdin'], { input: text });
+  await run(withActor(['comment', id, '--stdin'], actor), { input: text });
   return listComments(id);
 }
 

@@ -24,6 +24,21 @@ import {
   savePrompts,
 } from '../project.mjs';
 import * as beads from './beads.mjs';
+import {
+  AuthError,
+  SESSION_COOKIE,
+  SESSION_MAX_AGE_S,
+  changePassword,
+  countUsers,
+  createSession,
+  dropSession,
+  listUsers,
+  publicUser,
+  readSession,
+  register,
+  renameUser,
+  verify,
+} from './auth.mjs';
 import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
 import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
@@ -34,6 +49,9 @@ const PORT = Number(process.env.PORT ?? 3100);
 const HOST = process.env.HOST ?? '127.0.0.1';
 // 设了口令就全站要口令：内网分享时至少不是裸奔（?token= 会记成 cookie，之后不用再带）
 const TOKEN = String(process.env.WF_TOKEN ?? '').trim();
+// 账号登录：部署在没人守的机器上、同事从内网访问时默认开。单机自用可以 WF_AUTH=off 关掉。
+const AUTH = String(process.env.WF_AUTH ?? 'on').toLowerCase() !== 'off';
+const AUTH_OPEN = new Set(['/api/auth/me', '/api/auth/login', '/api/auth/register']);
 const isLoopbackAddr = (addr = '') => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 
 /** 内网可访问的地址：绑 0.0.0.0 时给同事的就是这些。 */
@@ -64,6 +82,13 @@ function json(res, status, payload) {
   res.end(body);
 }
 
+// 同一次响应可能要种两个 cookie（口令 + 会话），setHeader 会互相盖掉，所以追加着写
+function appendCookie(res, value) {
+  const prev = res.getHeader('set-cookie');
+  const list = prev ? (Array.isArray(prev) ? prev : [prev]) : [];
+  res.setHeader('set-cookie', [...list, value]);
+}
+
 // —— 访问口令（可选，内网分享时建议开） ——
 function cookieValue(req, name) {
   for (const part of String(req.headers.cookie ?? '').split(';')) {
@@ -76,6 +101,22 @@ function cookieValue(req, name) {
 function tokenGiven(req, url) {
   return url.searchParams.get('token') ?? req.headers['x-wf-token'] ?? cookieValue(req, 'wf_token');
 }
+
+// —— 身份 ——
+// 登录后 cookie 里是随机 token（不是密码）；token → 用户在 auth.mjs 里查。
+const sessionToken = (req) => cookieValue(req, SESSION_COOKIE);
+
+async function currentUser(req) {
+  if (!AUTH) return null;
+  return readSession(sessionToken(req)).catch(() => null);
+}
+
+/** bd 的 --actor 用显示名：审计轨迹（created_by / 评论作者）里人一眼认得。 */
+const actorOf = (user) => (user ? user.display || user.name : '');
+
+const setSessionCookie = (res, token) =>
+  appendCookie(res, `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=Lax`);
+const clearSessionCookie = (res) => appendCookie(res, `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
 
 function needToken(res) {
   res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -215,13 +256,15 @@ async function watchAction(dir, action) {
       detached: true,
       stdio: ['ignore', log.fd, log.fd],
     });
+    // 子进程已经拿到自己那份 fd，父进程这份立刻关掉：
+    // 不关会漏文件句柄，Node 22+ 还会在 GC 时报 DEP0137 警告
+    await log.close().catch(() => {});
     child.unref();
     for (let i = 0; i < 50; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
       const st = await watchState(dir);
       if (st.running) return st;
     }
-    await log.close();
     return { ...(await watchState(dir)), error: `没起来，看日志 ${WATCH_LOG}` };
   }
 
@@ -435,6 +478,65 @@ async function route(req, res, url) {
     }
   }
 
+  const user = await currentUser(req);
+
+  // 没登录就只能访问登录/注册接口和静态页（页面自己要能加载才能显示登录框）
+  if (AUTH && !user && pathname.startsWith('/api/') && !AUTH_OPEN.has(pathname)) {
+    return json(res, 401, { error: '需要登录', needsLogin: true });
+  }
+
+  if (pathname === '/api/auth/me') {
+    return json(res, 200, {
+      auth: AUTH,
+      user: user ? publicUser(user) : null,
+      firstRun: AUTH && (await countUsers()) === 0,
+      users: AUTH ? await listUsers() : [],
+    });
+  }
+
+  if (pathname === '/api/auth/register' || pathname === '/api/auth/login' || pathname === '/api/auth/logout') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    try {
+      if (!AUTH) throw new AuthError('这个看板没开登录（启动时设了 WF_AUTH=off）', 400);
+      if (pathname === '/api/auth/logout') {
+        await dropSession(sessionToken(req));
+        clearSessionCookie(res);
+        return json(res, 200, { ok: true, user: null });
+      }
+      const body = await readBody(req);
+      // 注册完直接算登录：不用让人填两遍
+      const account = pathname === '/api/auth/register' ? await register(body) : await verify(body);
+      setSessionCookie(res, await createSession(account.name));
+      return json(res, pathname === '/api/auth/register' ? 201 : 200, { user: account, auth: AUTH });
+    } catch (err) {
+      return json(res, err instanceof AuthError ? err.status : 400, { error: err.message });
+    }
+  }
+
+  if (pathname === '/api/auth/password') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    if (!user) throw new AuthError('需要登录', 401);
+    try {
+      const body = await readBody(req);
+      const updated = await changePassword(user.name, body.oldPassword, body.newPassword, sessionToken(req));
+      return json(res, 200, { user: updated });
+    } catch (err) {
+      return json(res, err instanceof AuthError ? err.status : 400, { error: err.message });
+    }
+  }
+
+  if (pathname === '/api/auth/name') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    if (!user) throw new AuthError('需要登录', 401);
+    try {
+      const body = await readBody(req);
+      const updated = await renameUser(user.name, body.display);
+      return json(res, 200, { user: updated });
+    } catch (err) {
+      return json(res, err instanceof AuthError ? err.status : 400, { error: err.message });
+    }
+  }
+
   if (pathname === '/api/meta') {
     const p = await project();
     const cfg = await readProjectConfig(p.dir);
@@ -540,6 +642,7 @@ async function route(req, res, url) {
         priority: body.priority,
         labels: body.labels ?? [],
         assignee: body.assignee ?? undefined,
+        actor: actorOf(user), // 记下是谁建的（bd 原生 created_by）
       });
       return json(res, 201, { issue });
     }
@@ -589,7 +692,8 @@ async function route(req, res, url) {
     if (m[2] === '/comments') {
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
       const body = await readBody(req);
-      const comments = await beads.commentIssue(id, body.text);
+      // 评论作者 = 登录的人（bd comments 的 author 就来自 --actor）
+      const comments = await beads.commentIssue(id, body.text, { actor: actorOf(user) });
       return json(res, 200, { comments });
     }
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
@@ -598,6 +702,10 @@ async function route(req, res, url) {
     if (req.method === 'GET') return json(res, 200, await beads.getIssue(id));
     if (req.method === 'PATCH') {
       const body = await readBody(req);
+      const actor = actorOf(user);
+      // 状态变了要留一笔「谁改的」：bd 的 update 不记变更人，只能靠评论 + --actor
+      let before = null;
+      if (body.status) before = (await beads.getIssue(id)).issue;
       const issue = await beads.updateIssue(id, {
         status: body.status ?? undefined,
         priority: body.priority ?? undefined,
@@ -606,7 +714,16 @@ async function route(req, res, url) {
         description: body.description ?? undefined,
         addLabels: body.addLabels ?? [],
         removeLabels: body.removeLabels ?? [],
+        actor,
       });
+      if (before && before.status !== issue.status) {
+        const p = await project();
+        const cfg = await readProjectConfig(p.dir);
+        const name = (s) => cfg.labels?.statuses?.[s] ?? s;
+        await beads
+          .commentIssue(id, `状态：${name(before.status)} → ${name(issue.status)}`, { actor })
+          .catch(() => {}); // 留不下痕迹也不影响改单本身
+      }
       return json(res, 200, { issue });
     }
     return json(res, 405, { error: 'method not allowed' });
@@ -686,8 +803,13 @@ server.listen(PORT, HOST, async () => {
   if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
     const urls = lanUrls(PORT);
     console.log(`内网分享（绑 ${HOST}）：${urls.join('  ') || '没找到内网地址'}`);
-    console.log(TOKEN ? '访问口令：已开启（WF_TOKEN）' : '注意：没设 WF_TOKEN，本网段的人都能建单/改单');
+    console.log(TOKEN ? '访问口令：已开启（WF_TOKEN）' : '访问口令：无');
   }
+  console.log(
+    AUTH
+      ? '账号登录：已开启（第一次打开页面会引导注册；单机自用可 WF_AUTH=off 关掉）'
+      : '账号登录：关（WF_AUTH=off），评论与建单按 bd 的 actor 记',
+  );
   try {
     const p = await project();
     console.log(`当前项目：${p.dir}`);

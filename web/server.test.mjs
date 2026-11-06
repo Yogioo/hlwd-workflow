@@ -8,6 +8,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureProject } from '../project.mjs';
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'server.mjs');
 const TOKEN = 's3cret';
@@ -36,14 +37,23 @@ async function waitUp(base) {
   throw new Error('server 没起来');
 }
 
-/** 起一个只绑 loopback、带口令的 server，跑完就杀。 */
-async function withServer(fn) {
+/** 起一个只绑 loopback 的 server，跑完就杀。auth=true 时开账号登录（默认关着，测老契约）。 */
+async function withServer(fn, { auth = false } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hlwd-server-'));
   await fs.mkdir(path.join(dir, '.beads'), { recursive: true }); // 免得走 bd init
   const port = await freePort();
   const proc = spawn(process.execPath, [SERVER], {
     cwd: dir,
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), WF_TOKEN: TOKEN, HLWD_PROJECT: dir, WF_NO_OPEN: '1' },
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      WF_TOKEN: TOKEN,
+      WF_AUTH: auth ? 'on' : 'off',
+      HLWD_HOME: path.join(dir, 'home'), // 账号/会话写到临时目录，别碰本机真账号
+      HLWD_PROJECT: dir,
+      WF_NO_OPEN: '1',
+    },
     stdio: 'ignore',
   });
   const base = `http://127.0.0.1:${port}`;
@@ -208,6 +218,135 @@ test('会话接口：列出轮次 / 读一轮 / SSE 跟着长', async () => {
     assert.match(text, /event: messages/);
     assert.match(text, /event: done/);
     assert.match(text, /"kind":"tool"/);
+  });
+});
+
+test('账号：没登录 401，注册后按人记账（创建者 / 评论作者 / 改状态）', async () => {
+  await withServer(async ({ base, dir }) => {
+    // 自己管 cookie：node 的 fetch 不存 cookie
+    const jar = {};
+    const takeCookies = (res) => {
+      const raw = res.headers.getSetCookie?.() ?? [];
+      for (const line of raw) {
+        const [pair] = line.split(';');
+        const [k, ...rest] = pair.split('=');
+        jar[k.trim()] = rest.join('=');
+      }
+    };
+    const call = async (path, options = {}) => {
+      const url = `${base}${path}${path.includes('?') ? '&' : '?'}token=${TOKEN}`;
+      const res = await fetch(url, {
+        ...options,
+        headers: { 'content-type': 'application/json', ...(jar.wf_session ? { cookie: `wf_session=${jar.wf_session}` } : {}) },
+      });
+      takeCookies(res);
+      const data = await res.json().catch(() => ({}));
+      return { status: res.status, data };
+    };
+
+    // 这个用例真的要写 beads：把占位目录换成真库（bd init）
+    await fs.rm(path.join(dir, '.beads'), { recursive: true, force: true });
+    await ensureProject(dir);
+
+    // 1) 没登录：接口挡住，登录页自己能加载
+    assert.equal((await call('/api/issues')).status, 401);
+    assert.equal((await call('/api/issues')).data.needsLogin, true);
+    assert.equal((await fetch(`${base}/index.html?token=${TOKEN}`)).status, 200);
+
+    const me0 = await call('/api/auth/me');
+    assert.equal(me0.status, 200);
+    assert.equal(me0.data.auth, true);
+    assert.equal(me0.data.user, null);
+    assert.equal(me0.data.firstRun, true, '还没有账号 → 引导去注册');
+
+    // 2) 注册第一个账号：自动是 owner，并直接登录
+    const reg = await call('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'alice', display: '爱丽丝', password: 'secret1' }),
+    });
+    assert.equal(reg.status, 201, JSON.stringify(reg.data));
+    assert.equal(reg.data.user.name, 'alice');
+    assert.equal(reg.data.user.display, '爱丽丝');
+    assert.equal(reg.data.user.role, 'owner');
+    assert.ok(jar.wf_session, '注册后要有会话 cookie');
+    assert.equal(reg.data.user.hash, undefined, '别把密码哈希吐给前端');
+    assert.equal(reg.data.user.salt, undefined);
+
+    // 3) 建单：创建者记成登录的人
+    const created = await call('/api/issues', {
+      method: 'POST',
+      body: JSON.stringify({ title: '谁建的这张单', type: 'task', priority: 2 }),
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const cardId = created.data.issue.id;
+    assert.equal(created.data.issue.createdBy, '爱丽丝');
+
+    // 4) 评论：作者是登录的人
+    await call(`/api/issues/${cardId}/comments`, { method: 'POST', body: JSON.stringify({ text: '我是爱丽丝' }) });
+    const detail = await call(`/api/issues/${cardId}`);
+    assert.equal(detail.data.comments.at(-1).author, '爱丽丝');
+
+    // 5) 改状态：留一条「谁改的」记录
+    const patched = await call(`/api/issues/${cardId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'in_progress' }),
+    });
+    assert.equal(patched.status, 200, JSON.stringify(patched.data));
+    assert.equal(patched.data.issue.status, 'in_progress');
+    const after = await call(`/api/issues/${cardId}`);
+    const change = after.data.comments.at(-1);
+    assert.equal(change.author, '爱丽丝', '状态变更要署上是谁改的');
+    assert.match(change.text, /状态/);
+    assert.match(change.text, /待接|open/);
+    assert.match(change.text, /执行中|in_progress/);
+
+    // 6) 第二个人：重名不行，密码错不行
+    const dup = await call('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'ALICE', password: 'secret2' }),
+    });
+    assert.equal(dup.status, 400);
+    assert.match(dup.data.error, /已经被注册/);
+
+    const badPass = await call('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'alice', password: 'nope-nope' }),
+    });
+    assert.equal(badPass.status, 401);
+
+    // 7) 重登（清除当前会话后用密码登回来），资料落在磁盘上且是 0600
+    const usersFile = path.join(dir, 'home', 'users.json');
+    const saved = JSON.parse(await fs.readFile(usersFile, 'utf8'));
+    assert.equal(saved.users.length, 1);
+    assert.ok(saved.users[0].salt && saved.users[0].hash, '密码只存 salt + hash');
+    assert.ok(!JSON.stringify(saved).includes('secret1'), '不能存明文密码');
+    const mode = (await fs.stat(usersFile)).mode & 0o777;
+    if (process.platform !== 'win32') assert.equal(mode, 0o600);
+
+    await call('/api/auth/logout', { method: 'POST', body: '{}' });
+    assert.equal((await call('/api/issues')).status, 401, '退出后又要登录');
+    const back = await call('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'alice', password: 'secret1' }),
+    });
+    assert.equal(back.status, 200);
+    assert.equal((await call('/api/issues')).status, 200);
+  }, { auth: true });
+});
+
+test('账号：WF_AUTH=off 时不用登录（单机自用）', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const me = await (await fetch(`${base}/api/auth/me${t}`)).json();
+    assert.equal(me.auth, false);
+    assert.equal(me.user, null);
+    assert.equal((await fetch(`${base}/api/meta${t}`)).status, 200, '关掉登录就能直接访问接口');
+    const reg = await fetch(`${base}/api/auth/register${t}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'bob', password: 'secret1' }),
+    });
+    assert.equal(reg.status, 400, '关着的时候不该还能注册');
   });
 });
 
