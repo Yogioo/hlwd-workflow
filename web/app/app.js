@@ -12,12 +12,20 @@ const state = {
   readyLabel: 'ready-for-agent',
   current: null,
   trace: null,
+  gate: { path: '', exists: false },
   project: { dir: '', recent: [] },
   filter: { q: '', ready: false },
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
 const prioLabel = (p) => state.labels.priorities[p] ?? `P${p}`;
+// 全链路里的原因：一行放不下就折起来，别把面板拉成长条
+const reasonCell = (text) => {
+  const s = String(text ?? '');
+  return s.length > 120
+    ? `${esc(s.slice(0, 120))}…<details class="trace-checks"><summary>完整原因</summary><div>${esc(s)}</div></details>`
+    : esc(s);
+};
 
 // ready-for-agent 对人没意义，直接说「可派给 AI」
 const chip = (label) =>
@@ -206,14 +214,14 @@ function renderTrace({ runs, history }) {
       steps.push(`<div class="trace-line"><span class="mono">${fmtTime(e.startedAt)}</span> 执行 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(e.ms)}<span class="dot">·</span>${e.ok ? 'ok' : '<b class="fail">失败</b>'}</div>`);
       if (!e.ok && e.error) steps.push(`<div class="trace-sub">${esc(e.error)}</div>`);
 
+      const g = a.gate;
+      if (g) {
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(g.startedAt)}</span> 门禁 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(g.ms)}<span class="dot">·</span><b class="${g.pass ? 'pass' : 'fail'}">${g.pass ? 'pass' : 'fail'}</b> ${reasonCell(g.reason)}</div>`);
+      }
+
       const r = a.review;
       if (r) {
-        const reason = String(r.reason ?? '');
-        const reasonHtml =
-          reason.length > 120
-            ? `${esc(reason.slice(0, 120))}…<details class="trace-checks"><summary>完整原因</summary><div>${esc(reason)}</div></details>`
-            : esc(reason);
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonHtml}</div>`);
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonCell(r.reason)}</div>`);
         if (r.checks?.length) {
           steps.push(`<details class="trace-checks"><summary>验证 ${r.checks.length} 条</summary>${r.checks.map((c) => `<div>${esc(c)}</div>`).join('')}</details>`);
         }
@@ -277,7 +285,10 @@ async function tick() {
 
 // —— 设置 ——
 async function openSettings() {
-  const { config: cfg, prompts } = await api('/api/settings');
+  const { config: cfg, prompts, gate } = await api('/api/settings');
+  state.gate = gate ?? { path: '', exists: false };
+  $('#gatePath').textContent = gate?.path ?? '—';
+  $('#gatePath').title = gate?.exists ? '门禁脚本路径' : '门禁脚本还不存在（重新打开项目会自动创建）';
   $('#statusLabels').innerHTML = (cfg.columns ?? state.statuses)
     .map((s) => `<label>${esc(s)}<input name="status:${esc(s)}" value="${esc(cfg.labels?.statuses?.[s] ?? '')}" /></label>`)
     .join('');
@@ -409,6 +420,30 @@ $('#createForm').addEventListener('submit', async (e) => {
 });
 
 $('#settings').addEventListener('click', () => openSettings().catch((err) => hint(err.message, true)));
+async function openGate(target) {
+  if (!state.gate?.path) return hint('当前项目还没有门禁路径', true);
+  try {
+    const res = await api('/api/gate/open', { method: 'POST', body: JSON.stringify({ target }) });
+    hint(target === 'folder' ? `已在文件管理器里定位：${res.path}` : `已用 ${res.via} 打开：${res.path}`);
+  } catch (err) {
+    hint(`打不开，手动去改：${state.gate.path}`, true);
+    throw err;
+  }
+}
+
+$('#gateOpen').addEventListener('click', () => openGate('editor').catch((err) => hint(`打不开：${err.message}`, true)));
+$('#gateReveal').addEventListener('click', () => openGate('folder').catch((err) => hint(`打不开：${err.message}`, true)));
+$('#gateCopy').addEventListener('click', async () => {
+  const text = state.gate?.path ?? '';
+  if (!text) return hint('当前项目还没有门禁路径', true);
+  try {
+    await navigator.clipboard.writeText(text);
+    hint(`已复制门禁路径：${text}`);
+  } catch {
+    hint('复制失败，请手动选中上面的路径', true);
+  }
+});
+
 $('#settingsCancel').addEventListener('click', () => $('#settingsDialog').close());
 $('#settingsForm').addEventListener('submit', saveSettings);
 

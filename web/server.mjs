@@ -1,11 +1,13 @@
 // web 黑盒：把「当前项目」的 beads 适配层暴露成 HTTP JSON 接口 + 单页看板。
 // 不跑 AI、不写 git、不碰 .beads 里的数据文件；项目可以随时切换。
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ensureProject,
+  gateFile,
   readProjectConfig,
   readPrompts,
   readState,
@@ -95,6 +97,93 @@ async function projectPayload() {
   return { dir: p.dir, created: p.created ?? [], config, prompts, recent: state.recent };
 }
 
+// —— 门禁：只负责把用户送到那个文件（不读内容、不编辑，改脚本是编辑器的事） ——
+async function gatePayload(dir) {
+  const file = gateFile(dir);
+  const exists = await fs
+    .stat(file)
+    .then(() => true)
+    .catch(() => false);
+  return { path: file, exists };
+}
+
+/** 起一个分离的黑盒进程；resolve 的是“起没起来”，不是“用户点没点开”。 */
+function launch(cmd, args) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok, error) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok, error });
+    };
+    try {
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+      child.on('spawn', () => done(true));
+      child.on('error', (err) => done(false, err.message));
+      child.unref();
+    } catch (err) {
+      done(false, err.message);
+    }
+  });
+}
+
+/** 依次尝试几个打开方式，第一个起得来的算数。返回的是“当时用了哪个命令”。 */
+async function launchFirst(attempts, what) {
+  const errors = [];
+  for (const [cmd, args, label] of attempts) {
+    const res = await launch(cmd, args);
+    if (res.ok) return label ?? cmd;
+    errors.push(`${label ?? cmd}: ${res.error}`);
+  }
+  throw new Error(`打不开${what}（${errors.join('；')}）`);
+}
+
+/** PATH 里有没有这个命令：win32 下 spawn .cmd 需要 shell，所以先问一句再决定。 */
+function hasCommand(cmd) {
+  const [finder, args] = process.platform === 'win32' ? ['where.exe', [cmd]] : ['which', [cmd]];
+  return new Promise((resolve) => {
+    const child = spawn(finder, args, { stdio: 'ignore', windowsHide: true });
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+/** target=editor 用编辑器打开脚本；target=folder 在文件管理器里定位到它。 */
+async function openGate(dir, target) {
+  const gate = await gatePayload(dir);
+  if (!gate.exists) throw new Error(`门禁脚本不存在：${gate.path}（重新打开项目会自动创建）`);
+  const win = process.platform === 'win32';
+  const mac = process.platform === 'darwin';
+
+  if (target === 'folder') {
+    const attempts = win
+      ? [['explorer.exe', [`/select,"${gate.path}"`], 'explorer']]
+      : mac
+        ? [['open', ['-R', gate.path], 'finder']]
+        : [['xdg-open', [path.dirname(gate.path)], 'xdg-open']];
+    const via = await launchFirst(attempts, '文件管理器');
+    return { ...gate, target, via };
+  }
+
+  // editor：自定义编辑器 > VS Code > 系统默认关联程序
+  const custom = (process.env.HLWD_EDITOR ?? '').trim().split(/\s+/).filter(Boolean);
+  const attempts = [];
+  if (custom.length) attempts.push([custom[0], [...custom.slice(1), gate.path], custom[0]]);
+  if (await hasCommand('code')) {
+    attempts.push(win ? ['cmd.exe', ['/c', 'code', '--goto', gate.path], 'code'] : ['code', ['--goto', gate.path], 'code']);
+  }
+  attempts.push(
+    win
+      ? ['cmd.exe', ['/c', 'start', '', gate.path], '系统默认程序']
+      : mac
+        ? ['open', [gate.path], '系统默认程序']
+        : ['xdg-open', [gate.path], 'xdg-open'],
+  );
+
+  const via = await launchFirst(attempts, '门禁脚本');
+  return { ...gate, target, via };
+}
+
 // 搜索：标题 + 描述 + 评论。评论按 issue.updated 缓存，避免每敲一个字都重跑 bd。
 const commentCache = new Map();
 
@@ -155,7 +244,11 @@ async function route(req, res, url) {
   if (pathname === '/api/settings') {
     const p = await project();
     if (req.method === 'GET') {
-      return json(res, 200, { config: await readProjectConfig(p.dir), prompts: await readPrompts(p.dir) });
+      return json(res, 200, {
+        config: await readProjectConfig(p.dir),
+        prompts: await readPrompts(p.dir),
+        gate: await gatePayload(p.dir),
+      });
     }
     if (req.method === 'PUT') {
       const body = await readBody(req);
@@ -171,6 +264,19 @@ async function route(req, res, url) {
   }
 
   await project(); // 以下接口都作用于当前项目
+
+  // 设置里的「门禁」按钮：把用户送到 <项目>/.hlwd/gate.mjs
+  if (pathname === '/api/gate/open') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    const body = await readBody(req);
+    const target = body.target === 'folder' ? 'folder' : 'editor';
+    const p = await project();
+    try {
+      return json(res, 200, await openGate(p.dir, target));
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
+  }
 
   if (pathname === '/api/issues') {
     if (req.method === 'GET') {

@@ -133,6 +133,8 @@ async function trace(cardId, cfg) {
       const e = a.execute ?? {};
       console.log(`  #${a.attempt} 执行 ${dur(e.ms)} ${e.ok ? 'ok' : '失败'}`);
       if (!e.ok && e.error) console.log(`       ${String(e.error).split('\n')[0]}`);
+      const g = a.gate;
+      if (g) console.log(`  #${a.attempt} 门禁 ${dur(g.ms)} ${g.pass ? 'pass' : 'fail'} — ${String(g.reason ?? '').split('\n')[0].slice(0, 150)}`);
       const r = a.review;
       if (!r) continue;
       console.log(`  #${a.attempt} 审查 ${dur(r.ms)} ${r.pass ? 'pass' : 'fail'} — ${String(r.reason ?? '').slice(0, 150)}`);

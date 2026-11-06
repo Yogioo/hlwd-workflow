@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import { DEFAULT_CONFIG, ensureProject, readProjectConfig, readPrompts, saveProjectConfig, savePrompts } from './project.mjs';
+import { DEFAULT_CONFIG, GATE_TEMPLATE, ensureProject, gateFile, readProjectConfig, readPrompts, saveProjectConfig, savePrompts } from './project.mjs';
 
 /** 临时"项目"：预建 .beads 目录，避免测试里去 bd init。 */
 async function withTempProject(fn) {
@@ -19,7 +20,7 @@ async function withTempProject(fn) {
   }
 }
 
-test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词、runs/', async () => {
+test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词、门禁、runs/', async () => {
   await withTempProject(async (dir) => {
     const info = await ensureProject(dir);
 
@@ -28,6 +29,7 @@ test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词
     assert.ok(info.created.includes('.hlwd/config.json'));
     assert.ok(info.created.includes('.hlwd/prompts/execute.md'));
     assert.ok(info.created.includes('.hlwd/prompts/review.md'));
+    assert.ok(info.created.includes('.hlwd/gate.mjs'));
 
     const config = JSON.parse(await fs.readFile(path.join(dir, '.hlwd', 'config.json'), 'utf8'));
     assert.deepEqual(config.columns, DEFAULT_CONFIG.columns);
@@ -39,14 +41,21 @@ test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词
     }
     const runs = await fs.stat(path.join(dir, '.hlwd', 'runs'));
     assert.ok(runs.isDirectory());
+
+    // 门禁默认是 always true：新建的项目不应该因为门禁被卡住
+    assert.equal(await fs.readFile(gateFile(dir), 'utf8'), GATE_TEMPLATE);
+    const gate = (await import(`${pathToFileURL(gateFile(dir)).href}?t=${Date.now()}`)).default;
+    assert.equal(typeof gate, 'function');
+    assert.equal((await gate({ workdir: dir, attempt: 1 })).pass, true);
   });
 });
 
-test('ensureProject 不覆盖已有配置与提示词', async () => {
+test('ensureProject 不覆盖已有配置、提示词与门禁', async () => {
   await withTempProject(async (dir) => {
     await ensureProject(dir);
     await saveProjectConfig(dir, { labels: { statuses: { open: '待认领' } } });
     await savePrompts(dir, { execute: '自定义执行提示词 {{ID}}' });
+    await fs.writeFile(gateFile(dir), 'export default async () => false;\n', 'utf8');
 
     const info = await ensureProject(dir);
     assert.equal(info.created.length, 0, '第二次打开不应该再建东西');
@@ -55,6 +64,7 @@ test('ensureProject 不覆盖已有配置与提示词', async () => {
     assert.equal(cfg.labels.statuses.open, '待认领');
     const prompts = await readPrompts(dir);
     assert.equal(prompts.execute, '自定义执行提示词 {{ID}}');
+    assert.match(await fs.readFile(gateFile(dir), 'utf8'), /export default async \(\) => false/, '用户改过的门禁不能被模板覆盖');
   });
 });
 

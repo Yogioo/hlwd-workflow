@@ -11,6 +11,7 @@ import * as beads from '../web/beads.mjs';
 import { complete, handback } from './flows/complete.mjs';
 import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
+import { gate as gateStage } from './flows/gate.mjs';
 import { review } from './flows/review.mjs';
 import { loadConfig, log, run } from './lib.mjs';
 import { clip, createManifest, finish } from './manifest.mjs';
@@ -103,7 +104,7 @@ async function main() {
   const rel = (p) => path.relative(workdir, p).replaceAll('\\', '/');
   let feedback = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const record = { attempt, execute: null, review: null };
+    const record = { attempt, execute: null, gate: null, review: null };
     manifest.attempts.push(record);
 
     const execStart = Date.now();
@@ -123,6 +124,24 @@ async function main() {
       await handback({ workdir, issue, runDir, reason: exec.error, status: 'open' });
       await finish(manifest, save, journal, { outcome: 'rolled_back', reason: exec.error });
       return 1;
+    }
+
+    // 门禁：实现 → 门禁 → 审查。不通过就不进审查，直接把原因回灌给执行端。
+    const gateStart = Date.now();
+    const gateResult = await gateStage({ cfg, workdir, issue, runDir, attempt });
+    record.gate = {
+      startedAt: new Date(gateStart).toISOString(),
+      ms: Date.now() - gateStart,
+      pass: gateResult.pass,
+      reason: gateResult.reason,
+    };
+    await save();
+    await journal('gate', { attempt, pass: gateResult.pass, ms: record.gate.ms, reason: clip(gateResult.reason) });
+
+    if (!gateResult.pass) {
+      feedback = `## 门禁不通过（第 ${attempt} 轮）\n${gateResult.reason}\n（判定规则在 .hlwd/gate.mjs）`;
+      if (attempt < attempts) log('门禁不通过，退回执行端继续改（同一工作区）');
+      continue;
     }
 
     const reviewStart = Date.now();

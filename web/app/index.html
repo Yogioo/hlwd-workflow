@@ -130,6 +130,17 @@
           <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
         </div>
 
+        <h3>门禁（项目的 .hlwd/gate.mjs）</h3>
+        <p class="dialog-note">engine 每轮都按 <b>执行 → 门禁 → 审查</b> 跑它：返回 <code>true</code> 才进审查，<code>{ pass: false, reason }</code> 就把 reason 打回执行端继续改。默认 always true，改这个文件就能加测试/构建/自定义检查。</p>
+        <div class="gate-row">
+          <code id="gatePath" class="mono">—</code>
+          <div class="gate-actions">
+            <button type="button" class="ghost" id="gateOpen">打开脚本</button>
+            <button type="button" class="ghost" id="gateReveal">打开所在目录</button>
+            <button type="button" class="ghost" id="gateCopy">复制路径</button>
+          </div>
+        </div>
+
         <h3>提示词（存在项目的 .hlwd/prompts/）</h3>
         <div class="settings-grid one">
           <label>执行提示词 execute.md

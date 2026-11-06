@@ -38,6 +38,7 @@ export const hlwdDir = (projectDir) => path.join(projectDir, '.hlwd');
 export const runsDir = (projectDir) => path.join(hlwdDir(projectDir), 'runs');
 export const journalFile = (projectDir) => path.join(hlwdDir(projectDir), 'journal.ndjson');
 export const promptsDir = (projectDir) => path.join(hlwdDir(projectDir), 'prompts');
+export const gateFile = (projectDir) => path.join(hlwdDir(projectDir), 'gate.mjs');
 const configFile = (projectDir) => path.join(hlwdDir(projectDir), 'config.json');
 
 const readJson = async (file, fallback) => {
@@ -159,6 +160,40 @@ export async function savePrompts(projectDir, prompts = {}) {
   return readPrompts(projectDir);
 }
 
+// —— 门禁：项目自己的判定脚本。默认放行，用户改这个文件就能改判定规则 ——
+// 契约见 AGENTS.md §4：export default async (ctx) => true | false | { pass, reason }
+export const GATE_TEMPLATE = `// 项目门禁：引擎每轮「执行」之后跑一次它，决定这一轮算不算过关。
+// 通过才进审查；不通过会把 reason 交给执行端，让它在同一个工作区继续改（不新开上下文）。
+//
+// 契约：export default async 函数，参数 ctx 是只读快照：
+//   { workdir, issue: { id, title, body, labels, priority }, runDir, attempt, cfg }
+// 返回值只认三种：
+//   true                               通过
+//   false                              不通过（用默认文案）
+//   { pass: boolean, reason?: string }  reason 会进下一轮提示词，写成执行端能照做的指令
+// 抛错 / 返回值看不懂 / 超时（默认 10 分钟）一律算不通过——门禁宁严不宽。
+
+export default async function gate() {
+  return { pass: true, reason: '默认门禁：不做任何检查，直接放行' };
+}
+
+// —— 例子：要求 npm test 全绿 ——
+// import { spawnSync } from 'node:child_process';
+//
+// export default async function gate({ workdir }) {
+//   const r = spawnSync('npm', ['test'], { cwd: workdir, shell: true, encoding: 'utf8' });
+//   if (r.status === 0) return { pass: true, reason: 'npm test 全绿' };
+//   return { pass: false, reason: (r.stderr || r.stdout || 'npm test 失败').slice(-800) };
+// }
+//
+// —— 例子：按工单标签放行 ——
+// export default async function gate({ issue }) {
+//   return issue.labels.includes('fast-lane')
+//     ? true
+//     : { pass: false, reason: '这张单必须补跑全量检查' };
+// }
+`;
+
 // —— 打开项目：缺什么补什么，绝不覆盖已有内容 ——
 function bdBin() {
   if (process.env.BD_BIN) return process.env.BD_BIN;
@@ -209,6 +244,11 @@ export async function ensureProject(inputDir) {
       await fsp.copyFile(fallback, target).catch(() => {});
       created.push(`.hlwd/prompts/${name}.md`);
     }
+  }
+  // 门禁脚本跟着项目走：用户改它，不碰工具代码
+  if (!fs.existsSync(gateFile(dir))) {
+    await fsp.writeFile(gateFile(dir), GATE_TEMPLATE, 'utf8');
+    created.push('.hlwd/gate.mjs');
   }
   if (!fs.existsSync(runsDir(dir))) {
     await fsp.mkdir(runsDir(dir), { recursive: true });

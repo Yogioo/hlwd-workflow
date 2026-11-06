@@ -210,6 +210,12 @@ textarea { width: 100%; resize: vertical; }
 .settings-grid.one { grid-template-columns: 1fr; }
 .settings-grid textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 
+/* 门禁：路径可读可拷，按钮把人送到文件 */
+.gate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gate-row code { flex: 1 1 260px; min-width: 0; padding: 4px 6px; background: #0f1620; border: 1px solid #24303f; border-radius: 4px; word-break: break-all; user-select: all; }
+.gate-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.gate-actions button { font-size: 12px; padding: 4px 8px; }
+
 /* 项目栏：一眼看到当前在哪个项目、随时能换 */
 .projectbar {
   display: flex;

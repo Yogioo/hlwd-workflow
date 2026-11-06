@@ -7,6 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readProjectConfig, readPrompts } from '../project.mjs';
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const GATE_RUNNER = path.join(ENGINE_DIR, 'gate-run.mjs');
+// 门禁可能要跑测试/构建，给 10 分钟；用环境变量可改
+const GATE_TIMEOUT_MS = Number(process.env.HLWD_GATE_TIMEOUT_MS ?? 600000);
 
 const WIN = process.platform === 'win32';
 
@@ -70,6 +73,53 @@ export function render(template, vars) {
 export async function readPrompt(name, projectDir = process.cwd()) {
   const prompts = await readPrompts(projectDir).catch(() => ({}));
   return prompts[name] ?? '';
+}
+
+/**
+ * 跑项目门禁（<项目>/.hlwd/gate.mjs）。只回报 pass 与原因，不抛错。
+ * 单独进程跑，门禁崩溃/超时不会拖垮引擎；返回值看不懂也算不通过。
+ */
+export function runGate({ gateFile, context, timeoutMs = GATE_TIMEOUT_MS }) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [GATE_RUNNER, gateFile], {
+      cwd: context.workdir,
+      windowsHide: true,
+    });
+    let out = '';
+    let err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+
+    child.stdout.setEncoding('utf8').on('data', (d) => (out += d));
+    child.stderr.setEncoding('utf8').on('data', (d) => (err += d));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ pass: false, reason: `门禁跑不起来：${e.message}`, out, err, ms: Date.now() - started });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      let verdict = null;
+      for (const line of out.trim().split('\n').reverse()) {
+        try {
+          verdict = JSON.parse(line);
+          break;
+        } catch {
+          // 上一行不是结论，继续往前找
+        }
+      }
+      const tail = (err.trim() || out.trim()).slice(-500);
+      const pass = !timedOut && verdict?.pass === true;
+      const reason = timedOut
+        ? `门禁超时（${Math.round(timeoutMs / 1000)}s）被中止`
+        : verdict?.reason || (pass ? '门禁通过' : tail || `门禁退出码 ${code}`);
+      resolve({ pass, reason: String(reason), out, err, ms: Date.now() - started });
+    });
+    child.stdin.end(JSON.stringify(context));
+  });
 }
 
 /**

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 一个**本地工具**：看板 + AI 工作流。它自己不存业务数据——数据都在被打开的那个**项目目录**里。
-人建单、AI 干活：**接单 → 执行 → 审查 → 完成工单**。
+人建单、AI 干活：**接单 → 执行 → 门禁 → 审查 → 完成工单**。
 
 ## 1. 三条铁律
 
@@ -15,8 +15,8 @@
 |---|---|---|
 | `beads`（`bd`） | 工单存储与状态，每个项目一份 | 不跑 AI、不判验收 |
 | `web` | 看板、建单、改单、改项目配置、切项目 | 不跑 AI、不写 git、不绕开适配层 |
-| `engine` | 接单 → 执行 → 审查 → 回写结论 | 不渲染页面、不定义工单字段 |
-| `project.mjs` | 打开项目：补齐 `.hlwd/`、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
+| `engine` | 接单 → 执行 → 门禁 → 审查 → 回写结论 | 不渲染页面、不定义工单字段 |
+| `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
 当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。
@@ -27,21 +27,23 @@
 工具（本仓库）                     项目（被开发的目标目录）
   wf.mjs                             .hlwd/config.json     状态/优先级中文名 + engine 配置
   project.mjs                        .hlwd/prompts/*.md    项目定制的提示词
-  web/  engine/                      .hlwd/runs/           每次运行一个目录（gitignore）
+  web/  engine/                      .hlwd/gate.mjs        项目门禁（默认 always true）
+                                     .hlwd/runs/           每次运行一个目录（gitignore）
   .hlwd/  .beads/  ← 它自己也是        .hlwd/journal.ndjson  事件流（gitignore）
      一个可以被打开的项目             .beads/               工单
 ```
 
-`.hlwd/.gitignore` 由工具生成，只排 `runs/` 与 `journal.ndjson`——配置和提示词要进版本库。
+`.hlwd/.gitignore` 由工具生成，只排 `runs/` 与 `journal.ndjson`——配置、提示词和门禁都要进版本库。
 
 ## 4. 契约（改这里要先改文档）
 
 **Project**（`project.mjs`，web 与 engine 共用）
 
 ```
-ensureProject(dir) -> {dir, created[], config}   # 补齐 .hlwd/、prompts、runs、.beads
+ensureProject(dir) -> {dir, created[], config}   # 补齐 .hlwd/、prompts、gate.mjs、runs、.beads
 readProjectConfig(dir) / saveProjectConfig(dir, patch)
 readPrompts(dir) / savePrompts(dir, {execute, review})
+gateFile(dir) -> <dir>/.hlwd/gate.mjs
 ```
 
 - 打开项目是**幂等**的：已存在的一律不覆盖，只在返回值里说明补了什么。
@@ -70,7 +72,22 @@ run(promptFile, workdir, sandbox) -> {status, outDir, events}
 - 复用 `agent-tools agent-run`（技能 `agent-run`），**不要自己拼 CLI、不要 fork**；换 runner 改配置，不改代码。
 - `status` 只表示这一轮跑没跑起来，**永远不代表「做完了」或「审查通过」**。
 
-**验收归 engine。** 是否通过由 §5 状态机 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
+**Gate**（`<项目>/.hlwd/gate.mjs`，engine 调用，人可改；工具不碰它的内容）
+
+```
+export default async ({workdir, issue, runDir, attempt, cfg})
+  -> true | false | {pass: boolean, reason?: string}
+```
+
+- 顺序固定：**执行 → 门禁 → 审查**。门禁不通过就不进审查，`reason` 回灌给执行端（同一工作区继续改，算一次 attempt）。
+- 判定口径：`true` / `{pass:true}` 通过；`false` / `{pass:false}` / 抛错 / 返回值看不懂 / 超时（默认 10 分钟，`HLWD_GATE_TIMEOUT_MS` 可改）一律不通过——门禁宁严不宽。
+- 单独 node 进程跑（`engine/gate-run.mjs`）：门禁是用户脚本，语法错、死循环、`process.exit` 不能拖垮引擎。
+- 默认模板是 always true，新项目不会被门禁卡住；要真检查（测试/构建/lint/自定义规则）就改这个文件，不碰工具代码。
+- 原始输出留在 `<run>/gate-<attempt>.log`；结论（pass/reason/ms）进 `run.json` 的 `attempts[].gate` 与 journal 的 `gate` 事件。
+- 门禁不是审查：它只回答「机器能查的过没过」，代码质量、无关改动、假实现仍归 review。
+- 看板「设置」只显示它的路径 + 「打开脚本 / 打开所在目录 / 复制路径」（`POST /api/gate/open`，`HLWD_EDITOR` 可指定编辑器）——页面不编辑脚本，脚本进版本库、用编辑器改。
+
+**验收归 engine。** 是否通过由 §5 状态机 + 门禁结论 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
 **RunTrace**（`web` 只读）
 
@@ -102,6 +119,7 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 ```
 
 - 状态用 beads 原生 `status`；`review` 是自定义状态，靠 `bd config set status.custom "review:wip"` 注册。
+- 门禁不通过等同审查不通过：**留在 `in_progress`**，原因回灌执行端，不单独引入新状态。
 - `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」。
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。
 
@@ -121,9 +139,10 @@ web/               # 页面 + beads 适配层
                    #   工单页（人看，markdown）/ 全链路页（程序看，含原始 JSON）
 engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）
-  lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run
+  lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run / 跑门禁
+  gate-run.mjs     # 门禁执行器：单独进程跑项目的 .hlwd/gate.mjs
   manifest.mjs     # 写 run.json 与 journal.ndjson
-  flows/           # 一个阶段一个文件：claim / execute / review / complete
+  flows/           # 一个阶段一个文件：claim / execute / gate / review / complete
   prompts/         # 默认提示词模板（项目没定制时用它）
   skills/agent-run # 复制维护的 agent-run 技能（上游可覆盖）
 ```
