@@ -481,6 +481,20 @@ const fmtSize = (n) =>
   n == null ? '' : n < 1024 ? `${n}B` : n < 1024 * 1024 ? `${Math.round(n / 1024)}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`;
 const mdFor = (a) => (a.kind === 'image' ? `![${a.name}](${a.url})` : `[${a.name}](${a.url})`);
 
+/** 附件地址 → 下载地址；外部图片就原样返回。 */
+const downloadHref = (url) =>
+  String(url).startsWith('/api/attachments/') ? `${url}${url.includes('?') ? '&' : '?'}download=1` : String(url);
+
+/** 从附件地址里猜个文件名：去掉存盘时加的时间戳前缀。 */
+function fileNameFromUrl(url) {
+  try {
+    const last = decodeURIComponent(new URL(url, location.origin).pathname.split('/').pop() ?? '');
+    return last.replace(/^\d+-/, '') || 'download';
+  } catch {
+    return 'download';
+  }
+}
+
 function renderAttachments(list) {
   state.attachments = list ?? [];
   $('#attachmentCount').textContent = state.attachments.length ? String(state.attachments.length) : '';
@@ -490,7 +504,8 @@ function renderAttachments(list) {
   }
   $('#panelAttachments').innerHTML = state.attachments
     .map((a) => {
-      const actions = `<button type="button" class="ghost mini" data-act="insert">插入评论</button><button type="button" class="ghost mini" data-act="delete">删除</button>`;
+      const dl = `<a class="att-dl" href="${esc(downloadHref(a.url))}" download="${esc(a.name)}" title="下载到本地">下载</a>`;
+      const actions = `${dl}<button type="button" class="ghost mini" data-act="insert">插入评论</button><button type="button" class="ghost mini" data-act="delete">删除</button>`;
       const head = `<span class="att-name" title="${esc(a.name)}">${esc(a.name)}</span><span class="dot">·</span>${esc(fmtSize(a.size))}`;
       return a.kind === 'image'
         ? `<figure class="attachment" data-stored="${esc(a.stored)}">
@@ -1313,10 +1328,17 @@ $('#panelAttachments').addEventListener('click', async (e) => {
 document.addEventListener('click', (e) => {
   const img = e.target.closest?.('.md-img');
   if (!img) return;
-  $('#lightboxImg').src = img.getAttribute('src');
+  const src = img.getAttribute('src');
+  $('#lightboxImg').src = src;
+  const dl = $('#lightboxDownload');
+  dl.href = downloadHref(src);
+  dl.setAttribute('download', fileNameFromUrl(src));
   $('#lightbox').showModal();
 });
-$('#lightbox').addEventListener('click', () => $('#lightbox').close());
+$('#lightbox').addEventListener('click', (e) => {
+  if (e.target.closest('#lightboxDownload')) return; // 点下载别把弹窗关掉
+  $('#lightbox').close();
+});
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
 $('#panelLabelAdd').addEventListener('click', () => {
   const labels = $('#panelLabel')

@@ -39,6 +39,9 @@
 
 `.hlwd/.gitignore` 由工具生成，排 `runs/`、`journal.ndjson`、`attachments/`——配置、提示词和门禁要进版本库，运行产物和附件不进。
 
+附件的字节只走一个地址：`GET /api/attachments/<卡>/<stored>` 默认 `inline`（页面里直接显示），
+加 `?download=1` 变 `attachment`（浏览器存盘，文件名还原成用户给的原名）。
+
 ## 4. 契约（改这里要先改文档）
 
 **Project**（`project.mjs`，web 与 engine 共用）

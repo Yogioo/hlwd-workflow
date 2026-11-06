@@ -350,6 +350,21 @@ button.mini {
   padding: 2px 7px;
   font-size: 11px;
 }
+/* 下载是个真链接：能右键、能中键、能拖走 */
+a.att-dl {
+  padding: 2px 7px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  text-decoration: none;
+  white-space: nowrap;
+}
+a.att-dl:hover {
+  border-color: var(--line-hi);
+  background: var(--card-hi);
+  color: var(--bone);
+}
 button:disabled {
   opacity: 0.55;
   cursor: progress;
@@ -1444,10 +1459,28 @@ body[data-mode='issue'] {
   max-height: 86vh;
   border-radius: 8px;
 }
-.lightbox .dialog-note {
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 10px;
+}
+.lightbox-bar .dialog-note {
   color: #cbd5e1;
-  text-align: center;
-  margin-top: 8px;
+  margin: 0;
+}
+.lightbox-dl {
+  padding: 5px 13px;
+  border: 1px solid var(--line-hi);
+  border-radius: 7px;
+  background: var(--desk);
+  color: var(--bone);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+.lightbox-dl:hover {
+  background: var(--card-hi);
 }
 
 /* ---------- 窄屏 ---------- */

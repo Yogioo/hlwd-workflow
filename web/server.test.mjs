@@ -436,6 +436,15 @@ test('附件：上传 → 列表 → 取回 → 删除', async () => {
     assert.match(got.headers.get('content-type'), /image\/png/);
     assert.equal((await got.arrayBuffer()).byteLength, bytes.length);
 
+    // 默认 inline（页面里直接看）；?download=1 变成下载，文件名还原成用户给的那个
+    assert.ok((got.headers.get('content-disposition') ?? '').startsWith('inline'), got.headers.get('content-disposition'));
+    const dl = await fetch(`${base}${attachment.url}?download=1&token=${TOKEN}`);
+    assert.equal(dl.status, 200);
+    const disp = dl.headers.get('content-disposition') ?? '';
+    assert.ok(disp.startsWith('attachment'), disp);
+    assert.ok(decodeURIComponent(disp).includes('截图.png'), '下载时要用原文件名：' + disp);
+    assert.equal((await dl.arrayBuffer()).byteLength, bytes.length);
+
     const del = await fetch(`${base}${attachment.url}${t}`, { method: 'DELETE' });
     assert.equal(del.status, 200);
     const after = await (await fetch(`${base}/api/issues/hlwd-img1/attachments${t}`)).json();
