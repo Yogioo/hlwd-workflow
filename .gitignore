@@ -2,3 +2,8 @@ node_modules/
 *.log
 .DS_Store
 .beads/interactions.jsonl
+
+# 本机 agent 技能/工具链（npx skills 装的，不进版本库）
+.agents/
+.claude/
+skills-lock.json

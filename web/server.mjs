@@ -480,9 +480,11 @@ async function route(req, res, url) {
       }
       if (req.method === 'POST') {
         const filename = decodeURIComponent(String(req.headers['x-filename'] ?? 'file'));
+        // x-scope: inline 表示「粘进评论的图」，是评论 markdown 的一部分，不进附件列表
+        const scope = String(req.headers['x-scope'] ?? '') === 'inline' ? 'inline' : 'card';
         const data = await readRaw(req, MAX_ATTACHMENT_BYTES);
         try {
-          const meta = await saveAttachment(p.dir, id, { name: filename, data });
+          const meta = await saveAttachment(p.dir, id, { name: filename, data, scope });
           return json(res, 201, { attachment: { ...meta, url: attachmentUrl(id, meta.stored) } });
         } catch (err) {
           return json(res, 400, { error: err.message });

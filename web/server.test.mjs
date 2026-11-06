@@ -88,6 +88,30 @@ test('静态页也要口令（否则页面能开、接口 401 会莫名其妙）
   });
 });
 
+test('附件：粘进评论的图只留在评论里，不进附件列表', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 9, 9, 9]);
+
+    const up = await fetch(`${base}/api/issues/hlwd-img2/attachments${t}`, {
+      method: 'POST',
+      headers: { 'x-filename': encodeURIComponent('粘贴的图片.png'), 'x-scope': 'inline' },
+      body: bytes,
+    });
+    assert.equal(up.status, 201);
+    const { attachment } = await up.json();
+    assert.equal(attachment.scope, 'inline');
+
+    const list = await (await fetch(`${base}/api/issues/hlwd-img2/attachments${t}`)).json();
+    assert.deepEqual(list.attachments, [], 'inline 图不该出现在工单附件里');
+
+    // 但评论 markdown 里的 ![x](url) 必须能打开
+    const got = await fetch(`${base}${attachment.url}${t}`);
+    assert.equal(got.status, 200);
+    assert.equal((await got.arrayBuffer()).byteLength, bytes.length);
+  });
+});
+
 test('附件：上传 → 列表 → 取回 → 删除', async () => {
   await withServer(async ({ base }) => {
     const t = `?token=${TOKEN}`;

@@ -139,6 +139,34 @@ test('附件：存 / 列 / 读 / 删都在项目 .hlwd/attachments 下', async (
   });
 });
 
+test('附件：粘进评论的图（inline）不算工单附件', async () => {
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+    // 拖到面板的 = 工单附件；粘进评论的 = 评论正文的一部分（md 里的图片）
+    const cardScope = await saveAttachment(dir, 'hlwd-abc', { name: '设计图.png', data: Buffer.from('a') });
+    const inline = await saveAttachment(dir, 'hlwd-abc', { name: '评论里的图.png', data: Buffer.from('b'), scope: 'inline' });
+    assert.equal(cardScope.scope, 'card');
+    assert.equal(inline.scope, 'inline');
+
+    const list = await listAttachments(dir, 'hlwd-abc');
+    assert.deepEqual(
+      list.map((f) => f.stored),
+      [cardScope.stored],
+      '附件列表只剩真正上传的，inline 图不进列表',
+    );
+    assert.ok(list.length === 1);
+
+    // 字节照样取得到：评论里的 ![x](/api/attachments/…) 得能显示
+    const hit = await readAttachment(dir, 'hlwd-abc', inline.stored);
+    assert.equal(hit.data.toString(), 'b');
+
+    // 删 inline 图时顺手清旁挂表
+    assert.equal(await removeAttachment(dir, 'hlwd-abc', inline.stored), true);
+    const scopes = JSON.parse(await fs.readFile(path.join(attachmentsDir(dir, 'hlwd-abc'), '.scopes.json'), 'utf8'));
+    assert.deepEqual(scopes, {});
+  });
+});
+
 test('附件：文件名洗掉路径，空文件与超大文件被拒', async () => {
   assert.equal(safeFileName('../../etc/passwd'), 'passwd');
   assert.equal(safeFileName('a/b/c.log'), 'c.log');

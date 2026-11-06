@@ -259,8 +259,31 @@ async function uniqueStoredName(dir, base) {
   }
 }
 
-/** 存一个附件：返回 {stored, name, kind, size, at}。 */
-export async function saveAttachment(projectDir, cardId, { name, data }) {
+// 附件有两种用途，存在同一个目录里，用一张旁挂表区分：
+//   card   显式上传 / 拖到面板：算工单的附件，列在「附件」里
+//   inline 粘进评论的图：它是评论 markdown 的一部分，不进附件列表（否则每条评论的图都变成工单资产）
+const SCOPES_FILE = '.scopes.json';
+const scopesFile = (dir) => path.join(dir, SCOPES_FILE);
+
+async function readScopes(dir) {
+  const raw = await fsp.readFile(scopesFile(dir), 'utf8').catch(() => null);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+async function markScope(dir, stored, scope) {
+  if (scope !== 'inline') return;
+  const map = await readScopes(dir);
+  map[stored] = 'inline';
+  await fsp.writeFile(scopesFile(dir), `${JSON.stringify(map, null, 2)}\n`);
+}
+
+/** 存一个附件：返回 {stored, name, kind, size, at, scope}。 */
+export async function saveAttachment(projectDir, cardId, { name, data, scope = 'card' }) {
   const bytes = data?.length ?? 0;
   if (!bytes) throw new Error('空文件');
   if (bytes > MAX_ATTACHMENT_BYTES) throw new Error(`附件太大（上限 ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB）`);
@@ -269,12 +292,11 @@ export async function saveAttachment(projectDir, cardId, { name, data }) {
   const at = Date.now();
   const stored = await uniqueStoredName(dir, `${at}-${safeFileName(name)}`);
   await fsp.writeFile(path.join(dir, stored), data);
-  const file = path.join(dir, stored);
-  void file;
-  return { ...attachmentMeta(stored), size: bytes, at };
+  await markScope(dir, stored, scope);
+  return { ...attachmentMeta(stored), size: bytes, at, scope };
 }
 
-/** 列一张卡的附件（新的在后）。 */
+/** 列一张卡的附件（新的在后）。粘进评论的 inline 图不算附件，不在这里出现。 */
 export async function listAttachments(projectDir, cardId) {
   const dir = attachmentsDir(projectDir, cardId);
   let names = [];
@@ -283,8 +305,10 @@ export async function listAttachments(projectDir, cardId) {
   } catch {
     return [];
   }
+  const scopes = await readScopes(dir);
   const out = [];
   for (const stored of names.sort()) {
+    if (stored === SCOPES_FILE || scopes[stored] === 'inline') continue;
     const stat = await fsp.stat(path.join(dir, stored)).catch(() => null);
     if (!stat?.isFile()) continue;
     const at = Number(/(\d+)-/.exec(stored)?.[1] ?? 0);
@@ -308,7 +332,15 @@ export async function removeAttachment(projectDir, cardId, stored) {
   if (!file.startsWith(path.resolve(dir) + path.sep)) return false;
   return fsp
     .rm(file, { force: true })
-    .then(() => true)
+    .then(async () => {
+      // 顺手清掉旁挂表里那一项，别让 .scopes.json 越积越脏
+      const scopes = await readScopes(dir);
+      if (scopes[stored]) {
+        delete scopes[stored];
+        await fsp.writeFile(scopesFile(dir), `${JSON.stringify(scopes, null, 2)}\n`).catch(() => {});
+      }
+      return true;
+    })
     .catch(() => false);
 }
 

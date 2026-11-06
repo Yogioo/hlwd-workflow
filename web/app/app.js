@@ -330,16 +330,20 @@ function insertComment(text) {
   }
 }
 
-async function uploadFiles(files, { insert = false } = {}) {
+async function uploadFiles(files, { insert = false, scope = 'card' } = {}) {
   const issue = state.current;
   const list = [...(files ?? [])];
   if (!issue || !list.length) return [];
+  const inline = scope === 'inline';
   const done = [];
   for (const file of list) {
     try {
       const res = await fetch(`/api/issues/${encodeURIComponent(issue.id)}/attachments`, {
         method: 'POST',
-        headers: { 'x-filename': encodeURIComponent(file.name || '粘贴的图片.png') },
+        headers: {
+          'x-filename': encodeURIComponent(file.name || (inline ? '粘贴的图片.png' : 'file')),
+          'x-scope': scope,
+        },
         body: file,
       });
       const data = await res.json().catch(() => ({}));
@@ -349,10 +353,11 @@ async function uploadFiles(files, { insert = false } = {}) {
       hint(`上传失败：${err.message}`, true);
     }
   }
-  await refreshAttachments();
+  // 粘进评论的图不归「附件」管，不用去刷那个列表
+  if (!inline) await refreshAttachments();
   if (done.length) {
-    hint(`已上传 ${done.length} 个附件`);
-    if (insert) insertComment(`${done.map(mdFor).join(' ')} `);
+    hint(inline ? `已插入 ${done.length} 张图片，发送评论后显示` : `已上传 ${done.length} 个附件`);
+    if (insert) insertComment(`${done.map(mdFor).join(' ')}\n`);
   }
   return done;
 }
@@ -611,7 +616,8 @@ $('#panel').addEventListener('paste', (e) => {
   const files = pastedFiles(e);
   if (!files.length) return;
   e.preventDefault();
-  uploadFiles(files, { insert: true }).catch((err) => hint(`上传失败：${err.message}`, true));
+  // 粘贴 = 图是这条评论正文的一部分（md 里一张图一行），不往工单附件里塞
+  uploadFiles(files, { insert: true, scope: 'inline' }).catch((err) => hint(`上传失败：${err.message}`, true));
 });
 $('#panelAttachments').addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-act]');
