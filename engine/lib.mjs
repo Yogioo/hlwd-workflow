@@ -1,11 +1,29 @@
 // engine 内部小工具：跑命令、读配置、渲染提示词。
 // 这里不碰 beads（beads 只在 web/beads.mjs 里），也不做流程判断。
 import { spawn } from 'node:child_process';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+const WIN = process.platform === 'win32';
+
+/**
+ * agent-tools 在 Windows 上只有 .cmd 壳，spawn 不了；
+ * 优先用 npm 全局装里的 .mjs 入口（用当前 node 跑），否则回落 PATH。
+ */
+function resolveAgentTools() {
+  if (process.env.AGENT_TOOLS_BIN) return { cmd: process.env.AGENT_TOOLS_BIN, prefix: [] };
+  if (!WIN) return { cmd: 'agent-tools', prefix: [] };
+  const entry = [
+    path.join(process.env.APPDATA ?? '', 'npm/node_modules/@yogioo/agent-tools/bin/agent-tools.mjs'),
+    path.join(path.dirname(process.execPath), 'node_modules/@yogioo/agent-tools/bin/agent-tools.mjs'),
+  ].find((p) => p && fsSync.existsSync(p));
+  if (!entry) throw new Error('找不到 agent-tools，请设 AGENT_TOOLS_BIN 指向可执行文件');
+  return { cmd: process.execPath, prefix: [entry] };
+}
 
 export async function loadConfig() {
   const raw = await fs.readFile(path.join(ENGINE_DIR, 'config.json'), 'utf8');
@@ -56,7 +74,8 @@ export async function agentTurn({ cfg, workdir, promptFile, outDir }) {
   if (cfg.thinking) args.push('--thinking', cfg.thinking);
   if (cfg.timeoutMs) args.push('--timeout', String(cfg.timeoutMs));
 
-  const { code, out, err } = await run('agent-tools', args, { cwd: workdir });
+  const { cmd, prefix } = resolveAgentTools();
+  const { code, out, err } = await run(cmd, [...prefix, ...args], { cwd: workdir });
   let facts = null;
   try {
     facts = JSON.parse(out.trim().split('\n').pop());
