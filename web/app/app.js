@@ -15,6 +15,7 @@ const state = {
   gate: { path: '', exists: false },
   project: { dir: '', recent: [] },
   filter: { q: '', ready: false },
+  dispatching: false,
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
@@ -139,6 +140,7 @@ async function openPanel(id, { quiet = false } = {}) {
     .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
     .join('');
   fillPrioritySelect($('#panelPriority'), issue.priority);
+  renderDispatch(issue);
   $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
   $('#panelComments').innerHTML =
     comments
@@ -156,6 +158,61 @@ async function openPanel(id, { quiet = false } = {}) {
   $('#panelRaw').hidden = true;
   $('#panelRaw').textContent = '';
   showTab('issue');
+}
+
+/** 一键派单按钮：没标签就加上（已关闭的就顺手重开），有标签就变成取消派单。 */
+function renderDispatch(issue) {
+  const btn = $('#panelDispatch');
+  const hintEl = $('#panelDispatchHint');
+  if (issue.labels.includes(state.readyLabel)) {
+    btn.textContent = '取消派单';
+    btn.className = 'ghost';
+    hintEl.textContent =
+      issue.status === 'open'
+        ? `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就会接它`
+        : `已标 ${state.readyLabel}，但状态是「${statusLabel(issue.status)}」——engine 只接「${statusLabel('open')}」`;
+    return;
+  }
+  if (issue.status === 'closed') {
+    btn.textContent = '重开并派给 AI';
+    btn.className = 'primary';
+    hintEl.textContent = `会改回「${statusLabel('open')}」并打上 ${state.readyLabel}`;
+    return;
+  }
+  btn.textContent = '让 AI 干这个';
+  btn.className = 'primary';
+  hintEl.textContent = `加 ${state.readyLabel} 标签，之后 node wf.mjs work 就会接它`;
+}
+
+async function dispatchCurrent() {
+  const issue = state.current;
+  if (!issue || state.dispatching) return;
+  const ready = issue.labels.includes(state.readyLabel);
+  const body = ready
+    ? { removeLabels: [state.readyLabel] }
+    : { addLabels: [state.readyLabel], ...(issue.status === 'closed' ? { status: 'open' } : {}) };
+  state.dispatching = true;
+  const btn = $('#panelDispatch');
+  btn.disabled = true;
+  btn.textContent = ready ? '取消中…' : '派单中…'; // bd 往返要半秒，先给个反馈
+  try {
+    // 用 PATCH 的返回值直接翻面，不等 bd 列表刷新（否则连点会错一步）
+    const { issue: saved } = await api(`/api/issues/${encodeURIComponent(issue.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+    state.current = saved;
+    renderDispatch(saved);
+    hint(ready ? '已取消派单' : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`);
+    // 列表/面板后台对齐：不堵按钮（bd 列表 + 评论要一两秒）
+    Promise.all([load(), openPanel(saved.id, { quiet: true })]).catch(() => {});
+  } catch (err) {
+    hint(`改动失败：${err.message}`, true);
+    if (state.current) renderDispatch(state.current);
+  } finally {
+    state.dispatching = false;
+    btn.disabled = false;
+  }
 }
 
 async function loadTrace() {
@@ -241,15 +298,17 @@ function renderTrace({ runs, history }) {
 }
 
 async function patch(fields) {
-  if (!state.current) return;
+  if (!state.current) return false;
   try {
     await api(`/api/issues/${encodeURIComponent(state.current.id)}`, {
       method: 'PATCH',
       body: JSON.stringify(fields),
     });
     await Promise.all([load(), openPanel(state.current.id, { quiet: true })]);
+    return true;
   } catch (e) {
     hint(`改动失败：${e.message}`, true);
+    return false;
   }
 }
 
@@ -378,6 +437,7 @@ $('#showRaw').addEventListener('click', () => {
   pre.hidden = false;
 });
 $('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
+$('#panelDispatch').addEventListener('click', dispatchCurrent);
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
 $('#panelLabelAdd').addEventListener('click', () => {
   const labels = $('#panelLabel')
