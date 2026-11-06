@@ -18,8 +18,38 @@
 |---|---|---|
 | Node.js **≥ 20** | 跑工具本身 | https://nodejs.org |
 | `bd`（beads） | 工单存储，每个项目一份 | `npm i -g @beads/bd` |
-| AI CLI 一个 | 真正干活（`pi` / `codex` / `cursor-agent`） | 自己装，能命令行跑通就行 |
+| AI CLI 一个 | 真正干活（`pi` / `codex` / `cursor-agent`） | 自己装，能命令行跑通就行（本仓库实测用 `pi`） |
 | `agent-tools` | 把一次 agent 回合规范化 | **已随仓库自带**，不用装 |
+
+### 装 beads（`bd`）—— 工单存储
+
+`bd` 是命令行 issue tracker：每个项目一份 `.beads/`，用内嵌数据库存数据，不联网、无服务端。
+
+```bash
+npm i -g @beads/bd
+bd --version          # 本仓库实测：bd version 1.1.2（更新版本也可以用）
+```
+
+| 平台 | 装完确认 | 找不到时 |
+|---|---|---|
+| Windows | `where bd` → `...\npm\bd.exe` | `set BD_BIN=C:\path\to\bd.exe`（PowerShell：`$env:BD_BIN=...`） |
+| macOS / Linux | `which bd` → `/usr/local/bin/bd` | `export BD_BIN=/path/to/bd` |
+
+升级：`npm i -g @beads/bd@latest`，再 `bd --version` 确认。
+
+**第一次打开项目时工具会自己跑：**
+
+```bash
+bd init --prefix <目录名> --non-interactive --skip-agents --skip-hooks
+```
+
+所以你不需要手动 `bd init`。它会顺手建三样东西，都属于项目、都该进版本库：
+
+1. `.beads/`（工单数据 + 配置，随项目进版本库，团队拉一次就有同一份工单）
+2. 项目的 `.gitignore`
+3. **`git init` + 一次提交**（`bd init: initialize beads issue tracking`）—— bd 基于 git 工作；你的项目本来就是 git 仓库的话它不会覆盖
+
+工具与 `bd` 的分工：工单的增删改查**只用 `bd` CLI**（`web/beads.mjs` 是唯一调用处），不直连数据库文件；`review` 这个自定义状态靠 `bd config set status.custom "review:wip"` 注册。
 
 ### agent-tools 为什么自带
 
@@ -49,19 +79,154 @@ BD_BIN=/path/to/bd AGENT_TOOLS_BIN=/path/to/agent-tools node wf.mjs # 自定义�
 
 ---
 
-## 2. 30 秒上手
+## 2. 完整链路：从零到关单
+
+下面每一步都给了实际输出（Windows 上真的跑过一遍），照着做能走完全链路。
+
+### 2.1 准备
 
 ```bash
 git clone https://github.com/Yogioo/hlwd-workflow.git
 cd hlwd-workflow
-
-node wf.mjs --project /path/to/your/project    # 打开你的项目（会自动建 .hlwd/ 与 .beads/）
-node wf.mjs board --bg                         # 起看板，浏览器打开 http://127.0.0.1:3100
-node wf.mjs new "把登录页的错误提示改清楚"       # 建一张单（自动打上可派标签）
-node wf.mjs work                               # 让 AI 干这一张
 ```
 
-或者更省事：看板右上角点 **「自动流水线：开」**，之后在面板里点 **「让 AI 干这个」**，剩下的它自己做——不用守终端。
+后面都在这个目录里跑，`--project` 指向你要开发的项目（不存在就先 `mkdir` 一个空目录）。
+不想每次 `cd`，可以定义个别名：`WF="node $PWD/wf.mjs"`，之后用 `$WF --project ...`。
+
+### 2.2 打开项目（第一次）
+
+```bash
+node wf.mjs --project /path/to/your/project
+```
+
+```
+项目 /path/to/your/project（补齐 .hlwd/、.hlwd/config.json、.hlwd/prompts/、.hlwd/prompts/execute.md、
+                      .hlwd/prompts/review.md、.hlwd/gate.mjs、.hlwd/runs/、.beads/（bd init）、.hlwd/.gitignore）
+工单 0 张：待接 0 · 执行中 0 · 待审 0 · 已完成 0
+就绪 0 张
+```
+
+空目录打开后会长这样：
+
+```
+.hlwd/  config.json  prompts/{execute,review}.md  gate.mjs  runs/
+.beads/ 工单数据（bd 管的）
+```
+
+看板还没起，所以这行会显示「看板 未启动」；补齐的路径只会在第一次出现。
+
+### 2.3 建单
+
+```bash
+node wf.mjs new "写一份 README.md" "在项目根建 README.md，标题 # Demo，下面一行说明"
+node wf.mjs                      # 看清单
+```
+
+```
+已建单 demo-ckv  写一份 README.md
+下一步：node wf.mjs work         （或 node wf.mjs work --id demo-ckv）
+
+项目 /path/to/your/project
+工单 1 张：待接 1 · 执行中 0 · 待审 0 · 已完成 0
+就绪 1 张
+  · demo-ckv  写一份 README.md  [中]
+
+看板 未启动
+自动流水线 关
+
+下一步
+  node wf.mjs board            起看板，建单 / 看全链路
+  node wf.mjs watch --bg       自动流水线：有就绪单就自动开干
+  node wf.mjs work             让 AI 干下一张就绪单
+```
+
+「就绪」= 状态是**待接**且带了 `ready-for-agent` 标签。`new` 会自动打上这个标签；在看板里建的单，点面板上的「让 AI 干这个」也能拿到。
+
+### 2.4 让 AI 干（执行 → 门禁 → 审查 → 提交）
+
+```bash
+node wf.mjs work
+```
+
+```
+[10:34:03] 项目 /path/to/your/project
+[10:34:05] 接单 demo-ckv — 写一份 README.md
+[10:34:05] 运行目录 .hlwd\runs\demo-ckv-1793961245895
+[10:34:05] 执行（第 1 轮）→ .hlwd\runs\...\prompt-exec-1.md
+[10:34:14] 执行回合结束 → ...\exec-1                 ← AI 改完了
+[10:34:14] 门禁通过（37ms）：默认门禁：不做任何检查，直接放行
+[10:34:14] 审查（第 1 轮）→ .hlwd\runs\...\prompt-review-1.md
+[10:34:31] 审查结论 pass：README.md 仅含一级标题 "# Demo" 与一行说明，范围与工单一致
+[10:34:31] 已提交 3c97eec
+[10:34:32] 关闭 demo-ckv
+```
+
+这一次 `work` 干了什么：认领 → 调 AI 改文件 → 跑门禁 → 另起一个回合审查 → commit → 关单。
+
+### 2.5 验收（别只看日志）
+
+```bash
+git log --oneline --stat        # 每个提交都带 Card: / Run:，方便反查
+git log -1 --format=%B
+```
+
+```
+demo-ckv: 写一份 README.md
+
+Card: demo-ckv
+Run: .hlwd/runs/demo-ckv-1793961245895
+```
+
+```bash
+node wf.mjs trace demo-ckv      # 终端看全链路
+```
+
+```
+demo-ckv  写一份 README.md
+状态 已完成（closed） · 负责人 ai · 优先级 中
+
+状态变更
+  11/6 18:34  待接
+  11/6 18:34  执行中 · ai
+  11/6 18:34  已完成 · ai
+
+运行 demo-ckv-1793961245895  26.6s  → closed  提交 3c97eec
+  #1 执行 8.4s ok
+  #1 门禁 38ms pass — 默认门禁：不做任何检查，直接放行
+  #1 审查 16.7s pass — README.md 仅含一级标题…
+       · git status --porcelain → 仅新增 ?? README.md
+       · cat README.md → "# Demo" + 空行 + "演示用项目仓库。"
+       … 共 5 条验证，见 run.json
+  产物 .hlwd/runs/demo-ckv-1793961245895/
+```
+
+各阶段原始产物都在 `.hlwd/runs/<卡片>-<时间>/`：提示词、AI 事件、`gate-1.log`、`verdict-1.json`、`run.json`。
+
+### 2.6 加一道真门禁（可选，但建议）
+
+把项目里的 `.hlwd/gate.mjs` 换成会跑测试的版本：
+
+```js
+import { spawnSync } from 'node:child_process';
+
+export default async function gate({ workdir }) {
+  const r = spawnSync('npm', ['test'], { cwd: workdir, shell: true, encoding: 'utf8' });
+  if (r.status === 0) return { pass: true, reason: 'npm test 全绿' };
+  return { pass: false, reason: (r.stderr || r.stdout || 'npm test 失败').slice(-800) };
+}
+```
+
+之后每张单都要先过 `npm test`：不过就把失败信息发回给 AI，让它在同一个工作区继续改（最多 `attempts` 轮，默认 2）。
+
+### 2.7 接着跑：看板 / 自动流水线
+
+```bash
+node wf.mjs board --bg          # 看板 http://127.0.0.1:3100（npm start）
+node wf.mjs watch --bg          # 自动流水线：有就绪单就自己干（npm run watch）
+node wf.mjs stop                # 停看板 + 请求停流水线
+```
+
+之后你只需要在看板上建单、点「让 AI 干这个」。
 
 ---
 
