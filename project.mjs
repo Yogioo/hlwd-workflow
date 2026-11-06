@@ -201,23 +201,58 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp']);
 const MIME_BY_EXT = {
+  // 图片
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.avif': 'image/avif',
   '.svg': 'image/svg+xml',
   '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  // 文档 / 数据
   '.pdf': 'application/pdf',
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/plain; charset=utf-8',
   '.log': 'text/plain; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.tsv': 'text/tab-separated-values; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // 压缩包
   '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
+  '.tar': 'application/x-tar',
+  '.7z': 'application/x-7z-compressed',
+  '.rar': 'application/vnd.rar',
+  // 音视频
   '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
 };
 
 const extOf = (name) => path.extname(String(name ?? '')).toLowerCase();
+
+/**
+ * 能不能让浏览器**以本站的身份直接打开**这个附件。
+ * SVG 不行：它里面可以带 <script>，被当页面打开就是在我们的 origin 里执行别人的代码。
+ * （在 <img> 里渲染不受影响 ——— 子资源不看 content-disposition，脚本也不会执行。）
+ * 其他未知类型走 application/octet-stream + nosniff，浏览器也只会下载。
+ */
+export const attachmentInlineSafe = (name) => extOf(name) !== '.svg';
 /** 卡片 id 进目录名前先洗一遗：不许拼路径。 */
 export function safeCardId(cardId) {
   const cleaned = String(cardId ?? '')

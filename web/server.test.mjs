@@ -410,6 +410,65 @@ test('实时通道：SSE 先给快照，发评论后推一次', async () => {
   });
 });
 
+test('附件：各种文件类型都能传能下（名字和字节都不变）', async () => {
+  await withServer(async ({ base }) => {
+    const t = '?token=' + TOKEN;
+    const cases = [
+      // 文件名, 期望的 content-type 前缀, 正文
+      ['报告.pdf', 'application/pdf', '%PDF-1.4 fake', 'inline'],
+      ['数据.csv', 'text/csv', 'a,b\n1,2\n', 'inline'],
+      ['配置.json', 'application/json', '{"a":1}', 'inline'],
+      ['说明.md', 'text/plain', '# 标题', 'inline'],
+      ['压缩包.zip', 'application/zip', 'PK\x03\x04fake', 'inline'],
+      ['文档.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'PK\x03\x04docx', 'inline'],
+      ['表格.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'PK\x03\x04xlsx', 'inline'],
+      ['归档.tar.gz', 'application/gzip', '\x1f\x8bgz', 'inline'],
+      ['没有扩展名', 'application/octet-stream', 'raw bytes', 'inline'],
+      ['大写扩展.PDF', 'application/pdf', '%PDF-1.4 upper', 'inline'],
+      ['图标.svg', 'image/svg+xml', '<svg onload="alert(1)"></svg>', 'attachment'],
+    ];
+
+    for (const [name, type, body, defaultDisposition] of cases) {
+      const bytes = Buffer.from(body, 'utf8');
+      const up = await fetch(base + '/api/issues/hlwd-type/attachments' + t, {
+        method: 'POST',
+        headers: { 'x-filename': encodeURIComponent(name) },
+        body: bytes,
+      });
+      assert.equal(up.status, 201, name + ' 上传失败');
+      const { attachment } = await up.json();
+      assert.equal(attachment.name, name, '列表里要保留原名');
+
+      // 不带参数：能不能在页面里直接打开
+      const inline = await fetch(base + attachment.url + t);
+      assert.equal(inline.status, 200);
+      assert.ok((inline.headers.get('content-type') ?? '').startsWith(type), name + ' 的 content-type：' + inline.headers.get('content-type'));
+      assert.equal(inline.headers.get('x-content-type-options'), 'nosniff', name + ' 要带 nosniff');
+      const dispInline = decodeURIComponent(inline.headers.get('content-disposition') ?? '');
+      assert.ok(dispInline.startsWith(defaultDisposition), name + ' 默认应该是 ' + defaultDisposition + '，实际 ' + dispInline);
+      assert.ok(dispInline.includes(name), name + ' 默认响应里要带原名：' + dispInline);
+
+      // 下载：一定是 attachment，名字还原，字节一致
+      const dl = await fetch(base + attachment.url + '?download=1&token=' + TOKEN);
+      assert.equal(dl.status, 200);
+      const disp = decodeURIComponent(dl.headers.get('content-disposition') ?? '');
+      assert.ok(disp.startsWith('attachment'), name + ' 下载要是 attachment：' + disp);
+      assert.ok(disp.includes(name), name + ' 下载要用原名：' + disp);
+      const got = Buffer.from(await dl.arrayBuffer());
+      assert.equal(got.length, bytes.length, name + ' 字节数对不上');
+      assert.ok(got.equals(bytes), name + ' 字节内容变了');
+    }
+
+    // 列表里：图片算 image，其余都算 file（SVG 仍是 image，但只能下载，不会在本站当页面打开）
+    const list = await (await fetch(base + '/api/issues/hlwd-type/attachments' + t)).json();
+    const kinds = Object.fromEntries(list.attachments.map((a) => [a.name, a.kind]));
+    assert.equal(kinds['图标.svg'], 'image');
+    assert.equal(kinds['报告.pdf'], 'file');
+    assert.equal(kinds['没有扩展名'], 'file');
+    assert.equal(list.attachments.length, cases.length);
+  });
+});
+
 test('附件：上传 → 列表 → 取回 → 删除', async () => {
   await withServer(async ({ base }) => {
     const t = `?token=${TOKEN}`;

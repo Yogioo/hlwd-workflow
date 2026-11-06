@@ -10,6 +10,7 @@ import {
   ensureProject,
   gateFile,
   MAX_ATTACHMENT_BYTES,
+  attachmentInlineSafe,
   attachmentMime,
   attachmentUrl,
   listAttachments,
@@ -878,13 +879,16 @@ async function route(req, res, url) {
     if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
     const hit = await readAttachment(p.dir, cardId, stored);
     if (!hit) return json(res, 404, { error: '附件不存在' });
-    // 默认 inline（图片/文本直接在页面上看）；?download=1 让它变成下载，存回原名
-    const download = searchParams.get('download') === '1';
+    // 默认 inline（图片/文本直接在页面上看）；?download=1 存盘，存回原名。
+    // 不能在本站直接打开的类型（比如 SVG）一律 attachment：能下载，但不会在本站执行。
+    const asFile = searchParams.get('download') === '1' || !attachmentInlineSafe(hit.meta.name);
     res.writeHead(200, {
       'content-type': attachmentMime(hit.meta.name),
       'content-length': hit.data.length,
       'cache-control': 'private, max-age=3600',
-      'content-disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(hit.meta.name)}`,
+      // 强制按声明的类型处理，别让浏览器把 .txt 嗅探成 HTML 去执行
+      'x-content-type-options': 'nosniff',
+      'content-disposition': `${asFile ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(hit.meta.name)}`,
     });
     return res.end(hit.data);
   }
