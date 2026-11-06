@@ -5,7 +5,6 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-
 export const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const WIN = process.platform === 'win32';
@@ -25,9 +24,27 @@ function resolveAgentTools() {
   return { cmd: process.execPath, prefix: [entry] };
 }
 
+const DEFAULTS = {
+  runner: 'pi',
+  model: '',
+  thinking: '',
+  sandbox: 'workspace-write',
+  attempts: 2,
+  actor: 'ai',
+  readyLabel: 'ready-for-agent',
+  timeoutMs: 1800000,
+  gitCommit: true,
+};
+
+/** 配置在仓库根的 config.json（看板里的「设置」写的就是它），engine 只读。 */
 export async function loadConfig() {
-  const raw = await fs.readFile(path.join(ENGINE_DIR, 'config.json'), 'utf8');
-  return JSON.parse(raw);
+  let raw = {};
+  try {
+    raw = JSON.parse(await fs.readFile(path.join(ENGINE_DIR, '..', 'config.json'), 'utf8'));
+  } catch {
+    // 没有配置文件就用默认值，不拦流程
+  }
+  return { ...DEFAULTS, ...(raw.engine ?? {}) };
 }
 
 export function log(message) {

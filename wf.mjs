@@ -6,6 +6,7 @@
 //   node wf.mjs trace <id> 终端看一张单的全链路
 //   node wf.mjs new "标题" [描述]
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as beads from './web/beads.mjs';
@@ -20,7 +21,8 @@ const LABELS = { open: '待接', in_progress: '执行中', review: '待审', clo
 const HELP = `用法：node wf.mjs <动词>
 
   （不带参数）        我现在该干什么：工单概况 + 下一步
-  board              打开看板（建单、看追溯）
+  board [--bg]       看板（建单、看追溯）；--bg 后台启动，马上返回
+  stop               停掉后台看板
   work [参数]        让 AI 干下一张就绪单（--dry / --id <卡片> / --attempts N 原样透传）
   trace <卡片id>     在终端看一张单的执行全链路
   new <标题> [描述]  建一张单，自动打 ${READY} 标签
@@ -149,13 +151,58 @@ async function main() {
 
   if (verb === 'board') {
     const url = `http://${HOST}:${PORT}`;
+    const pidFile = path.join(ROOT, '.engine', 'board.pid');
+
     if (await boardOnline()) {
       console.log(`看板已经在跑：${url}`);
       openBrowser(url);
       return 0;
     }
+
+    if (rest.includes('--bg')) {
+      await fs.mkdir(path.dirname(pidFile), { recursive: true });
+      const logFile = path.join(path.dirname(pidFile), 'board.log');
+      const log = await fs.open(logFile, 'a');
+      const proc = spawn(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: ['ignore', log.fd, log.fd],
+      });
+      proc.unref();
+      await fs.writeFile(pidFile, String(proc.pid), 'utf8');
+      for (let i = 0; i < 40; i += 1) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (await boardOnline()) break;
+      }
+      console.log(`看板已在后台启动：${url}`);
+      console.log(`日志 .engine/board.log    停止 node wf.mjs stop`);
+      openBrowser(url);
+      return 0;
+    }
+
     setTimeout(() => openBrowser(url), 700);
     return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')]);
+  }
+
+  if (verb === 'stop') {
+    const pidFile = path.join(ROOT, '.engine', 'board.pid');
+    let pid = 0;
+    try {
+      pid = Number((await fs.readFile(pidFile, 'utf8')).trim());
+    } catch {
+      // 没 pid 文件，靠端口判断
+    }
+    if (pid) {
+      try {
+        process.kill(pid);
+      } catch {
+        // 进程已经不在了
+      }
+      await fs.rm(pidFile, { force: true });
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    console.log((await boardOnline()) ? '没停掉（可能是前台启动的）：用 Ctrl+C 或关掉那个终端' : '看板已停止');
+    return 0;
   }
 
   if (verb === 'work' || verb === 'run') return child(process.execPath, [path.join(ROOT, 'engine', 'run.mjs'), ...rest]);

@@ -1,19 +1,26 @@
 // 单页看板：只做「看 + 建 + 改状态 + 评论」，全部走 /api/*。
+// 状态名、优先级名、AI 配置都来自 config.json（设置弹窗可改）。
 import { esc, md } from './markdown.js';
 
-const COLUMNS = [
-  ['open', '待接'],
-  ['in_progress', '执行中'],
-  ['review', '待审'],
-  ['closed', '已完成'],
-];
+const AUTO_REFRESH_MS = 5000;
 
 const $ = (s) => document.querySelector(s);
-const state = { issues: [], statuses: COLUMNS.map(([s]) => s), current: null, filter: { q: '', ready: false }, trace: null };
+const state = {
+  issues: [],
+  statuses: ['open', 'in_progress', 'review', 'closed'],
+  labels: { statuses: {}, priorities: {} },
+  readyLabel: 'ready-for-agent',
+  current: null,
+  trace: null,
+  filter: { q: '', ready: false },
+};
+
+const statusLabel = (s) => state.labels.statuses[s] ?? s;
+const prioLabel = (p) => state.labels.priorities[p] ?? `P${p}`;
 
 // ready-for-agent 对人没意义，直接说「可派给 AI」
 const chip = (label) =>
-  label === 'ready-for-agent'
+  label === state.readyLabel
     ? '<span class="chip chip-ready">可派给 AI</span>'
     : `<span class="chip">${esc(label)}</span>`;
 
@@ -33,44 +40,66 @@ function hint(text, isError = false) {
   el.classList.toggle('err', isError);
 }
 
+function applyConfig(cfg) {
+  if (Array.isArray(cfg.statuses) && cfg.statuses.length) state.statuses = cfg.statuses;
+  else if (Array.isArray(cfg.columns) && cfg.columns.length) state.statuses = cfg.columns;
+  if (cfg.labels) {
+    state.labels = {
+      statuses: { ...state.labels.statuses, ...(cfg.labels.statuses ?? {}) },
+      priorities: { ...state.labels.priorities, ...(cfg.labels.priorities ?? {}) },
+    };
+  }
+  if (cfg.readyLabel) state.readyLabel = cfg.readyLabel;
+  else if (cfg.engine?.readyLabel) state.readyLabel = cfg.engine.readyLabel;
+  fillPrioritySelect($('#createPriority'), 2);
+  fillPrioritySelect($('#panelPriority'), state.current?.priority ?? 2);
+}
+
+function fillPrioritySelect(select, selected) {
+  if (!select) return;
+  select.innerHTML = [0, 1, 2, 3, 4]
+    .map((p) => `<option value="${p}"${Number(selected) === p ? ' selected' : ''}>${esc(prioLabel(p))}（P${p}）</option>`)
+    .join('');
+}
+
 function card(issue) {
   const labels = issue.labels.map(chip).join('');
   return `<article class="card" data-id="${esc(issue.id)}">
     <div class="card-id mono">${esc(issue.id)}</div>
     <div class="card-title">${esc(issue.title)}</div>
     ${labels ? `<div class="chips">${labels}</div>` : ''}
-    <div class="card-foot">${esc(issue.type)} · P${esc(issue.priority)} · 💬 ${esc(issue.commentCount)}</div>
+    <div class="card-foot">${esc(issue.type)} · ${esc(prioLabel(issue.priority))} · 💬 ${esc(issue.commentCount)}</div>
   </article>`;
 }
 
 function render() {
-  const { q, ready } = state.filter;
-  const issues = state.issues.filter((i) => {
-    if (q && !i.title.toLowerCase().includes(q.toLowerCase()) && !i.id.toLowerCase().includes(q.toLowerCase())) return false;
-    if (ready && !i.labels.includes('ready-for-agent')) return false;
-    return true;
-  });
-  $('#board').innerHTML = COLUMNS.map(([status, label]) => {
-    const list = issues.filter((i) => i.status === status);
-    return `<section class="col">
-      <h2>${label} <span class="count">${list.length}</span></h2>
-      <div class="col-body">${list.map(card).join('') || '<div class="empty">—</div>'}</div>
-    </section>`;
-  }).join('');
+  const issues = state.issues.filter((i) => !state.filter.ready || i.labels.includes(state.readyLabel));
+  $('#board').innerHTML = state.statuses
+    .map((status) => {
+      const list = issues.filter((i) => i.status === status);
+      return `<section class="col">
+        <h2>${esc(statusLabel(status))} <span class="count">${list.length}</span></h2>
+        <div class="col-body">${list.map(card).join('') || '<div class="empty">—</div>'}</div>
+      </section>`;
+    })
+    .join('');
 }
 
 async function load() {
   try {
-    const { issues } = await api('/api/issues');
+    const params = new URLSearchParams();
+    if (state.filter.q) params.set('q', state.filter.q);
+    const { issues } = await api(`/api/issues?${params}`);
     state.issues = issues;
     render();
-    hint(`共 ${issues.length} 张 · ${new Date().toLocaleTimeString()}`);
+    const suffix = state.filter.q ? `（搜索「${state.filter.q}」）` : '';
+    hint(`共 ${issues.length} 张${suffix} · 自动刷新 ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     hint(`加载失败：${e.message}`, true);
   }
 }
 
-async function openPanel(id) {
+async function openPanel(id, { quiet = false } = {}) {
   const { issue, comments } = await api(`/api/issues/${encodeURIComponent(id)}`);
   state.current = issue;
   $('#panel').hidden = false;
@@ -83,15 +112,20 @@ async function openPanel(id) {
     issue.labels.map(chip).join(' '),
   ].join('<span class="dot">·</span>');
   $('#panelStatus').innerHTML = state.statuses
-    .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${s}</option>`)
+    .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
     .join('');
-  $('#panelPriority').value = issue.priority;
+  fillPrioritySelect($('#panelPriority'), issue.priority);
   $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
-  $('#panelLabel').value = '';
-  $('#panelComments').innerHTML = comments
-    .map((c) => `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="md">${md(c.text)}</div></div>`)
-    .join('') || '<div class="empty">还没有评论</div>';
+  $('#panelComments').innerHTML =
+    comments
+      .map(
+        (c) =>
+          `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(c.created)}</div><div class="md">${md(c.text)}</div></div>`,
+      )
+      .join('') || '<div class="empty">还没有评论</div>';
 
+  if (quiet) return;
+  $('#panelLabel').value = '';
   // 全链路是给程序/工程看的，打开才拉数据
   state.trace = null;
   $('#panelTrace').innerHTML = '';
@@ -136,7 +170,12 @@ function renderTrace({ runs, history }) {
   if (history.length) {
     blocks.push(`<div class="trace-block">
       <div class="trace-title">状态变更（bd history）</div>
-      ${history.map((h) => `<div class="trace-line"><span class="mono">${fmtTime(h.at)}</span> <b>${esc(h.status)}</b>${h.assignee ? `<span class="dot">·</span>${esc(h.assignee)}` : ''}</div>`).join('')}
+      ${history
+        .map(
+          (h) =>
+            `<div class="trace-line"><span class="mono">${fmtTime(h.at)}</span> <b>${esc(statusLabel(h.status))}</b>${h.assignee ? `<span class="dot">·</span>${esc(h.assignee)}` : ''}</div>`,
+        )
+        .join('')}
     </div>`);
   }
 
@@ -184,7 +223,7 @@ async function patch(fields) {
       method: 'PATCH',
       body: JSON.stringify(fields),
     });
-    await Promise.all([load(), openPanel(state.current.id)]);
+    await Promise.all([load(), openPanel(state.current.id, { quiet: true })]);
   } catch (e) {
     hint(`改动失败：${e.message}`, true);
   }
@@ -200,9 +239,75 @@ async function sendComment() {
       body: JSON.stringify({ text }),
     });
     box.value = '';
-    await Promise.all([load(), openPanel(state.current.id)]);
+    await Promise.all([load(), openPanel(state.current.id, { quiet: true })]);
   } catch (e) {
     hint(`评论失败：${e.message}`, true);
+  }
+}
+
+// —— 自动刷新：看板常刷；面板只在没人输入时悄悄刷新 ——
+function panelBusy() {
+  const active = document.activeElement;
+  return !$('#panel').hidden && (active?.closest?.('#panel') || $('#panelComment').value.trim());
+}
+
+async function tick() {
+  if ($('#create').open || $('#settingsDialog').open) return;
+  await load();
+  if (!$('#panel').hidden && state.current && !panelBusy()) {
+    await openPanel(state.current.id, { quiet: true }).catch(() => {});
+  }
+}
+
+// —— 设置 ——
+async function openSettings() {
+  const cfg = await api('/api/settings');
+  $('#statusLabels').innerHTML = (cfg.columns ?? state.statuses)
+    .map((s) => `<label>${esc(s)}<input name="status:${esc(s)}" value="${esc(cfg.labels?.statuses?.[s] ?? '')}" /></label>`)
+    .join('');
+  $('#priorityLabels').innerHTML = [0, 1, 2, 3, 4]
+    .map((p) => `<label>P${p}<input name="prio:${p}" value="${esc(cfg.labels?.priorities?.[p] ?? '')}" /></label>`)
+    .join('');
+  const f = $('#settingsForm');
+  const e = cfg.engine ?? {};
+  f.runner.value = e.runner ?? 'pi';
+  f.sandbox.value = e.sandbox ?? 'workspace-write';
+  f.model.value = e.model ?? '';
+  f.thinking.value = e.thinking ?? '';
+  f.attempts.value = e.attempts ?? 2;
+  f.actor.value = e.actor ?? 'ai';
+  f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
+  f.gitCommit.checked = e.gitCommit !== false;
+  $('#settingsDialog').showModal();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const f = new FormData(event.target);
+  const payload = { labels: { statuses: {}, priorities: {} }, engine: {} };
+  for (const [key, value] of f.entries()) {
+    if (key.startsWith('status:')) payload.labels.statuses[key.slice(7)] = String(value);
+    else if (key.startsWith('prio:')) payload.labels.priorities[key.slice(5)] = String(value);
+  }
+  payload.engine = {
+    runner: f.get('runner'),
+    sandbox: f.get('sandbox'),
+    model: String(f.get('model') ?? ''),
+    thinking: String(f.get('thinking') ?? ''),
+    attempts: Number(f.get('attempts')),
+    actor: String(f.get('actor') ?? ''),
+    readyLabel: String(f.get('readyLabel') ?? ''),
+    gitCommit: f.get('gitCommit') === 'on',
+  };
+  try {
+    const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    applyConfig(saved);
+    $('#settingsDialog').close();
+    await load();
+    if (state.current) await openPanel(state.current.id, { quiet: true });
+    hint('设置已保存');
+  } catch (err) {
+    hint(`保存失败：${err.message}`, true);
   }
 }
 
@@ -210,10 +315,10 @@ $('#board').addEventListener('click', (e) => {
   const el = e.target.closest('.card');
   if (el) openPanel(el.dataset.id).catch((err) => hint(err.message, true));
 });
-$('#refresh').addEventListener('click', load);
 $('#q').addEventListener('input', (e) => {
-  state.filter.q = e.target.value;
-  render();
+  state.filter.q = e.target.value.trim();
+  clearTimeout(state.qTimer);
+  state.qTimer = setTimeout(load, 300);
 });
 $('#readyOnly').addEventListener('change', (e) => {
   state.filter.ready = e.target.checked;
@@ -232,18 +337,20 @@ $('#showRaw').addEventListener('click', () => {
     pre.hidden = true;
     return;
   }
-  const payload = {
-    card: state.current,
-    runs: state.trace?.runs ?? [],
-    journal: state.trace?.journal ?? [],
-  };
-  pre.textContent = JSON.stringify(payload, null, 2);
+  pre.textContent = JSON.stringify(
+    { card: state.current, runs: state.trace?.runs ?? [], journal: state.trace?.journal ?? [] },
+    null,
+    2,
+  );
   pre.hidden = false;
 });
 $('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
 $('#panelLabelAdd').addEventListener('click', () => {
-  const labels = $('#panelLabel').value.split(',').map((s) => s.trim()).filter(Boolean);
+  const labels = $('#panelLabel')
+    .value.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (labels.length) patch({ addLabels: labels });
 });
 $('#panelCommentSend').addEventListener('click', sendComment);
@@ -264,7 +371,10 @@ $('#createForm').addEventListener('submit', async (e) => {
         description: f.get('description'),
         type: f.get('type'),
         priority: Number(f.get('priority')),
-        labels: String(f.get('labels') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+        labels: String(f.get('labels') ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
       }),
     });
     e.target.reset();
@@ -276,12 +386,16 @@ $('#createForm').addEventListener('submit', async (e) => {
   }
 });
 
-api('/api/meta').then((m) => {
-  if (Array.isArray(m.statuses) && m.statuses.length) state.statuses = m.statuses;
-  hint(`工作区 ${m.workspace}`);
-}).catch(() => {});
+$('#settings').addEventListener('click', () => openSettings().catch((err) => hint(err.message, true)));
+$('#settingsCancel').addEventListener('click', () => $('#settingsDialog').close());
+$('#settingsForm').addEventListener('submit', saveSettings);
+
+api('/api/meta')
+  .then((m) => {
+    applyConfig(m);
+    hint(`工作区 ${m.workspace}`);
+  })
+  .catch(() => {});
 
 load();
-setInterval(() => {
-  if (!$('#create').open && $('#panel').hidden) load();
-}, 10000);
+setInterval(tick, AUTO_REFRESH_MS);

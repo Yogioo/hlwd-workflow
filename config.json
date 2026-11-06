@@ -1,0 +1,34 @@
+{
+  "labels": {
+    "statuses": {
+      "open": "待接",
+      "in_progress": "执行中",
+      "review": "待审",
+      "closed": "已完成"
+    },
+    "priorities": {
+      "0": "紧急",
+      "1": "高",
+      "2": "中",
+      "3": "低",
+      "4": "最低"
+    }
+  },
+  "columns": [
+    "open",
+    "in_progress",
+    "review",
+    "closed"
+  ],
+  "engine": {
+    "runner": "pi",
+    "model": "",
+    "thinking": "",
+    "sandbox": "workspace-write",
+    "attempts": 2,
+    "actor": "ai",
+    "readyLabel": "ready-for-agent",
+    "timeoutMs": 1800000,
+    "gitCommit": true
+  }
+}

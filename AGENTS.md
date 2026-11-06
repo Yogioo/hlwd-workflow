@@ -14,7 +14,7 @@
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `beads` | 工单存储与状态（`.beads/`，`bd` CLI） | 不跑 AI、不判验收 |
-| `web` | 建单、看板、详情、改单 | 不跑 AI、不写 git、不绕开适配层 |
+| `web` | 建单、看板、详情、改单、改配置 | 不跑 AI、不写 git、不绕开适配层 |
 | `engine` | 拉单 → 执行 → 审查 → 回写结论 | 不渲染页面、不定义工单字段 |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。
@@ -57,6 +57,18 @@ run(promptFile, workdir, sandbox) -> {status, outDir, events}
 - 写方只有 `engine`（append-only，不改历史）；读方只有 `web`。`web` 不读 engine 的代码，只读这两个路径。
 - 归档/清理是人的事，engine 不自动删。
 
+**Config**（根 `config.json`：界面与 AI 共用的唯一配置）
+
+```
+labels.statuses     # 状态的中文名（open → 待接 …）
+labels.priorities   # 优先级的中文名（2 → 中）
+columns             # 看板显示哪几列、什么顺序
+engine.*            # runner / sandbox / model / attempts / actor / readyLabel / gitCommit
+```
+
+- 写方是 `web`（看板上的「设置」 → `PUT /api/settings`，带字段校验）；读方是 `engine`（每次运行开始时读）。
+- 配置只影响「怎么叫」和「怎么跑」，不改工单数据；它进版本库，改动能审计。
+
 ## 4. 状态机（就这四个，别加）
 
 ```
@@ -76,12 +88,14 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 
 ```
 AGENTS.md
-wf.mjs             # 唯一入口：board / work / trace / new，只做分发不含业务逻辑
+wf.mjs             # 唯一入口：board / stop / work / trace / new，只做分发不含业务逻辑
+config.json        # 唯一配置：状态/优先级中文名 + AI 执行参数（看板“设置”改它）
 package.json       # 只有 scripts，没有依赖
 .beads/            # 唯一真相源，进版本库
 web/               # 页面 + beads 适配层
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
-  runs.mjs         # 只读端口：把 .engine/runs/*/run.json 给看板
+  config.mjs       # 读写根 config.json，带字段校验
+  runs.mjs         # 只读端口：把 .engine/runs/*/run.json 与 journal 给看板
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
   app/             # 单页看板：index.html / app.js / markdown.js / style.css，无构建
                    #   工单页（人看，markdown 渲染）/ 全链路页（程序看，含原始 JSON）
@@ -89,7 +103,6 @@ engine/            # 流程编排：claim / execute / review / complete
   run.mjs          # 入口：接一张单走完流程，一次只跑一张
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run（不碰 beads）
   manifest.mjs     # 写 run.json 与 journal.ndjson（可追溯）
-  config.json      # runner / sandbox / 重试次数，改这里不改代码
   flows/           # 一个阶段一个文件，一个文件一个职责
     claim.mjs      #   接单：open + ready → in_progress
     execute.mjs    #   执行：渲染 prompt → 一次 agent 回合
@@ -118,7 +131,9 @@ engine/            # 流程编排：claim / execute / review / complete
 
 ```bash
 node wf.mjs                  # 我现在该干什么：工单概况 + 下一步
-node wf.mjs board            # 看板：建单、看追溯（npm start）
+node wf.mjs board            # 看板：建单、看全链路（前台，Ctrl+C 停）
+node wf.mjs board --bg       # 看板后台启动，立刻返回（npm start）
+node wf.mjs stop             # 停掉后台看板（npm run stop）
 node wf.mjs work             # 让 AI 干下一张就绪单（npm run engine）
 node wf.mjs trace <卡片id>   # 终端看一张单的全链路
 node wf.mjs new "标题" [描述]  # 建单，自动打 ready-for-agent
@@ -129,7 +144,7 @@ node wf.mjs new "标题" [描述]  # 建单，自动打 ready-for-agent
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环，调度不写进 engine。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
 - 依赖解析：`web/beads.mjs` 需能找到 `bd`（Windows 用 `bd.exe`），`engine/lib.mjs` 需能找到 `agent-tools`；找不到时分别设 `BD_BIN` / `AGENT_TOOLS_BIN`。
-- 看板只是 beads 的一层视图：关掉它不影响数据与流程。端口占用时会直接提示，不吐栈。
+- 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论，无需手动刷新。
 
 `engine` 只在工作区干净时启动；脏工作区的改动会被算进当前这张单的提交里，必须先处理干净。
 

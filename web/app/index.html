@@ -10,9 +10,9 @@
     <header class="top">
       <h1>工单看板</h1>
       <div class="tools">
-        <input id="q" type="search" placeholder="搜标题…" />
+        <input id="q" type="search" placeholder="搜标题 / 描述 / 评论…" />
         <label class="chk"><input id="readyOnly" type="checkbox" /> 只看可派给 AI</label>
-        <button id="refresh" type="button">刷新</button>
+        <button id="settings" type="button" class="ghost">设置</button>
         <button id="new" type="button" class="primary">新建工单</button>
       </div>
       <div id="hint" class="hint"></div>
@@ -41,7 +41,7 @@
         <div id="panelMeta" class="meta"></div>
         <div class="row">
           <label>状态 <select id="panelStatus"></select></label>
-          <label>优先级 <input id="panelPriority" type="number" min="0" max="4" /></label>
+          <label>优先级 <select id="panelPriority"></select></label>
         </div>
         <div class="row">
           <input id="panelLabel" placeholder="加标签，逗号分隔" />
@@ -78,19 +78,55 @@
             </select>
           </label>
           <label>优先级
-            <select name="priority">
-              <option value="2" selected>P2</option>
-              <option value="1">P1</option>
-              <option value="0">P0</option>
-              <option value="3">P3</option>
-              <option value="4">P4</option>
-            </select>
+            <select name="priority" id="createPriority"></select>
           </label>
         </div>
         <label>标签（逗号分隔）<input name="labels" placeholder="ready-for-agent" /></label>
         <menu>
           <button type="button" class="ghost" id="createCancel">取消</button>
           <button type="submit" class="primary">创建</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="settingsDialog" class="dialog">
+      <form id="settingsForm" method="dialog">
+        <h2>设置</h2>
+        <p class="dialog-note">改的是仓库根的 <code>config.json</code>：状态/优先级中文名 + AI 执行配置。保存后看板立即生效，engine 下次执行也用它。</p>
+
+        <h3>状态名称</h3>
+        <div id="statusLabels" class="settings-grid"></div>
+
+        <h3>优先级名称</h3>
+        <div id="priorityLabels" class="settings-grid"></div>
+
+        <h3>AI 执行</h3>
+        <div class="settings-grid">
+          <label>执行器
+            <select name="runner">
+              <option value="pi">pi</option>
+              <option value="codex">codex</option>
+              <option value="agent">cursor agent</option>
+            </select>
+          </label>
+          <label>沙箱
+            <select name="sandbox">
+              <option value="workspace-write">workspace-write（可改文件）</option>
+              <option value="read-only">read-only（只读）</option>
+              <option value="danger-full-access">danger-full-access（全权限）</option>
+            </select>
+          </label>
+          <label>模型（空=默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
+          <label>思考强度（空=默认）<input name="thinking" placeholder="如 high" /></label>
+          <label>最多轮数<input name="attempts" type="number" min="1" max="5" /></label>
+          <label>AI 账号名<input name="actor" placeholder="ai" /></label>
+          <label>可派标签<input name="readyLabel" placeholder="ready-for-agent" /></label>
+          <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
+        </div>
+
+        <menu>
+          <button type="button" class="ghost" id="settingsCancel">取消</button>
+          <button type="submit" class="primary">保存</button>
         </menu>
       </form>
     </dialog>

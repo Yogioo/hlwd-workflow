@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as beads from './beads.mjs';
+import { readConfig, saveConfig } from './config.mjs';
 import { getRun, journalFor, listRuns } from './runs.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
@@ -55,26 +56,69 @@ async function serveStatic(res, urlPath) {
   }
 }
 
+// 搜索：标题 + 描述 + 评论。评论按 issue.updated 缓存，避免每敲一个字都重跑 bd。
+const commentCache = new Map();
+
+async function commentText(issue) {
+  const hit = commentCache.get(issue.id);
+  if (hit && hit.updated === issue.updated) return hit.text;
+  const comments = await beads.listComments(issue.id).catch(() => []);
+  const text = comments.map((c) => c.text).join('\n').toLowerCase();
+  commentCache.set(issue.id, { updated: issue.updated, text });
+  return text;
+}
+
+async function searchIssues(issues, query) {
+  const needle = query.toLowerCase();
+  const matched = new Set();
+  for (const issue of issues) {
+    if (`${issue.title}\n${issue.body}`.toLowerCase().includes(needle)) matched.add(issue.id);
+  }
+  await Promise.all(
+    issues
+      .filter((issue) => !matched.has(issue.id))
+      .map(async (issue) => {
+        if ((await commentText(issue)).includes(needle)) matched.add(issue.id);
+      }),
+  );
+  return issues.filter((issue) => matched.has(issue.id));
+}
+
 async function route(req, res, url) {
   const { pathname, searchParams } = url;
 
   if (pathname === '/api/meta') {
+    const cfg = await readConfig();
     return json(res, 200, {
-      statuses: beads.STATUSES,
-      readyLabel: beads.READY_LABEL,
+      statuses: cfg.columns,
+      labels: cfg.labels,
+      readyLabel: cfg.engine.readyLabel ?? beads.READY_LABEL,
       workspace: process.cwd(),
     });
   }
 
+  if (pathname === '/api/settings') {
+    if (req.method === 'GET') return json(res, 200, await readConfig());
+    if (req.method === 'PUT') {
+      try {
+        return json(res, 200, await saveConfig(await readBody(req)));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
+
   if (pathname === '/api/issues') {
     if (req.method === 'GET') {
-      const issues = await beads.listIssues({
+      let issues = await beads.listIssues({
         status: searchParams.get('status') ?? undefined,
         ready: searchParams.get('ready') === '1',
         label: searchParams.get('label') ?? undefined,
         assignee: searchParams.get('assignee') ?? undefined,
-        q: searchParams.get('q') ?? undefined,
       });
+      const q = (searchParams.get('q') ?? '').trim();
+      if (q) issues = await searchIssues(issues, q);
       return json(res, 200, { issues });
     }
     if (req.method === 'POST') {

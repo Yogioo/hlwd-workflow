@@ -6,9 +6,10 @@
   "description": "接单 → 执行 → 审查 → 完成工单：beads + 网页看板 + AI 工作流",
   "scripts": {
     "wf": "node wf.mjs",
-    "start": "node wf.mjs board",
+    "start": "node wf.mjs board --bg",
     "engine": "node wf.mjs work",
-    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs web/app/markdown.test.mjs"
+    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs web/app/markdown.test.mjs",
+    "stop": "node wf.mjs stop"
   },
   "engines": {
     "node": ">=20"
