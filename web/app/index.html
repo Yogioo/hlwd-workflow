@@ -11,11 +11,17 @@
       <h1>工单看板</h1>
       <div class="tools">
         <input id="q" type="search" placeholder="搜标题…" />
-        <label class="chk"><input id="readyOnly" type="checkbox" /> 只看 ready</label>
+        <label class="chk"><input id="readyOnly" type="checkbox" /> 只看可派给 AI</label>
         <button id="refresh" type="button">刷新</button>
         <button id="new" type="button" class="primary">新建工单</button>
       </div>
       <div id="hint" class="hint"></div>
+      <div class="legend">
+        <b>待接</b> 可以派给 AI（<code>node wf.mjs work</code>）<span class="dot">·</span>
+        <b>执行中</b> AI 在改<span class="dot">·</span>
+        <b>待审</b> 改完了，等验收<span class="dot">·</span>
+        <b>已完成</b> 已提交并关闭。点开任意卡片看全链路。
+      </div>
     </header>
 
     <main id="board" class="board"></main>

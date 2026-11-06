@@ -75,6 +75,7 @@ open ──ready-for-agent──> in_progress ──> review ──> closed
 
 ```
 AGENTS.md
+wf.mjs             # 唯一入口：board / work / trace / new，只做分发不含业务逻辑
 package.json       # 只有 scripts，没有依赖
 .beads/            # 唯一真相源，进版本库
 web/               # 页面 + beads 适配层
@@ -111,23 +112,22 @@ engine/            # 流程编排：claim / execute / review / complete
 
 ## 7. 跑起来
 
+只有四个动作，全部从 `wf.mjs` 进：
+
 ```bash
-npm start                             # 看板 → http://127.0.0.1:3100（PORT 可改）
-npm run engine                        # 接一张就绪单，走完 接单→执行→审查→完成
-node engine/run.mjs --dry             # 只看会接哪张，不动任何数据
-node engine/run.mjs --id <卡片id>     # 指定单（已被接单后重启用）
-bd ready                              # 看就绪工单
-bd show <id>                          # 看详情与评论
-agent-tools work-items list --source beads --workdir . --ready --ready-label ready-for-agent
-agent-tools agent-run capabilities    # 确认执行端可用
+node wf.mjs                  # 我现在该干什么：工单概况 + 下一步
+node wf.mjs board            # 看板：建单、看追溯（npm start）
+node wf.mjs work             # 让 AI 干下一张就绪单（npm run engine）
+node wf.mjs trace <卡片id>   # 终端看一张单的全链路
+node wf.mjs new "标题" [描述]  # 建单，自动打 ready-for-agent
 ```
 
+- `work` 的参数原样透传：`node wf.mjs work --dry` / `--id <卡片> --attempts 1`。
+- `wf.mjs` 只是分发，不含业务逻辑；底层仍是三个黑盒（`bd` / `web` / `engine`）。
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环，调度不写进 engine。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
 - 依赖解析：`web/beads.mjs` 需能找到 `bd`（Windows 用 `bd.exe`），`engine/lib.mjs` 需能找到 `agent-tools`；找不到时分别设 `BD_BIN` / `AGENT_TOOLS_BIN`。
-
-- 看板只是 beads 的一层视图：关掉 `npm start` 不影响任何数据与流程。
-- `web/beads.mjs` 默认自动找 `bd`；找不到时设 `BD_BIN` 指向 bd 可执行文件（Windows 用 `bd.exe`）。
+- 看板只是 beads 的一层视图：关掉它不影响数据与流程。端口占用时会直接提示，不吐栈。
 
 `engine` 只在工作区干净时启动；脏工作区的改动会被算进当前这张单的提交里，必须先处理干净。
 
@@ -139,4 +139,4 @@ agent-tools agent-run capabilities    # 确认执行端可用
 2. `engine/prompts/` 换成该项目「什么叫做完」的定义；
 3. `web/` 的字段标签换成该项目的说法。
 
-其余（三黑盒、契约、五状态、铁律）保持不变。若某项目需要第四种模块，先证明它不能被现有三个模块吸收。
+其余（三黑盒、契约、四状态、铁律）保持不变。若某项目需要第四种模块，先证明它不能被现有三个模块吸收。

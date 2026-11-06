@@ -4,8 +4,9 @@
   "private": true,
   "description": "接单 → 执行 → 审查 → 完成工单：beads + 网页看板 + AI 工作流",
   "scripts": {
-    "start": "node web/server.mjs",
-    "engine": "node engine/run.mjs",
+    "wf": "node wf.mjs",
+    "start": "node wf.mjs board",
+    "engine": "node wf.mjs work",
     "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs"
   },
   "engines": {

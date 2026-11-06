@@ -144,3 +144,14 @@ textarea { width: 100%; resize: vertical; }
 .trace-checks div { padding: 2px 0 2px 10px; border-left: 1px solid var(--line); }
 .pass { color: #4ade80; }
 .fail { color: var(--warn); }
+
+/* 一句话图例：降低第一次打开的理解成本 */
+.legend {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 2px;
+}
+.legend b { color: var(--fg); font-weight: 600; }
+.legend code { background: #0b0d11; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.chip-ready { background: #1d3b2a; color: #7ee2a8; }

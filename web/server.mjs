@@ -21,6 +21,7 @@ const MIME = {
 };
 
 function json(res, status, payload) {
+  if (res.writableEnded || res.destroyed) return; // 客户端提前断开，不再写
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(body);
@@ -136,13 +137,37 @@ async function route(req, res, url) {
 }
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+  res.on('error', () => {}); // 客户端中途断开（EPIPE）不应拖垮整个服务
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+  } catch {
+    return json(res, 400, { error: 'bad request url' });
+  }
   route(req, res, url).catch((err) => {
     json(res, 400, { error: err.message ?? String(err) });
   });
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用（很可能看板已经在跑）。`);
+    console.error(`→ 直接打开 http://${HOST}:${PORT}`);
+    console.error(`→ 或换个端口：PORT=3101 npm start`);
+    process.exit(1);
+  }
+  console.error(`看板启动失败：${err.message}`);
+  process.exit(1);
+});
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    console.log('\n看板已停止');
+    server.close(() => process.exit(0));
+  });
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`bdui-like 看板: http://${HOST}:${PORT}`);
-  console.log(`beads 工作区: ${process.cwd()}`);
+  console.log(`看板：http://${HOST}:${PORT}   （Ctrl+C 停止）`);
+  console.log(`工作区：${process.cwd()}`);
 });

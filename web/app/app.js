@@ -9,6 +9,12 @@ const COLUMNS = [
 const $ = (s) => document.querySelector(s);
 const state = { issues: [], statuses: COLUMNS.map(([s]) => s), current: null, filter: { q: '', ready: false } };
 
+// ready-for-agent 对人没意义，直接说「可派给 AI」
+const chip = (label) =>
+  label === 'ready-for-agent'
+    ? '<span class="chip chip-ready">可派给 AI</span>'
+    : `<span class="chip">${esc(label)}</span>`;
+
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -29,7 +35,7 @@ function hint(text, isError = false) {
 }
 
 function card(issue) {
-  const labels = issue.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join('');
+  const labels = issue.labels.map(chip).join('');
   return `<article class="card" data-id="${esc(issue.id)}">
     <div class="card-id mono">${esc(issue.id)}</div>
     <div class="card-title">${esc(issue.title)}</div>
@@ -75,7 +81,7 @@ async function openPanel(id) {
     `类型 ${esc(issue.type)}`,
     `负责人 ${esc(issue.assignee || '—')}`,
     `更新 ${esc(issue.updated)}`,
-    issue.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join(' '),
+    issue.labels.map(chip).join(' '),
   ].join('<span class="dot">·</span>');
   $('#panelStatus').innerHTML = state.statuses
     .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${s}</option>`)
