@@ -11,7 +11,7 @@ import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
 import { review } from './flows/review.mjs';
 import { loadConfig, log, run } from './lib.mjs';
-import { createManifest, finish } from './manifest.mjs';
+import { clip, createManifest, finish } from './manifest.mjs';
 
 function parseArgs(argv) {
   const args = { dry: false, id: null, attempts: null, allowDirty: false };
@@ -90,7 +90,7 @@ async function main() {
       outDir: rel(exec.outDir),
     };
     await save();
-    await journal('execute', { attempt, ok: exec.ok, ms: record.execute.ms, outDir: record.execute.outDir });
+    await journal('execute', { attempt, ok: exec.ok, ms: record.execute.ms, error: clip(exec.error), outDir: record.execute.outDir });
 
     if (!exec.ok) {
       await handback({ workdir, issue, runDir, reason: exec.error, status: 'open' });
@@ -109,7 +109,7 @@ async function main() {
       outDir: rel(path.join(runDir, `review-${attempt}`)),
     };
     await save();
-    await journal('review', { attempt, pass: verdict.pass, ms: record.review.ms, reason: verdict.reason });
+    await journal('review', { attempt, pass: verdict.pass, ms: record.review.ms, reason: clip(verdict.reason) });
 
     if (verdict.pass) {
       try {

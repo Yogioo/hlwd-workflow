@@ -5,6 +5,12 @@ import path from 'node:path';
 
 const iso = () => new Date().toISOString();
 
+/** journal 是一行一事件，长文本截断；全文留在 run.json 里。 */
+export function clip(text, max = 160) {
+  const s = String(text ?? '').replaceAll('\n', ' ');
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 export async function appendJournal(workdir, event) {
   const file = path.join(workdir, '.engine', 'journal.ndjson');
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -47,5 +53,5 @@ export async function finish(manifest, save, journal, { outcome, reason = null, 
   manifest.commit = commit ?? manifest.commit;
   manifest.endedAt = iso();
   await save();
-  await journal(outcome, { reason, commit: manifest.commit });
+  await journal(outcome, { reason: clip(reason), commit: manifest.commit });
 }

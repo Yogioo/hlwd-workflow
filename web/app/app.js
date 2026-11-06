@@ -94,7 +94,11 @@ async function openPanel(id) {
   renderTrace({ runs, history });
 }
 
-const fmtTime = (at) => String(at ?? '').replace('T', ' ').slice(0, 16) || '—';
+// 时间统一按本地时区展示（run.json 存 UTC，bd history 带 +08:00，不统一会看得像两个事件）
+const fmtTime = (at) => {
+  const d = new Date(at ?? '');
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false }).slice(0, 16);
+};
 const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
 
 // 追溯面板：beads 的状态变更（bd history）+ engine 的 run.json 时间线
@@ -121,7 +125,12 @@ function renderTrace({ runs, history }) {
 
       const r = a.review;
       if (r) {
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${esc(r.reason ?? '')}</div>`);
+        const reason = String(r.reason ?? '');
+        const reasonHtml =
+          reason.length > 120
+            ? `${esc(reason.slice(0, 120))}…<details class="trace-checks"><summary>完整原因</summary><div>${esc(reason)}</div></details>`
+            : esc(reason);
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonHtml}</div>`);
         if (r.checks?.length) {
           steps.push(`<details class="trace-checks"><summary>验证 ${r.checks.length} 条</summary>${r.checks.map((c) => `<div>${esc(c)}</div>`).join('')}</details>`);
         }
