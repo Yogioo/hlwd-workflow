@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as beads from '../web/beads.mjs';
 import { complete, handback } from './flows/complete.mjs';
-import { claimNext, listCandidates } from './flows/claim.mjs';
+import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
 import { review } from './flows/review.mjs';
 import { loadConfig, log, run } from './lib.mjs';
@@ -56,8 +56,9 @@ async function main() {
 
   let claimed;
   if (args.id) {
-    claimed = await beads.getIssue(args.id);
-    log(`指定工单 ${claimed.issue.id}（${claimed.issue.status}）`);
+    const current = await beads.getIssue(args.id);
+    log(`指定工单 ${current.issue.id}（${current.issue.status}）`);
+    claimed = current.issue.status === 'open' ? await claim({ issue: current.issue, cfg }) : current;
   } else {
     claimed = await claimNext({ cfg });
   }
@@ -82,8 +83,14 @@ async function main() {
 
     const verdict = await review({ cfg, workdir, issue, runDir, attempt });
     if (verdict.pass) {
-      await complete({ cfg, workdir, issue, runDir, checks: verdict.checks });
-      return 0;
+      try {
+        await complete({ cfg, workdir, issue, runDir, checks: verdict.checks });
+        return 0;
+      } catch (err) {
+        // 收尾失败也要留下痕迹，别让单卡在 in_progress 里没人知道为什么
+        await handback({ workdir, issue, runDir, reason: `收尾失败：${err.message}`, status: 'in_progress' });
+        return 1;
+      }
     }
 
     feedback = `${verdict.reason}\n（第 ${attempt} 轮审查原文：${path.relative(workdir, runDir)}）`;

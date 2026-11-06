@@ -7,16 +7,17 @@ export async function listCandidates({ cfg }) {
   return issues.filter((i) => i.labels.includes(cfg.readyLabel));
 }
 
-export async function claimNext({ cfg }) {
-  const [next] = await listCandidates({ cfg });
-  if (!next) return null;
-
-  await beads.updateIssue(next.id, { status: 'in_progress', assignee: cfg.actor });
+export async function claim({ issue, cfg }) {
+  await beads.updateIssue(issue.id, { status: 'in_progress', assignee: cfg.actor });
   await beads.commentIssue(
-    next.id,
+    issue.id,
     `接单：engine(${cfg.actor} / ${cfg.runner})，open → in_progress。执行中，勿重复派单。`,
   );
-  log(`接单 ${next.id} — ${next.title}`);
+  log(`接单 ${issue.id} — ${issue.title}`);
+  return beads.getIssue(issue.id);
+}
 
-  return beads.getIssue(next.id);
+export async function claimNext({ cfg }) {
+  const [next] = await listCandidates({ cfg });
+  return next ? claim({ issue: next, cfg }) : null;
 }

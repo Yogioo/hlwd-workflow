@@ -111,6 +111,7 @@ agent-tools agent-run capabilities    # 确认执行端可用
 
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环，调度不写进 engine。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
+- 依赖解析：`web/beads.mjs` 需能找到 `bd`（Windows 用 `bd.exe`），`engine/lib.mjs` 需能找到 `agent-tools`；找不到时分别设 `BD_BIN` / `AGENT_TOOLS_BIN`。
 
 - 看板只是 beads 的一层视图：关掉 `npm start` 不影响任何数据与流程。
 - `web/beads.mjs` 默认自动找 `bd`；找不到时设 `BD_BIN` 指向 bd 可执行文件（Windows 用 `bd.exe`）。
