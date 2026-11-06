@@ -9,6 +9,11 @@
   <body>
     <header class="top">
       <h1>工单看板</h1>
+      <div class="projectbar">
+        <span class="project-label">项目</span>
+        <span class="mono" id="projectPath" title="当前项目">—</span>
+        <button id="openProject" type="button">打开项目</button>
+      </div>
       <div class="tools">
         <input id="q" type="search" placeholder="搜标题 / 描述 / 评论…" />
         <label class="chk"><input id="readyOnly" type="checkbox" /> 只看可派给 AI</label>
@@ -17,6 +22,7 @@
       </div>
       <div id="hint" class="hint"></div>
       <div class="legend">
+        <span class="dot">·</span>
         <b>待接</b> 可以派给 AI（<code>node wf.mjs work</code>）<span class="dot">·</span>
         <b>执行中</b> AI 在改<span class="dot">·</span>
         <b>待审</b> 改完了，等验收<span class="dot">·</span>

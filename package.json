@@ -8,7 +8,7 @@
     "wf": "node wf.mjs",
     "start": "node wf.mjs board --bg",
     "engine": "node wf.mjs work",
-    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs web/app/markdown.test.mjs project.test.mjs",
+    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs project.test.mjs",
     "stop": "node wf.mjs stop"
   },
   "engines": {

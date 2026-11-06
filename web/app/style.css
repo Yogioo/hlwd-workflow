@@ -209,3 +209,18 @@ textarea { width: 100%; resize: vertical; }
 .recent-item { text-align: left; padding: 6px 8px; font-size: 12px; }
 .settings-grid.one { grid-template-columns: 1fr; }
 .settings-grid textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+/* 项目栏：一眼看到当前在哪个项目、随时能换 */
+.projectbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #12151c;
+  max-width: 60vw;
+}
+.project-label { color: var(--muted); font-size: 12px; }
+.projectbar #projectPath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34vw; }
+.projectbar button { padding: 3px 8px; font-size: 12px; }
