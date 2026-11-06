@@ -109,12 +109,22 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 **RunTrace**（`web` 只读）
 
 ```
-<项目>/.hlwd/runs/<cardId>-<ts>/run.json   # 卡片快照 / attempts / verdict / commit / outcome
-<项目>/.hlwd/journal.ndjson                # append-only，一行一事件
+<项目>/.hlwd/runs/<cardId>-<ts>/run.json          # 卡片快照 / attempts / verdict / commit / outcome
+<项目>/.hlwd/runs/<cardId>-<ts>/exec-<n>/         # 第 n 轮执行回合：events.jsonl + output.txt + log.txt
+<项目>/.hlwd/runs/<cardId>-<ts>/review-<n>/       # 第 n 轮审查回合：同上
+<项目>/.hlwd/journal.ndjson                      # append-only，一行一事件
 ```
 
-- 这两处是**产物，不是状态**：删掉它们工单照样成立，只是追溯变模糊。
-- 写方只有 `engine`；读方只有 `web`。`web` 不读 engine 的代码，只读这两个路径。
+- 这三处都是**产物，不是状态**：删掉它们工单照样成立，只是追溯变模糊。
+- 写方只有 `engine`（`exec/review` 子目录由 `agent-tools agent-run` 写）；读方只有 `web`。
+  `web` 不读 engine 的代码，只读这些路径。
+- `attempts[].execute/gate/review` 里 `ms`/`ok`/`pass` 为 `null` 表示**此刻正在跑这一步**：
+  engine 在每步开工前先落一次 `run.json`，看板据此知道「现在卡在哪一阶段」，
+  进程中途崩了也留得下现场。
+- `events.jsonl` 是 runner 原始事件流（工具调用 / 思考 / 文本，含 `*_partial` 增量），
+  由 `web/sessions.mjs` 归一成消息流后交给看板「会话」页；看板不解析 runner 的格式细节。
+  跑完的用 `GET /api/issues/:id/turns/:runId/:phase` 分页翻，正在跑的开
+  `…/stream`（SSE）跟着长。两个接口都只读、都按 `SAFE` 文件名校验。
 
 **Config / Prompts**（`<项目>/.hlwd/`）
 
@@ -152,9 +162,11 @@ package.json       # 只有 scripts，没有依赖
 web/               # 页面 + beads 适配层
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
   runs.mjs         # 只读端口：把 <项目>/.hlwd/runs 与 journal 给看板
+  sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
   app/             # 单页看板：index.html / app.js / markdown.js / style.css，无构建
                    #   工单页（人看，markdown）/ 全链路页（程序看，含原始 JSON）
+                   #   会话页（AI 的工具调用、思考、最终回复；在跑时实时跟随）
 engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run / 跑门禁

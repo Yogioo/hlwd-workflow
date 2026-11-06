@@ -112,6 +112,105 @@ test('附件：粘进评论的图只留在评论里，不进附件列表', async
   });
 });
 
+test('会话接口：列出轮次 / 读一轮 / SSE 跟着长', async () => {
+  await withServer(async ({ base, dir }) => {
+    const t = `?token=${TOKEN}`;
+    const cardId = 'hlwd-sess';
+    const runId = `${cardId}-1700000000000`;
+    const phaseDir = path.join(dir, '.hlwd', 'runs', runId, 'exec-1');
+    await fs.mkdir(phaseDir, { recursive: true });
+
+    const events = [
+      { kind: 'raw', t: 1, payload: { type: 'session' } },
+      { kind: 'thinking_partial', t: 2, text: '先看' },
+      { kind: 'thinking_partial', t: 3, text: '一眼' },
+      { kind: 'thinking', t: 4, text: '先看一眼' },
+      { kind: 'tool', t: 5, callId: 'c1', phase: 'start', toolName: 'bash', args: { command: 'ls -la' } },
+      { kind: 'tool', t: 6, callId: 'c1', phase: 'done', toolName: 'bash', result: { content: [{ type: 'text', text: 'total 0' }] }, payload: { durationMs: 42 } },
+      { kind: 'assistant_partial', t: 7, text: '目录' },
+      { kind: 'assistant', t: 8, text: '目录是空的。' },
+    ];
+    await fs.writeFile(path.join(phaseDir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    await fs.writeFile(path.join(phaseDir, 'output.txt'), '做完了。');
+    await fs.writeFile(
+      path.join(dir, '.hlwd', 'runs', runId, 'run.json'),
+      JSON.stringify({
+        runId,
+        outcome: 'closed',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        attempts: [{ attempt: 1, execute: { startedAt: '2026-01-01T00:00:00.000Z', ms: 900, ok: true } }],
+      }),
+    );
+
+    // 1) 轮次列表
+    const turnsRes = await fetch(`${base}/api/issues/${cardId}/turns${t}`);
+    assert.equal(turnsRes.status, 200);
+    const { turns } = await turnsRes.json();
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].phaseKey, 'exec-1');
+    assert.equal(turns[0].done, true);
+    assert.equal(turns[0].live, false);
+
+    // 2) 读一轮：归一化后的消息 + 最终回复
+    const turnRes = await fetch(`${base}/api/issues/${cardId}/turns/${runId}/exec-1${t}`);
+    assert.equal(turnRes.status, 200);
+    const turn = await turnRes.json();
+    assert.equal(turn.output, '做完了。');
+    assert.deepEqual(
+      turn.messages.map((m) => m.kind),
+      ['thinking', 'tool', 'assistant'],
+      'raw 丢掉、partial 合并、工具配成一条',
+    );
+    assert.equal(turn.messages[1].tool.done, true);
+    assert.equal(turn.messages[1].tool.ms, 42);
+    assert.equal(turn.messages[1].tool.result, 'total 0');
+
+    // 3) 参数不对 / 路径越界
+    assert.equal((await fetch(`${base}/api/issues/${cardId}/turns/${runId}/exec-9${t}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/issues/..%2F..%2Fetc/turns${t}`)).status, 200); // 列表接口只会返回空
+    assert.equal((await fetch(`${base}/api/issues/${cardId}/turns/..%2F..%2Fetc/exec-1${t}`)).status, 404);
+
+    // 4) SSE：把这一轮标成「正在跑」，流里应该看得到消息和 done
+    await fs.writeFile(
+      path.join(dir, '.hlwd', 'runs', runId, 'run.json'),
+      JSON.stringify({
+        runId,
+        outcome: 'running',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        attempts: [{ attempt: 1, execute: { startedAt: '2026-01-01T00:00:00.000Z', ms: null, ok: null } }],
+      }),
+    );
+    const streamRes = await fetch(`${base}/api/issues/${cardId}/turns/${runId}/exec-1/stream${t}`);
+    assert.equal(streamRes.status, 200);
+    assert.match(streamRes.headers.get('content-type') ?? '', /text\/event-stream/);
+    const reader = streamRes.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    for (let i = 0; i < 20 && !text.includes('event: done'); i += 1) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (!text.includes('event: messages') && i === 0) {
+        // 第一包之后把这一轮收尾，模拟「跑完了」
+        await fs.writeFile(
+          path.join(dir, '.hlwd', 'runs', runId, 'run.json'),
+          JSON.stringify({
+            runId,
+            outcome: 'closed',
+            startedAt: '2026-01-01T00:00:00.000Z',
+            attempts: [{ attempt: 1, execute: { startedAt: '2026-01-01T00:00:00.000Z', ms: 900, ok: true } }],
+          }),
+        );
+      }
+    }
+    await reader.cancel().catch(() => {});
+    assert.match(text, /event: hello/);
+    assert.match(text, /event: messages/);
+    assert.match(text, /event: done/);
+    assert.match(text, /"kind":"tool"/);
+  });
+});
+
 test('附件：上传 → 列表 → 取回 → 删除', async () => {
   await withServer(async ({ base }) => {
     const t = `?token=${TOKEN}`;

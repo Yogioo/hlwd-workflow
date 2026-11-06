@@ -66,6 +66,7 @@
         <div class="seg" role="tablist">
           <button id="tabIssue" class="seg-btn active" type="button">工单</button>
           <button id="tabTrace" class="seg-btn" type="button">全链路</button>
+          <button id="tabSession" class="seg-btn" type="button" title="AI 在里面的工具调用与思考">会话</button>
         </div>
         <button id="panelClose" type="button" class="ghost tiny">关闭</button>
       </header>
@@ -108,6 +109,22 @@
             <button id="showRaw" type="button">原始记录（给程序看）</button>
           </div>
           <pre id="panelRaw" class="raw mono" hidden></pre>
+        </div>
+
+        <div id="viewSession" hidden>
+          <div id="sessionTurns" class="session-turns"></div>
+          <div class="session-bar">
+            <span id="sessionStatus" class="session-status"></span>
+            <label class="switch small">
+              <input id="sessionThink" type="checkbox" checked />
+              <span class="switch-track" aria-hidden="true"></span>
+              思考
+            </label>
+          </div>
+          <div id="sessionBody" class="session"></div>
+          <div class="row">
+            <button id="sessionMore" type="button" hidden>加载更多</button>
+          </div>
         </div>
       </div>
     </aside>

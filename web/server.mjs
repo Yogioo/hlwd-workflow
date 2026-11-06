@@ -25,6 +25,7 @@ import {
 } from '../project.mjs';
 import * as beads from './beads.mjs';
 import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
+import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const ENGINE_WATCH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'engine', 'watch.mjs');
@@ -132,6 +133,7 @@ let current = null;
 function applyProject(dir) {
   beads.setWorkdir(dir);
   setProjectDir(dir);
+  setSessionsDir(dir);
   commentCache.clear(); // 卡片 id 在不同项目里可能撞车
 }
 
@@ -347,6 +349,81 @@ async function searchIssues(issues, query) {
   return issues.filter((issue) => matched.has(issue.id));
 }
 
+// —— 会话（执行端 / 审查端的内部过程）——
+// 一轮 agent 回合可能有几百 KB 的 events.jsonl：跑完的用 GET 分页翻，还在跑的开 SSE 跟着长。
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function streamTurn(req, res, cardId, runId, phase) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no', // 内网反代别攒包
+  });
+
+  let closed = false;
+  req.on('close', () => {
+    closed = true;
+  });
+
+  const send = (event, data) => {
+    if (closed || res.writableEnded || res.destroyed) return false;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    return true;
+  };
+
+  send('hello', { card: cardId, runId, phase });
+
+  let state = {}; // 事件读游标 + 半行残留 + 归一化状态，tailFrom 会一路带下去
+  const startedAt = Date.now();
+  let lastWrite = Date.now();
+  let missingPolls = 0;
+
+  try {
+    while (!closed) {
+      const chunk = await tailFrom(cardId, runId, phase, state);
+      state = chunk;
+
+      if (chunk.missing) {
+        // 回合刚起来、events.jsonl 还没写（agent 吞第一条事件前有一段空白）：等它一会儿
+        missingPolls += 1;
+        if (missingPolls === 1) send('waiting', { phase });
+        if (missingPolls > 120) {
+          send('missing', { phase });
+          break;
+        }
+      } else {
+        missingPolls = 0;
+        if (chunk.messages.length) {
+          send('messages', { card: cardId, runId, phase, messages: chunk.messages });
+          lastWrite = Date.now();
+        }
+      }
+
+      // 这一轮回合跑完了就不再等：收尾信息给前端，前端再拉一次完整内容（带 output.txt）
+      const turn = (await listTurns(cardId)).find((t) => t.runId === runId && t.phaseKey === phase);
+      if (turn?.done) {
+        send('done', { phase, ms: turn.ms, result: turn.result });
+        break;
+      }
+      // 过程很久没新东西也别装死：定时发个注释保活，超过上限主动收线
+      if (Date.now() - lastWrite > 15000) {
+        if (!send('ping', { at: Date.now() })) break;
+        lastWrite = Date.now();
+      }
+      if (Date.now() - startedAt > 15 * 60 * 1000) {
+        send('timeout', { phase });
+        break;
+      }
+      await sleep(500);
+    }
+  } catch (err) {
+    send('error', { error: err.message ?? String(err) });
+  } finally {
+    res.end();
+  }
+}
+
 async function route(req, res, url) {
   const { pathname, searchParams } = url;
 
@@ -467,6 +544,23 @@ async function route(req, res, url) {
       return json(res, 201, { issue });
     }
     return json(res, 405, { error: 'method not allowed' });
+  }
+
+  const turnsMatch = pathname.match(/^\/api\/issues\/([^/]+)\/turns(?:\/([^/]+)\/([^/]+))?(\/stream)?$/);
+  if (turnsMatch) {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    const cardId = decodeURIComponent(turnsMatch[1]);
+    const runId = turnsMatch[2] ? decodeURIComponent(turnsMatch[2]) : null;
+    const phase = turnsMatch[3] ? decodeURIComponent(turnsMatch[3]) : null;
+    const wantStream = Boolean(turnsMatch[4]);
+    await project(); // 让 sessions 指向当前项目
+    if (!runId) return json(res, 200, { turns: await listTurns(cardId) });
+    if (wantStream) return streamTurn(req, res, cardId, runId, phase);
+    const turn = await readTurn(cardId, runId, phase, {
+      after: searchParams.get('after'),
+      limit: searchParams.get('limit'),
+    });
+    return turn ? json(res, 200, turn) : json(res, 404, { error: '这一轮没有会话记录' });
   }
 
   const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history|\/journal|\/attachments)?$/);

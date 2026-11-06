@@ -1422,3 +1422,252 @@ select {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ---------- 会话：AI 在里面到底做了什么 ---------- */
+
+.session-turns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--line);
+}
+.turn-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 12.5px;
+}
+.turn-btn:hover {
+  border-color: var(--line-hi);
+  color: var(--bone);
+}
+.turn-btn.active {
+  background: var(--card-hi);
+  border-color: var(--line-hi);
+  color: var(--bone);
+}
+.turn-name {
+  white-space: nowrap;
+}
+.turn-meta {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.turn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--line-hi);
+  flex: none;
+}
+.turn-dot.done {
+  background: var(--done);
+}
+.turn-dot.live {
+  background: var(--run);
+  animation: beat 1.8s ease-in-out infinite;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 32px;
+  margin: 6px 0 2px;
+}
+.session-status {
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-status.err {
+  color: #f0a19a;
+}
+.switch.small {
+  font-size: 11.5px;
+  gap: 6px;
+}
+
+.session {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 4px;
+}
+.session.hide-think .msg-thinking {
+  display: none;
+}
+
+.msg {
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.62;
+}
+.msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 思考：折叠、暗一档，一眼能跳过 */
+.msg-thinking {
+  border-left: 1px solid var(--line-hi);
+  padding-left: 10px;
+}
+.think summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  overflow: hidden;
+}
+.think summary::-webkit-details-marker {
+  display: none;
+}
+.think summary::marker {
+  content: ""; /* 各浏览器的原生箭头样式不一致，统一自己画 */
+}
+.think summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: none;
+  margin-top: 5px;
+  border-right: 1px solid var(--faint);
+  border-bottom: 1px solid var(--faint);
+  transform: rotate(-45deg);
+  transition: transform 0.15s var(--ease);
+}
+.think[open] summary::before {
+  transform: rotate(45deg);
+}
+.think summary:hover {
+  color: var(--dim);
+}
+.think-label {
+  flex: none;
+}
+.think-peek {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.msg-thinking .msg-text {
+  margin-top: 6px;
+  color: var(--dim);
+  font-size: 12.5px;
+  border-left: 1px solid var(--line-hi);
+  padding-left: 10px;
+}
+
+/* 工具调用：一行命令 + 可展开的输出 */
+.msg-tool .tool {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+}
+.msg-tool summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  min-width: 0;
+}
+.msg-tool summary::-webkit-details-marker {
+  display: none;
+}
+.msg-tool summary::marker {
+  content: "";
+}
+.msg-tool summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: none;
+  margin-top: 4px;
+  border-right: 1px solid var(--faint);
+  border-bottom: 1px solid var(--faint);
+  transform: rotate(-45deg);
+  transition: transform 0.15s var(--ease);
+}
+.msg-tool details[open] summary::before {
+  transform: rotate(45deg);
+}
+.msg-tool .tool-name {
+  flex: none;
+  color: var(--open);
+  font-size: 11px;
+}
+.msg-tool .tool-arg {
+  color: var(--dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.msg-tool .tool-ms {
+  margin-left: auto;
+  flex: none;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.msg-tool .tool-ms.is-error {
+  color: var(--oops);
+}
+.tool-result {
+  margin: 0;
+  padding: 9px 10px;
+  border-top: 1px solid var(--line);
+  background: #0a1014;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg-tool.is-error .tool {
+  border-color: color-mix(in srgb, var(--oops) 45%, transparent);
+}
+
+/* 执行端/审查端的正文 */
+.msg-assistant .msg-text {
+  color: var(--bone);
+}
+.msg-assistant .msg-text.md {
+  white-space: normal;
+}
+.msg-output {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-hi);
+  border-radius: 8px;
+  background: var(--card);
+}
+.msg-label {
+  font-size: 11px;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+.trace .live {
+  color: var(--run);
+}

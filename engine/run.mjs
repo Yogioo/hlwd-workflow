@@ -113,15 +113,12 @@ async function main() {
     manifest.attempts.push(record);
 
     const execStart = Date.now();
+    // 先把这一轮标成「正在跑」（ms/ok 还是 null）再开工：看板靠 run.json 才知道现在跑到哪一步；
+    // engine 如果中途崩了，也能从 run.json 看出当时卡在哪一轮。
+    record.execute = { startedAt: new Date(execStart).toISOString(), ms: null, ok: null, error: null };
+    await save();
     const exec = await execute({ cfg, workdir, issue, comments, runDir, attempt, feedback });
-    record.execute = {
-      startedAt: new Date(execStart).toISOString(),
-      ms: Date.now() - execStart,
-      ok: exec.ok,
-      error: exec.error,
-      prompt: rel(exec.promptFile),
-      outDir: rel(exec.outDir),
-    };
+    record.execute = { ...record.execute, ms: Date.now() - execStart, ok: exec.ok, error: exec.error, prompt: rel(exec.promptFile), outDir: rel(exec.outDir) };
     await save();
     await journal('execute', { attempt, ok: exec.ok, ms: record.execute.ms, error: clip(exec.error), outDir: record.execute.outDir });
 
@@ -133,13 +130,10 @@ async function main() {
 
     // 门禁：实现 → 门禁 → 审查。不通过就不进审查，直接把原因回灌给执行端。
     const gateStart = Date.now();
+    record.gate = { startedAt: new Date(gateStart).toISOString(), ms: null, pass: null, reason: null };
+    await save();
     const gateResult = await gateStage({ cfg, workdir, issue, runDir, attempt });
-    record.gate = {
-      startedAt: new Date(gateStart).toISOString(),
-      ms: Date.now() - gateStart,
-      pass: gateResult.pass,
-      reason: gateResult.reason,
-    };
+    record.gate = { ...record.gate, ms: Date.now() - gateStart, pass: gateResult.pass, reason: gateResult.reason };
     await save();
     await journal('gate', { attempt, pass: gateResult.pass, ms: record.gate.ms, reason: clip(gateResult.reason) });
 
@@ -150,14 +144,22 @@ async function main() {
     }
 
     const reviewStart = Date.now();
-    const verdict = await review({ cfg, workdir, issue, runDir, attempt });
     record.review = {
       startedAt: new Date(reviewStart).toISOString(),
+      ms: null,
+      pass: null,
+      reason: null,
+      checks: [],
+      outDir: rel(path.join(runDir, `review-${attempt}`)),
+    };
+    await save();
+    const verdict = await review({ cfg, workdir, issue, runDir, attempt });
+    record.review = {
+      ...record.review,
       ms: Date.now() - reviewStart,
       pass: verdict.pass,
       reason: verdict.reason,
       checks: verdict.checks ?? [],
-      outDir: rel(path.join(runDir, `review-${attempt}`)),
     };
     await save();
     await journal('review', { attempt, pass: verdict.pass, ms: record.review.ms, reason: clip(verdict.reason) });

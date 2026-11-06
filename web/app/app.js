@@ -472,12 +472,17 @@ const fmtTime = (at) => {
 const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
 
 function showTab(name) {
+  const isIssue = name === 'issue';
   const isTrace = name === 'trace';
-  $('#tabIssue').classList.toggle('active', !isTrace);
+  const isSession = name === 'session';
+  $('#tabIssue').classList.toggle('active', isIssue);
   $('#tabTrace').classList.toggle('active', isTrace);
-  $('#viewIssue').hidden = isTrace;
+  $('#tabSession').classList.toggle('active', isSession);
+  $('#viewIssue').hidden = !isIssue;
   $('#viewTrace').hidden = !isTrace;
+  $('#viewSession').hidden = !isSession;
   if (isTrace) loadTrace();
+  if (isSession) openSession();
 }
 
 // 追溯面板：beads 的状态变更（bd history）+ engine 的 run.json 时间线
@@ -504,17 +509,17 @@ function renderTrace({ runs, history }) {
     const steps = [`<div class="trace-line"><span class="mono">${fmtTime(run.startedAt)}</span> 接单（${esc(run.actor ?? '')} / ${esc(run.runner ?? '')}）</div>`];
     for (const a of run.attempts ?? []) {
       const e = a.execute ?? {};
-      steps.push(`<div class="trace-line"><span class="mono">${fmtTime(e.startedAt)}</span> 执行 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(e.ms)}<span class="dot">·</span>${e.ok ? 'ok' : '<b class="fail">失败</b>'}</div>`);
+      steps.push(`<div class="trace-line"><span class="mono">${fmtTime(e.startedAt)}</span> 执行 #${esc(a.attempt)}<span class="dot">·</span>${e.ok == null ? '<b class="live">进行中</b>' : `${fmtMs(e.ms)}<span class="dot">·</span>${e.ok ? 'ok' : '<b class="fail">失败</b>'}`}</div>`);
       if (!e.ok && e.error) steps.push(`<div class="trace-sub">${esc(e.error)}</div>`);
 
       const g = a.gate;
       if (g) {
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(g.startedAt)}</span> 门禁 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(g.ms)}<span class="dot">·</span><b class="${g.pass ? 'pass' : 'fail'}">${g.pass ? 'pass' : 'fail'}</b> ${reasonCell(g.reason)}</div>`);
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(g.startedAt)}</span> 门禁 #${esc(a.attempt)}<span class="dot">·</span>${g.pass == null ? '<b class="live">进行中</b>' : `${fmtMs(g.ms)}<span class="dot">·</span><b class="${g.pass ? 'pass' : 'fail'}">${g.pass ? 'pass' : 'fail'}</b> ${reasonCell(g.reason)}`}</div>`);
       }
 
       const r = a.review;
       if (r) {
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonCell(r.reason)}</div>`);
+        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${r.pass == null ? '<b class="live">进行中</b>' : `${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonCell(r.reason)}`}</div>`);
         if (r.checks?.length) {
           steps.push(`<details class="trace-checks"><summary>验证 ${r.checks.length} 条</summary>${r.checks.map((c) => `<div>${esc(c)}</div>`).join('')}</details>`);
         }
@@ -531,6 +536,305 @@ function renderTrace({ runs, history }) {
   }
 
   $('#panelTrace').innerHTML = blocks.join('');
+}
+
+/** 面板第三个 tab：AI 到底在里面做了什么（工具调用 / 思考 / 文本）。 */
+const SESSION_PAGE = 300; // 一次最多拉多少条：一轮事件可能有几千条
+state.session = {
+  turns: [],
+  current: null,
+  source: null,
+  next: null,
+  nodes: new Map(),
+  autoFollow: true,
+};
+
+const turnKey = (t) => `${t.runId}/${t.phaseKey}`;
+const turnName = (t) => `${t.phase === 'exec' ? '执行' : '审查'} #${t.attempt}`;
+const turnApi = (suffix = '') => `/api/issues/${encodeURIComponent(state.current.id)}/turns${suffix}`;
+const pickTurn = (turns) => turns.find((t) => t.live) ?? turns[0] ?? null;
+// 「最新」= 开始时间最晚的那个（列表顺序是 attempt 倒序、同轮 exec 在前，不能直接拿 turns[0]）。
+// 同毫秒打平的时候按流水线顺序算：同一轮的 review 比 exec 新。
+const latestTurn = (turns) =>
+  [...turns].sort(
+    (a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')) || (a.phase === 'review' ? -1 : 1),
+  )[0] ?? null;
+
+function setSessionStatus(text, isError = false) {
+  const el = $('#sessionStatus');
+  el.textContent = text ?? '';
+  el.classList.toggle('err', isError);
+}
+
+function renderTurns() {
+  const cur = state.session.current;
+  // 5 秒一次自动刷新，签名没变就别重建按钮（否则会把焦点和 hover 弄丢）
+  const sig = state.session.turns
+    .map((t) => `${turnKey(t)}:${t.live}:${t.done}:${t.ms}:${cur && turnKey(cur) === turnKey(t) ? 1 : 0}`)
+    .join('|');
+  if (sig === state.session.turnSig) return;
+  state.session.turnSig = sig;
+
+  $('#sessionTurns').innerHTML = state.session.turns.length
+    ? state.session.turns
+        .map(
+          (t) => `<button type="button" class="turn-btn${cur && turnKey(cur) === turnKey(t) ? ' active' : ''}"
+            data-run="${esc(t.runId)}" data-phase="${esc(t.phaseKey)}" title="${esc(t.startedAt ?? '')}">
+            <span class="turn-dot${t.live ? ' live' : t.done ? ' done' : ''}"></span>
+            <span class="turn-name">${esc(turnName(t))}</span>
+            <span class="turn-meta mono">${t.live ? '正在跑' : esc(fmtMs(t.ms))}</span>
+          </button>`,
+        )
+        .join('')
+    : '<div class="empty">这张卡还没跑过 AI。</div>';
+}
+
+function sessionClear() {
+  const s = state.session;
+  if (s.source) {
+    s.source.close();
+    s.source = null;
+  }
+  s.nodes = new Map();
+  s.next = null;
+  s.lastAssistant = null;
+  $('#sessionBody').innerHTML = '';
+  $('#sessionMore').hidden = true;
+}
+
+function sessionScroller() {
+  return document.querySelector('.panel-body');
+}
+
+function nearBottom() {
+  const box = sessionScroller();
+  return !box || box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+}
+
+function scrollSessionToBottom() {
+  const box = sessionScroller();
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+const toolArgLine = (args) => {
+  const a = args ?? {};
+  const raw = a.command ?? a.path ?? a.file ?? a.pattern ?? (Object.keys(a).length ? JSON.stringify(a) : '');
+  return String(raw).replace(/\s+/g, ' ').trim();
+};
+
+function msgNode(m) {
+  const node = document.createElement('div');
+  node.className = `msg msg-${m.kind}`;
+  node.dataset.id = m.id;
+  if (m.kind === 'tool') {
+    node.innerHTML = `<details class="tool"><summary>
+        <span class="tool-name mono"></span><span class="tool-arg mono"></span><span class="tool-ms mono"></span>
+      </summary><pre class="tool-result mono"></pre></details>`;
+  } else if (m.kind === 'thinking') {
+    node.innerHTML = `<details class="think"><summary><span class="think-label">思考</span><span class="think-peek"></span></summary><div class="msg-text"></div></details>`;
+  } else {
+    node.innerHTML = '<div class="msg-text"></div>';
+  }
+  return node;
+}
+
+function msgUpdate(node, m) {
+  if (m.kind === 'tool') {
+    const tool = m.tool ?? {};
+    const arg = toolArgLine(tool.args);
+    node.querySelector('.tool-name').textContent = tool.name ?? 'tool';
+    const argEl = node.querySelector('.tool-arg');
+    argEl.textContent = arg.length > 140 ? `${arg.slice(0, 140)}…` : arg;
+    argEl.title = arg;
+    node.querySelector('.tool-ms').textContent = tool.done ? (tool.ms != null ? fmtMs(tool.ms) : '完成') : '…';
+    node.querySelector('.tool-ms').classList.toggle('is-error', Boolean(tool.isError));
+    if (tool.done) {
+      node.querySelector('.tool-result').textContent = tool.result || '（没有输出）';
+      node.classList.toggle('is-error', Boolean(tool.isError));
+      // 失败的工具调用直接展开：人就是来找它的
+      if (tool.isError) node.querySelector('details').open = true;
+    }
+    return;
+  }
+
+  const textEl = node.querySelector('.msg-text');
+  if (!textEl) return;
+  if (m.final) {
+    // 定稿了才跑 markdown：流式过程中每帧都渲染一遍太重
+    if (m.kind === 'assistant') {
+      textEl.classList.add('md'); // md 里是缩排与块级标签，得关掉 pre-wrap
+      textEl.innerHTML = md(m.text);
+      state.session.lastAssistant = { text: m.text, node }; // 留给 renderOutput 去重
+    } else {
+      textEl.textContent = m.text;
+    }
+    node.dataset.final = '1';
+  } else {
+    textEl.textContent = m.text;
+  }
+  if (m.kind === 'thinking') {
+    const oneLine = String(m.text ?? '').replace(/\s+/g, ' ').trim();
+    node.querySelector('.think-peek').textContent = oneLine ? ` ${oneLine.slice(0, 80)}${oneLine.length > 80 ? '…' : ''}` : '';
+  }
+}
+
+function applyThinkFilter() {
+  $('#sessionBody').classList.toggle('hide-think', !$('#sessionThink').checked);
+}
+
+function appendMessages(list, { follow = true } = {}) {
+  if (!list?.length) return;
+  const body = $('#sessionBody');
+  const stick = follow && nearBottom();
+  for (const m of list) {
+    let node = state.session.nodes.get(m.id);
+    if (!node) {
+      node = msgNode(m);
+      state.session.nodes.set(m.id, node);
+      body.append(node);
+    }
+    msgUpdate(node, m);
+  }
+  applyThinkFilter();
+  if (stick) scrollSessionToBottom();
+}
+
+function renderOutput(text) {
+  const body = $('#sessionBody');
+  body.querySelector('.msg-output')?.remove();
+  if (!text) return;
+  // 最终回复和最后一条正文通常是同一段话（output.txt 就是从它来的）：留一份就够
+  const lastAssistant = state.session.lastAssistant;
+  if (lastAssistant && lastAssistant.text.trim() === text.trim()) lastAssistant.node.remove();
+  const node = document.createElement('div');
+  node.className = 'msg msg-output';
+  node.innerHTML = '<div class="msg-label">最终回复</div><div class="md"></div>';
+  node.querySelector('.md').innerHTML = md(text);
+  body.append(node);
+  if (nearBottom()) scrollSessionToBottom();
+}
+
+async function fetchTurn(turn, after = null) {
+  const q = new URLSearchParams({ limit: String(SESSION_PAGE) });
+  if (after != null) q.set('after', String(after));
+  const path = `${turnApi(`/${encodeURIComponent(turn.runId)}/${encodeURIComponent(turn.phaseKey)}`)}?${q}`;
+  try {
+    const data = await api(path);
+    // 第一次打开一轮（不是「加载更多」）：停在开头，不要直接跳到结尾
+    appendMessages(data.messages, { follow: after != null });
+    state.session.next = data.next;
+    $('#sessionMore').hidden = data.next == null;
+    renderOutput(data.output);
+    if (after == null) {
+      const box = sessionScroller();
+      if (box) box.scrollTop = 0;
+    }
+    setSessionStatus(`${turnName(turn)} · ${data.total} 条消息 · ${fmtSize(data.bytes)}`);
+  } catch (err) {
+    setSessionStatus(`读不到这一轮的记录：${err.message}`, true);
+  }
+}
+
+/** 正在跑的这一轮：开 SSE 跟着长。收尾再拉一次完整内容（带最终回复）。 */
+function followTurn(turn) {
+  const s = state.session;
+  if (s.source) {
+    s.source.close();
+    s.source = null;
+  }
+  const url = turnApi(`/${encodeURIComponent(turn.runId)}/${encodeURIComponent(turn.phaseKey)}/stream`);
+  const source = new EventSource(url);
+  s.source = source;
+  let finished = false;
+  setSessionStatus(`${turnName(turn)} · 正在跑，跟着看`);
+
+  source.addEventListener('messages', (e) => {
+    try {
+      appendMessages(JSON.parse(e.data).messages ?? []);
+    } catch {
+      // 半包就算了，下一轮还会来
+    }
+  });
+  source.addEventListener('done', () => {
+    finished = true;
+    source.close();
+    s.source = null;
+    refreshTurns({ reopenCurrent: true });
+  });
+  source.addEventListener('missing', () => {
+    finished = true;
+    source.close();
+    s.source = null;
+    setSessionStatus('这一轮没有会话记录（执行器没写 events.jsonl）', true);
+  });
+  source.addEventListener('timeout', () => {
+    finished = true;
+    source.close();
+    s.source = null;
+    setSessionStatus('等太久了先断开；点一下这一轮可以再看', true);
+  });
+  source.addEventListener('error', () => {
+    if (finished) return; // 正常收线的 close 也会走这里
+    source.close();
+    s.source = null;
+    setSessionStatus('跟丢了（连接断了），点一下这一轮重看', true);
+  });
+}
+
+async function openTurn(turn) {
+  if (!state.current || !turn) return;
+  sessionClear();
+  state.session.current = turn;
+  renderTurns();
+  if (turn.live) {
+    followTurn(turn);
+    return;
+  }
+  await fetchTurn(turn);
+}
+
+/**
+ * 重新读一次「有哪些回合」。
+ * reopenCurrent：把当前这轮从头重拉（跑完了，需要最终回复）。
+ */
+async function refreshTurns({ reopenCurrent = false } = {}) {
+  if (!state.current) return;
+  let turns = [];
+  try {
+    turns = (await api(turnApi())).turns ?? [];
+  } catch (err) {
+    setSessionStatus(`读不到运行记录：${err.message}`, true);
+    return;
+  }
+  state.session.turns = turns;
+  const cur = state.session.current;
+  const same = cur ? turns.find((t) => turnKey(t) === turnKey(cur)) : null;
+  renderTurns();
+
+  if (reopenCurrent && same) return openTurn({ ...same, live: false });
+  if (!cur) return turns.length ? openTurn(pickTurn(turns)) : setSessionStatus('还没有运行记录');
+
+  // 正在跟的这一轮跑完了、后面又开了一轮（执行完了接着审查）：自动接上去
+  const newest = latestTurn(turns);
+  if (state.session.autoFollow && same?.done && newest && turnKey(newest) !== turnKey(same) && newest.live) {
+    return openTurn(newest);
+  }
+  if (same) {
+    state.session.current = same; // 只更新 live/耗时，不动内容
+    return;
+  }
+  // 当前这轮不在了：跟着自动切（用户手动选过的就不抢）
+  if (state.session.autoFollow) return openTurn(pickTurn(turns));
+}
+
+async function openSession() {
+  if (!state.current) return;
+  state.session.autoFollow = true;
+  state.session.current = null;
+  sessionClear();
+  renderTurns();
+  setSessionStatus('读取中…');
+  await refreshTurns();
 }
 
 async function patch(fields, id = state.current?.id) {
@@ -574,8 +878,9 @@ function panelBusy() {
 async function tick() {
   if ($('#create').open || $('#settingsDialog').open) return;
   await load();
-  if (!$('#panel').hidden && state.current && !panelBusy()) {
-    await openPanel(state.current.id, { quiet: true }).catch(() => {});
+  if (!$('#panel').hidden && state.current) {
+    if (!$('#viewSession').hidden) refreshTurns(); // 有新的一轮就跟着切
+    if (!panelBusy()) await openPanel(state.current.id, { quiet: true }).catch(() => {});
   }
 }
 
@@ -646,6 +951,7 @@ async function saveSettings(event) {
 function closePanel() {
   const panel = $('#panel');
   panelToken += 1; // 作废在飞的刷新
+  sessionClear(); // 断开跟着跑的 SSE
   panel.classList.remove('is-open');
   state.current = null;
   state.trace = null;
@@ -724,6 +1030,19 @@ $('#readyOnly').addEventListener('change', (e) => {
 $('#panelClose').addEventListener('click', closePanel);
 $('#tabIssue').addEventListener('click', () => showTab('issue'));
 $('#tabTrace').addEventListener('click', () => showTab('trace'));
+$('#tabSession').addEventListener('click', () => showTab('session'));
+$('#sessionTurns').addEventListener('click', (e) => {
+  const btn = e.target.closest('.turn-btn');
+  if (!btn) return;
+  const turn = state.session.turns.find((t) => t.runId === btn.dataset.run && t.phaseKey === btn.dataset.phase);
+  if (!turn) return;
+  state.session.autoFollow = false; // 人自己选了就别再自动跳
+  openTurn(turn);
+});
+$('#sessionMore').addEventListener('click', () => {
+  if (state.session.current && state.session.next != null) fetchTurn(state.session.current, state.session.next);
+});
+$('#sessionThink').addEventListener('change', applyThinkFilter);
 $('#showRaw').addEventListener('click', () => {
   const pre = $('#panelRaw');
   if (!pre.hidden) {
