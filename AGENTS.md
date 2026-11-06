@@ -145,6 +145,20 @@ export default async ({workdir, issue, runDir, attempt, cfg})
   跑完的用 `GET /api/issues/:id/turns/:runId/:phase` 分页翻，正在跑的开
   `…/stream`（SSE）跟着长。两个接口都只读、都按 `SAFE` 文件名校验。
 
+**Realtime**（`web` 只读 + 推送；不存状态）
+
+```
+GET /api/issues/<id>/events      # SSE：连上先给一份快照，之后字段/评论变了就再推一份
+GET /issue/<id>                  # 工单独立页面（返回同一个单页，id 由前端从 URL 读）
+```
+
+- 一个卡片一条流，推送的是**整张卡**（issue + comments，都很小），前端按 id 覆盖渲染。
+- 触发：① 我们自己的写路径（评论 / 改状态 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
+  比对 `updated_at + comment_count`，把 engine 或别的进程直接改 bd 的变化也接进来。
+  轮询是**每卡一份**，不随观看人数增长；没人看就自己停。
+- 推送只走 HTTP，不落库：删了看板/重启，数据仍然只有 beads 一份。
+- 换项目时所有流立刻断开（bd 的 workdir 是全局的，跨项目读会错位）。
+
 **Config / Prompts**（`<项目>/.hlwd/`）
 
 ```
@@ -185,8 +199,8 @@ web/               # 页面 + beads 适配层
   sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
   app/             # 单页看板：index.html / app.js / markdown.js / style.css，无构建
-                   #   工单页（人看，markdown）/ 全链路页（程序看，含原始 JSON）
-                   #   会话页（AI 的工具调用、思考、最终回复；在跑时实时跟随）
+                   #   看板 / （/issue/<id>）工单页：工单 / 全链路 / 会话 三个 tab
+                   #   工单页是独立地址，可直接分享；评论与字段靠 SSE 实时更新
 engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run / 跑门禁

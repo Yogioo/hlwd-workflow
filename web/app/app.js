@@ -19,6 +19,8 @@ const state = {
   watch: { running: false, stopping: false },
   lastWatchError: null,
   attachments: [],
+  comments: [],
+  newComments: new Set(), // 页面开着期间新进来的评论（一直标记，刷新才清）
   auth: { auth: false, user: null, firstRun: false },
   authed: false,
   timer: null,
@@ -260,26 +262,53 @@ async function toggleWatch() {
   }
 }
 
-// 面板开了又关、或者换了一张卡时，早先发出的请求回来不能让面板又弹开
-let panelToken = 0;
+// 页面在跳/换卡时，早先发出的请求回来不能把内容盖回去
+let issueToken = 0;
 
-async function openPanel(id, { quiet = false } = {}) {
-  const token = ++panelToken;
+/** 当前地址是不是某张工单的独立页面；是就返回 id。 */
+function issueIdFromPath() {
+  const m = location.pathname.match(/^\/issue\/([^/]+)\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** 把工单渲染到独立页面（/issue/<id>，地址可以直接发给别人）。 */
+async function openIssue(id, { keepTab = false } = {}) {
+  const token = ++issueToken;
   const [{ issue, comments }, attachments] = await Promise.all([
     api(`/api/issues/${encodeURIComponent(id)}`),
     api(`/api/issues/${encodeURIComponent(id)}/attachments`)
       .then((d) => d.attachments)
       .catch(() => []),
   ]);
-  if (token !== panelToken) return; // 拉数据这期间面板被关了 / 换了别的卡
-  const panel = $('#panel');
-  const wasHidden = panel.hidden;
+  if (token !== issueToken) return; // 这期间又换了别的卡
   state.current = issue;
-  panel.hidden = false;
-  panel.dataset.status = issue.status; // 面板顶上那道状态线
-  if (wasHidden) requestAnimationFrame(() => panel.classList.add('is-open'));
+  if (!keepTab) state.newComments = new Set();
+  state.comments = comments;
+
+  document.body.dataset.mode = 'issue';
+  $('#issuePage').hidden = false;
+  $('#issuePage').dataset.status = issue.status; // 顶部那道状态线
   $('#panelId').textContent = issue.id;
   $('#panelTitle').textContent = issue.title;
+  renderIssueMeta(issue);
+  renderIssueFields(issue);
+  $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
+  renderAttachments(attachments);
+  renderComments(comments);
+
+  if (!keepTab) {
+    $('#panelLabel').value = '';
+    state.trace = null;
+    $('#panelTrace').innerHTML = '';
+    $('#panelRaw').hidden = true;
+    $('#panelRaw').textContent = '';
+    showTab('issue');
+  }
+  watchIssue(id); // 评论 / 字段实时推送
+  document.title = `${issue.id} · ${issue.title}`;
+}
+
+function renderIssueMeta(issue) {
   $('#panelMeta').innerHTML = [
     `<span class="meta-item"><i>类型</i>${esc(issue.type)}</span>`,
     issue.createdBy ? `<span class="meta-item"><i>创建</i>${esc(issue.createdBy)}</span>` : '',
@@ -287,29 +316,106 @@ async function openPanel(id, { quiet = false } = {}) {
     `<span class="meta-item"><i>更新</i>${esc(fmtTime(issue.updated))}</span>`,
     issue.labels.map(chip).join(''),
   ].join('');
-  $('#panelStatus').innerHTML = state.statuses
-    .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
-    .join('');
-  fillPrioritySelect($('#panelPriority'), issue.priority);
+}
+
+/** 状态 / 优先级 / 派单按钮：别人改了也要跟着变，但正在操作的那个控件不打扰。 */
+function renderIssueFields(issue) {
+  const status = $('#panelStatus');
+  if (document.activeElement !== status) {
+    status.innerHTML = state.statuses
+      .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
+      .join('');
+  }
+  const prio = $('#panelPriority');
+  if (document.activeElement !== prio) fillPrioritySelect(prio, issue.priority);
   renderDispatch(issue);
-  $('#panelBody').innerHTML = issue.body ? md(issue.body) : '<div class="empty">（无描述）</div>';
-  renderAttachments(attachments);
-  $('#panelComments').innerHTML =
+}
+
+const commentKey = (c) => `${c.author}|${c.created}|${String(c.text ?? '').slice(0, 24)}`;
+
+/** 评论列表；这页开着的时候新进来的那条会有个标记（不刷新不清）。 */
+function renderComments(comments) {
+  const box = $('#panelComments');
+  box.innerHTML =
     comments
       .map(
         (c) =>
-          `<div class="comment"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(fmtTime(c.created))}</div><div class="md">${md(c.text)}</div></div>`,
+          `<div class="comment${state.newComments.has(commentKey(c)) ? ' is-new' : ''}"><div class="comment-head">${esc(c.author)}<span class="dot">·</span>${esc(fmtTime(c.created))}</div><div class="md">${md(c.text)}</div></div>`,
       )
       .join('') || '<div class="empty">还没有评论</div>';
+}
 
-  if (quiet) return;
-  $('#panelLabel').value = '';
-  // 全链路是给程序/工程看的，打开才拉数据
-  state.trace = null;
-  $('#panelTrace').innerHTML = '';
-  $('#panelRaw').hidden = true;
-  $('#panelRaw').textContent = '';
-  showTab('issue');
+// —— 实时：同一张卡上别人发的评论 / 改的状态，不用刷新就能看到 ——
+let issueStream = null;
+
+function watchIssue(id) {
+  if (issueStream?.card === id) return; // 同一张卡已经在跟了
+  closeIssueStream();
+  const source = new EventSource(`/api/issues/${encodeURIComponent(id)}/events`);
+  source.card = id;
+  issueStream = source;
+  source.addEventListener('issue', (e) => {
+    let payload;
+    try {
+      payload = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (state.current?.id !== id) return;
+    applyLiveIssue(payload.issue, payload.comments ?? []);
+  });
+  source.addEventListener('gone', () => {
+    hint('这张工单读不到了（可能被删了）', true);
+    closeIssueStream();
+  });
+  source.addEventListener('error', () => {}); // 断了浏览器会自动重连
+}
+
+function closeIssueStream() {
+  if (!issueStream) return;
+  issueStream.close();
+  issueStream = null;
+}
+
+/** 别人改了：更新字段 + 把新评论接在后面（不重排你正在看的部分）。 */
+function applyLiveIssue(issue, comments) {
+  const prev = state.current;
+  if (!prev) return;
+  const changed = [];
+  if (issue.status !== prev.status) changed.push(`状态改成「${statusLabel(issue.status)}」`);
+  if (Number(issue.priority) !== Number(prev.priority)) changed.push(`优先级改成「${prioLabel(issue.priority)}」`);
+  if (issue.title !== prev.title) changed.push('标题改了');
+  const labelsA = [...(prev.labels ?? [])].sort().join(',');
+  const labelsB = [...(issue.labels ?? [])].sort().join(',');
+  if (labelsA !== labelsB) changed.push('标签变了');
+
+  state.current = issue;
+  renderIssueMeta(issue);
+  renderIssueFields(issue);
+  if (issue.title !== prev.title) {
+    $('#panelTitle').textContent = issue.title;
+    document.title = `${issue.id} · ${issue.title}`;
+  }
+
+  const known = new Set((state.comments ?? []).map(commentKey));
+  const added = comments.filter((c) => !known.has(commentKey(c)));
+  for (const c of added) state.newComments.add(commentKey(c));
+  state.comments = comments;
+  renderComments(comments);
+
+  const who = added.length ? `${added[added.length - 1].author || '有人'} 发了${added.length > 1 ? `${added.length} 条` : ''}新评论` : '';
+  const parts = [...changed, who].filter(Boolean);
+  if (parts.length) hint(parts.join('，'));
+  if (added.length) scrollToNewComments();
+}
+
+function scrollToNewComments() {
+  if (document.body.dataset.mode !== 'issue') return;
+  const last = $('#panelComments').lastElementChild;
+  if (!last) return;
+  const rect = last.getBoundingClientRect();
+  const visible = rect.bottom <= window.innerHeight - 60 && rect.top >= 0;
+  if (!visible) last.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 /** 一键派单按钮：没标签就加上（已关闭的就顺手重开），有标签就变成取消派单。 */
@@ -358,8 +464,9 @@ async function dispatchCurrent() {
     state.current = saved;
     renderDispatch(saved);
     hint(ready ? '已取消派单' : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`);
-    // 列表/面板后台对齐：不堵按钮（bd 列表 + 评论要一两秒）
-    Promise.all([load(), openPanel(saved.id, { quiet: true })]).catch(() => {});
+    // 后台对齐：不堵按钮（bd 列表 + 评论要一两秒）
+    const sync = document.body.dataset.mode === 'board' ? load() : Promise.resolve();
+    Promise.all([sync, openIssue(saved.id, { keepTab: true })]).catch(() => {});
   } catch (err) {
     hint(`改动失败：${err.message}`, true);
     if (state.current) renderDispatch(state.current);
@@ -612,7 +719,7 @@ function sessionClear() {
 }
 
 function sessionScroller() {
-  return document.querySelector('.panel-body');
+  return document.scrollingElement || document.documentElement;
 }
 
 function nearBottom() {
@@ -853,8 +960,8 @@ async function patch(fields, id = state.current?.id) {
       method: 'PATCH',
       body: JSON.stringify(fields),
     });
-    await load();
-    if (state.current?.id === id) await openPanel(id, { quiet: true });
+    if (document.body.dataset.mode === 'board') await load();
+    if (state.current?.id === id) await openIssue(id, { keepTab: true });
     return true;
   } catch (e) {
     hint(`改动失败：${e.message}`, true);
@@ -872,26 +979,23 @@ async function sendComment() {
       body: JSON.stringify({ text }),
     });
     box.value = '';
-    await Promise.all([load(), openPanel(state.current.id, { quiet: true })]);
+    await openIssue(state.current.id, { keepTab: true });
+    hint('评论已发送');
   } catch (e) {
     hint(`评论失败：${e.message}`, true);
   }
 }
 
 // —— 自动刷新：看板常刷；面板只在没人输入时悄悄刷新 ——
-function panelBusy() {
-  const active = document.activeElement;
-  return !$('#panel').hidden && (active?.closest?.('#panel') || $('#panelComment').value.trim());
-}
-
 async function tick() {
   if (!state.authed) return; // 停在登录页时别空转
   if ($('#create').open || $('#settingsDialog').open) return;
-  await load();
-  if (!$('#panel').hidden && state.current) {
-    if (!$('#viewSession').hidden) refreshTurns(); // 有新的一轮就跟着切
-    if (!panelBusy()) await openPanel(state.current.id, { quiet: true }).catch(() => {});
+  if (document.body.dataset.mode === 'board') {
+    await load();
+    return;
   }
+  // 工单页：评论和字段有 SSE 推，不用轮询；只有「会话」tab 需要定时看有没有新的一轮
+  if (!$('#viewSession').hidden) refreshTurns();
 }
 
 // —— 登录 / 注册 ——
@@ -1034,31 +1138,19 @@ async function saveSettings(event) {
     const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
     applyConfig({ statuses: saved.config.columns, labels: saved.config.labels, engine: saved.config.engine });
     $('#settingsDialog').close();
-    await load();
-    if (state.current) await openPanel(state.current.id, { quiet: true });
+    if (document.body.dataset.mode === 'board') await load();
+    else if (state.current) await openIssue(state.current.id, { keepTab: true });
     hint('设置已保存');
   } catch (err) {
     hint(`保存失败：${err.message}`, true);
   }
 }
 
-/** 关面板：先播退场动画，真的关掉了才隐藏（否则动画看不到）。 */
-function closePanel() {
-  const panel = $('#panel');
-  panelToken += 1; // 作废在飞的刷新
-  sessionClear(); // 断开跟着跑的 SSE
-  panel.classList.remove('is-open');
-  state.current = null;
-  state.trace = null;
-  setTimeout(() => {
-    if (state.current) return; // 280ms 内又点开了别的卡，别把它藏了
-    panel.hidden = true;
-  }, 280);
-}
-
+// 点卡片 = 打开这张卡的独立地址（能直接复制给别人；Ctrl/⌘ 点会开新标签页）
 $('#board').addEventListener('click', (e) => {
   const el = e.target.closest('.card');
-  if (el) openPanel(el.dataset.id).catch((err) => hint(err.message, true));
+  if (!el) return;
+  location.assign(`/issue/${encodeURIComponent(el.dataset.id)}`);
 });
 // 卡片可以用键盘打开：Tab 过去，回车 / 空格
 $('#board').addEventListener('keydown', (e) => {
@@ -1066,7 +1158,7 @@ $('#board').addEventListener('keydown', (e) => {
   const el = e.target.closest?.('.card');
   if (!el) return;
   e.preventDefault();
-  openPanel(el.dataset.id).catch((err) => hint(err.message, true));
+  location.assign(`/issue/${encodeURIComponent(el.dataset.id)}`);
 });
 
 // —— 拖卡片到别的列 = 改状态 ——
@@ -1122,7 +1214,6 @@ $('#readyOnly').addEventListener('change', (e) => {
   state.filter.ready = e.target.checked;
   render();
 });
-$('#panelClose').addEventListener('click', closePanel);
 $('#tabIssue').addEventListener('click', () => showTab('issue'));
 $('#tabTrace').addEventListener('click', () => showTab('trace'));
 $('#tabSession').addEventListener('click', () => showTab('session'));
@@ -1159,21 +1250,21 @@ $('#attachFile').addEventListener('change', async (e) => {
   await uploadFiles(e.target.files);
   e.target.value = '';
 });
-$('#panel').addEventListener('dragover', (e) => {
+$('#issuePage').addEventListener('dragover', (e) => {
   if (!e.dataTransfer?.types?.includes('Files')) return;
   e.preventDefault();
-  $('#panel').classList.add('dragging');
+  $('#issuePage').classList.add('dragging');
 });
-// 文件拖到看板空白处：拦下来，否则浏览器会直接把页面换成那张图
+// 文件拖到工单页空白处：拦下来，否则浏览器会直接把页面换成那张图
 for (const type of ['dragover', 'drop']) {
   document.addEventListener(type, (e) => {
     if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
   });
 }
-$('#panel').addEventListener('dragleave', () => $('#panel').classList.remove('dragging'));
-$('#panel').addEventListener('drop', async (e) => {
+$('#issuePage').addEventListener('dragleave', () => $('#issuePage').classList.remove('dragging'));
+$('#issuePage').addEventListener('drop', async (e) => {
   e.preventDefault();
-  $('#panel').classList.remove('dragging');
+  $('#issuePage').classList.remove('dragging');
   await uploadFiles(e.dataTransfer?.files);
 });
 // 键盘：/ 搜索，n 新建，Esc 关面板（都不抢输入框里的键）
@@ -1181,7 +1272,11 @@ document.addEventListener('keydown', (e) => {
   const t = e.target;
   const typing = t?.closest?.('input, textarea, select, [contenteditable="true"]');
   const dialogOpen = $('#create').open || $('#settingsDialog').open || $('#projectDialog').open || $('#lightbox').open;
-  if (e.key === 'Escape' && !dialogOpen && !$('#panel').hidden) return closePanel();
+  if (e.key === 'Escape' && !dialogOpen && document.body.dataset.mode === 'issue') {
+    e.preventDefault();
+    location.assign('/');
+    return;
+  }
   if (typing || dialogOpen || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === '/') {
     e.preventDefault();
@@ -1192,7 +1287,7 @@ document.addEventListener('keydown', (e) => {
     $('#create').showModal();
   }
 });
-$('#panel').addEventListener('paste', (e) => {
+$('#issuePage').addEventListener('paste', (e) => {
   const files = pastedFiles(e);
   if (!files.length) return;
   e.preventDefault();
@@ -1312,8 +1407,8 @@ async function submitProject(event) {
   try {
     const p = await api('/api/project', { method: 'POST', body: JSON.stringify({ dir }) });
     applyProject(p);
+    if (document.body.dataset.mode === 'issue') location.assign('/'); // 换了项目，当前这张卡不属于它了
     $('#projectDialog').close();
-    closePanel();
     await load();
     const created = p.created?.length ? `，补充了 ${p.created.join('、')}` : '';
     hint(`已打开 ${p.dir}${created}`);
@@ -1346,9 +1441,34 @@ async function enterBoard() {
       hint(`项目 ${p.dir}`);
     })
     .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
+
+  const issueId = issueIdFromPath();
+  if (issueId) {
+    document.body.dataset.mode = 'issue';
+    try {
+      await openIssue(issueId);
+      hint('这张卡可以直接分享：复制地址栏就行');
+    } catch (err) {
+      hint(`打不开 ${issueId}：${err.message}`, true);
+      await showBoard();
+    }
+  } else {
+    await showBoard();
+  }
+  if (!state.timer) state.timer = setInterval(tick, AUTO_REFRESH_MS);
+}
+
+/** 回到看板：收起工单页、断开实时通道。 */
+async function showBoard() {
+  closeIssueStream();
+  sessionClear();
+  document.body.dataset.mode = 'board';
+  $('#issuePage').hidden = true;
+  state.current = null;
+  state.comments = [];
+  document.title = '工单看板';
   renderSkeleton();
   await load();
-  if (!state.timer) state.timer = setInterval(tick, AUTO_REFRESH_MS);
 }
 
 (async function boot() {

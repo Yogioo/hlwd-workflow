@@ -175,6 +175,7 @@ function applyProject(dir) {
   beads.setWorkdir(dir);
   setProjectDir(dir);
   setSessionsDir(dir);
+  stopCardStreams(); // 换了项目，旧项目的实时通道全部作废
   commentCache.clear(); // 卡片 id 在不同项目里可能撞车
 }
 
@@ -467,6 +468,132 @@ async function streamTurn(req, res, cardId, runId, phase) {
   }
 }
 
+// —— 实时：同一张卡上的评论 / 字段变化，推给所有正在看它的人 ——
+// 写路径（我们的 POST/PATCH）直接广播；另外每条被看的卡一个慢轮询（2s），
+// 把 engine 或别的进程直接改 bd 的变化也接进来。轮询是**每卡一份**，不随人数增长。
+const CARD_POLL_MS = 2000;
+const cardStreams = new Map(); // cardId -> { clients:Set<res>, timer, stamp }
+
+const SSE_HEAD = {
+  'content-type': 'text/event-stream; charset=utf-8',
+  'cache-control': 'no-store',
+  connection: 'keep-alive',
+  'x-accel-buffering': 'no',
+};
+
+function cardEntry(cardId) {
+  let entry = cardStreams.get(cardId);
+  if (!entry) {
+    entry = { clients: new Set(), timer: null, stamp: '' };
+    cardStreams.set(cardId, entry);
+  }
+  return entry;
+}
+
+function pushCard(cardId, payload) {
+  const entry = cardStreams.get(cardId);
+  if (!entry?.clients.size) return;
+  const data = `event: issue\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const res of [...entry.clients]) {
+    if (res.writableEnded || res.destroyed) {
+      entry.clients.delete(res);
+      continue;
+    }
+    try {
+      res.write(data);
+    } catch {
+      entry.clients.delete(res);
+    }
+  }
+}
+
+/** 有变化就把整张卡（工单 + 评论，都很小）推一遍。 */
+async function broadcastCard(cardId) {
+  const entry = cardStreams.get(cardId);
+  if (!entry?.clients.size) return;
+  try {
+    entry.stamp = await beads.issueStamp(cardId);
+    const { issue, comments } = await beads.getIssue(cardId);
+    pushCard(cardId, { issue, comments });
+  } catch {
+    // 工单被删了之类：这一轮就算了
+  }
+}
+
+function startCardPoll(cardId) {
+  const entry = cardEntry(cardId);
+  if (entry.timer) return;
+  entry.timer = setInterval(async () => {
+    if (!entry.clients.size) {
+      clearInterval(entry.timer);
+      entry.timer = null;
+      cardStreams.delete(cardId);
+      return;
+    }
+    try {
+      const stamp = await beads.issueStamp(cardId);
+      if (stamp === entry.stamp) return;
+      entry.stamp = stamp;
+      const { issue, comments } = await beads.getIssue(cardId);
+      pushCard(cardId, { issue, comments });
+    } catch {
+      // 临时读不到就算了，下一轮再说
+    }
+  }, CARD_POLL_MS);
+  entry.timer.unref?.();
+}
+
+function stopCardStreams() {
+  for (const entry of cardStreams.values()) {
+    if (entry.timer) clearInterval(entry.timer);
+    for (const res of entry.clients) {
+      try {
+        res.end();
+      } catch {
+        // 已经断了
+      }
+    }
+  }
+  cardStreams.clear();
+}
+
+/** 一张卡的实时通道：先给一份当前快照，之后有变化就推。 */
+async function streamCard(req, res, cardId) {
+  res.writeHead(200, SSE_HEAD);
+  const entry = cardEntry(cardId);
+  entry.clients.add(res);
+  const send = (event, payload) => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const bye = () => {
+    entry.clients.delete(res);
+  };
+  req.on('close', bye);
+  res.on('close', bye);
+
+  try {
+    const { issue, comments } = await beads.getIssue(cardId);
+    entry.stamp = `${issue.updated}|${issue.commentCount}`;
+    send('issue', { issue, comments });
+  } catch (err) {
+    send('gone', { error: err.message });
+  }
+  startCardPoll(cardId);
+
+  // 注释行保活：中间有反代/浏览器空闲超时也不会断
+  const keepalive = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(keepalive);
+      return;
+    }
+    res.write(': ping\n\n');
+  }, 25000);
+  keepalive.unref?.();
+  res.on('close', () => clearInterval(keepalive));
+}
+
 async function route(req, res, url) {
   const { pathname, searchParams } = url;
 
@@ -649,6 +776,13 @@ async function route(req, res, url) {
     return json(res, 405, { error: 'method not allowed' });
   }
 
+  const cardEvents = pathname.match(/^\/api\/issues\/([^/]+)\/events$/);
+  if (cardEvents) {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    await project(); // 让 beads 指向当前项目
+    return streamCard(req, res, decodeURIComponent(cardEvents[1]));
+  }
+
   const turnsMatch = pathname.match(/^\/api\/issues\/([^/]+)\/turns(?:\/([^/]+)\/([^/]+))?(\/stream)?$/);
   if (turnsMatch) {
     if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
@@ -694,6 +828,7 @@ async function route(req, res, url) {
       const body = await readBody(req);
       // 评论作者 = 登录的人（bd comments 的 author 就来自 --actor）
       const comments = await beads.commentIssue(id, body.text, { actor: actorOf(user) });
+      broadcastCard(id); // 正在看这张卡的人立刻看到，不用等下一次轮询
       return json(res, 200, { comments });
     }
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
@@ -724,6 +859,7 @@ async function route(req, res, url) {
           .commentIssue(id, `状态：${name(before.status)} → ${name(issue.status)}`, { actor })
           .catch(() => {}); // 留不下痕迹也不影响改单本身
       }
+      if (body.status || body.priority !== undefined || body.addLabels || body.removeLabels) broadcastCard(id);
       return json(res, 200, { issue });
     }
     return json(res, 405, { error: 'method not allowed' });
@@ -764,6 +900,8 @@ async function route(req, res, url) {
   }
 
   if (pathname.startsWith('/api/')) return json(res, 404, { error: 'unknown api' });
+  // 工单详情是独立页面（地址可分享）：/issue/<id> 也给同一个单页，id 由前端从 URL 读
+  if (pathname.startsWith('/issue/')) return serveStatic(res, '/index.html');
   return serveStatic(res, pathname);
 }
 

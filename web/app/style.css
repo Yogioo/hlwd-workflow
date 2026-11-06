@@ -650,6 +650,163 @@ select {
   }
 }
 
+/* ---------- 工单页（/issue/<id>，地址可以直接分享） ---------- */
+
+.issue-page {
+  display: block;
+  padding: 22px 20px calc(var(--bar-h) + 40px);
+}
+.issue-page[hidden] {
+  display: none;
+}
+/* 有 display 的地方就要自己管 hidden，不然 hidden 顶不住 */
+body[data-mode='issue'] .board {
+  display: none;
+}
+body[data-mode='issue'] .top .search,
+body[data-mode='issue'] .top .switch {
+  display: none;
+}
+/* 顶部那道状态线：一眼看到这张单在哪一列 */
+.issue-page::before {
+  content: '';
+  position: absolute;
+  inset: var(--top-h) 0 auto 0;
+  height: 2px;
+  background: var(--state, var(--line-hi));
+  z-index: 1;
+}
+body[data-mode='issue'] {
+  position: relative;
+}
+
+.issue-wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+.issue-crumb {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.crumb {
+  color: var(--dim);
+  font-size: 12.5px;
+  text-decoration: none;
+  padding: 3px 9px 3px 0;
+  border-radius: 6px;
+}
+.crumb:hover {
+  color: var(--bone);
+}
+.issue-id {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.issue-tabs {
+  margin-left: auto;
+}
+
+.issue-page h1 {
+  margin: 0 0 10px;
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.32;
+  letter-spacing: -0.02em;
+  word-break: break-word;
+  max-width: 34em;
+}
+.issue-page .meta {
+  margin-bottom: 20px;
+}
+
+.issue-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 258px;
+  gap: 32px;
+  align-items: start;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+.issue-main {
+  min-width: 0;
+}
+
+.issue-rail {
+  position: sticky;
+  top: calc(var(--top-h) + 18px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--desk);
+}
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rail-group + .rail-group {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.rail-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.rail-group select,
+.rail-group input {
+  width: 100%;
+}
+.rail-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.rail-inline input {
+  flex: 1;
+  min-width: 0;
+}
+.rail-inline button {
+  flex: none;
+}
+.rail-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.issue-main .dialog-note {
+  margin: 0;
+}
+.issue-body {
+  margin-top: 2px;
+}
+
+@media (max-width: 900px) {
+  .issue-page {
+    padding: 16px 14px calc(var(--bar-h) + 30px);
+  }
+  .issue-page h1 {
+    font-size: 21px;
+  }
+  .issue-grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+  .issue-rail {
+    position: static;
+    order: -1;
+  }
+}
+
 /* ---------- 底部状态条 ---------- */
 
 .statusbar {
@@ -771,56 +928,9 @@ select {
   }
 }
 
-/* ---------- 工单面板 ---------- */
-
-.panel {
-  position: fixed;
-  /* 从顶栏下面开始：卡片开着的时候，搜索/新建/用户/退出仍然点得到 */
-  inset: var(--top-h) 0 0 auto;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  width: min(560px, 94vw);
-  background: var(--desk);
-  border-left: 1px solid var(--line-hi);
-  box-shadow: -30px 0 70px -40px #000;
-  transform: translateX(14px);
-  opacity: 0;
-  transition: transform 0.26s var(--ease), opacity 0.18s linear;
-}
-.panel[hidden] {
-  display: none;
-}
-.panel.is-open {
-  transform: none;
-  opacity: 1;
-}
-/* 顶部那道状态线：一眼看到这张单现在在哪一列 */
-.panel::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: var(--state, var(--line-hi));
-  z-index: 3;
-}
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: none;
-  height: 48px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--line);
-}
-.panel-id {
-  color: var(--faint);
-  font-size: 11px;
-}
+/* 弹窗 / 详情页共用的小部件（segmented / meta / row） */
 .seg {
-  display: flex;
-  margin-left: auto;
+  display: inline-flex;
   padding: 2px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -843,26 +953,6 @@ select {
   color: var(--bone);
 }
 
-.panel-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 18px calc(var(--bar-h) + 26px);
-}
-
-.panel h2 {
-  margin: 2px 0 8px;
-  font-size: 19px;
-  font-weight: 550;
-  line-height: 1.35;
-  letter-spacing: -0.015em;
-}
-.panel h3 {
-  margin: 26px 0 9px;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--faint);
-}
 .meta {
   display: flex;
   flex-wrap: wrap;
@@ -870,7 +960,6 @@ select {
   gap: 4px 12px;
   color: var(--dim);
   font-size: 12px;
-  margin-bottom: 4px;
 }
 .meta-item {
   display: inline-flex;
@@ -968,9 +1057,9 @@ select {
   border-radius: 6px;
   cursor: zoom-in;
 }
-#panel.dragging {
+#issuePage.dragging {
   outline: 2px dashed var(--open);
-  outline-offset: -8px;
+  outline-offset: -10px;
 }
 
 /* 评论：一条一条像留言纸 */
@@ -1371,8 +1460,13 @@ select {
 
 /* 窄一点的桌面：顶栏允许换行，否则最后几个按钮会被挤出去 */
 @media (max-width: 1100px) {
-  .panel {
-    top: 0; /* 窄屏顶栏会换行，高度不固定，干脆让它盖住 */
+  /* 窄屏：先把「谁在登录」放第一行右边，退出紧跟其后，别让它俩被换行拆开 */
+  .user-chip {
+    order: 1;
+    margin-left: auto;
+  }
+  #logout {
+    order: 2;
   }
   .top {
     height: auto;
@@ -1404,9 +1498,6 @@ select {
   .board {
     grid-template-columns: 1fr;
     padding: 14px 14px calc(var(--bar-h) + 22px);
-  }
-  .panel {
-    width: 100vw;
   }
   .settings-grid {
     grid-template-columns: 1fr;
@@ -1826,8 +1917,3 @@ body.needs-auth .panel {
   text-transform: uppercase;
 }
 
-@media (max-width: 1100px) {
-  .user-chip {
-    order: 4;
-  }
-}

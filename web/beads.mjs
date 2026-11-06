@@ -197,6 +197,14 @@ export async function commentIssue(id, text, { actor } = {}) {
   return listComments(id);
 }
 
+/** 便宜的「有没有变」指纹：只跑一次 bd show。评论/字段一变就不同。 */
+export async function issueStamp(id) {
+  const rows = await bdJson(['show', id, '--json']);
+  const raw = Array.isArray(rows) ? rows[0] : rows;
+  if (!raw) throw new BeadsError(`工单不存在: ${id}`);
+  return `${raw.updated_at ?? ''}|${raw.comment_count ?? 0}`;
+}
+
 /** 状态变更时间轴：只保留 status 变了的节点，老 → 新。bd history 自带，零额外存储。 */
 export async function listStatusHistory(id, limit = 50) {
   const rows = await bdJson(['history', id, '--json', '--limit', String(limit)]);

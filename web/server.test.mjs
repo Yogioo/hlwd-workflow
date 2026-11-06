@@ -350,6 +350,66 @@ test('账号：WF_AUTH=off 时不用登录（单机自用）', async () => {
   });
 });
 
+test('工单页：/issue/<id> 也给同一个单页（地址可分享）', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const res = await fetch(`${base}/issue/hlwd-abc${t}`);
+    assert.equal(res.status, 200);
+    assert.ok((res.headers.get('content-type') ?? '').includes('text/html'));
+    const html = await res.text();
+    assert.match(html, /id="issuePage"/, '返回的是看板单页（前端从 URL 读 id）');
+    assert.match(html, /id="panelComments"/);
+    // 别的非 API 路径还是 404，不要变成万能兜底
+    assert.equal((await fetch(`${base}/nope/whatever${t}`)).status, 404);
+  });
+});
+
+test('实时通道：SSE 先给快照，发评论后推一次', async () => {
+  await withServer(async ({ base, dir }) => {
+    // 这个用例要真写 beads
+    await fs.rm(path.join(dir, '.beads'), { recursive: true, force: true });
+    await ensureProject(dir);
+    const t = `?token=${TOKEN}`;
+    const mk = await fetch(`${base}/api/issues${t}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '实时通道测试', type: 'task', priority: 2 }),
+    });
+    assert.equal(mk.status, 201);
+    const { issue } = await mk.json();
+
+    const stream = await fetch(`${base}/api/issues/${issue.id}/events${t}`);
+    assert.equal(stream.status, 200);
+    assert.ok((stream.headers.get('content-type') ?? '').includes('text/event-stream'));
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const readUntil = async (needle) => {
+      for (let i = 0; i < 40 && !buffer.includes(needle); i += 1) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+      }
+      return buffer.includes(needle);
+    };
+
+    // 1) 连上就给一份当前快照
+    assert.ok(await readUntil('event: issue'), '连上先拿快照');
+    assert.match(buffer, /"title":"实时通道测试"/);
+
+    // 2) 别人发评论 → 推一条新的过来
+    buffer = '';
+    const posted = await fetch(`${base}/api/issues/${issue.id}/comments${t}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '这条应该实时推过去' }),
+    });
+    assert.equal(posted.status, 200);
+    assert.ok(await readUntil('这条应该实时推过去'), `推送里要带上新评论，收到：${buffer.slice(0, 120)}`);
+    await reader.cancel().catch(() => {});
+  });
+});
+
 test('附件：上传 → 列表 → 取回 → 删除', async () => {
   await withServer(async ({ base }) => {
     const t = `?token=${TOKEN}`;

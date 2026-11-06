@@ -95,74 +95,84 @@
       </details>
     </footer>
 
-    <aside id="panel" class="panel" hidden>
-      <header class="panel-head">
-        <span id="panelId" class="mono panel-id"></span>
-        <div class="seg" role="tablist">
-          <button id="tabIssue" class="seg-btn active" type="button">工单</button>
-          <button id="tabTrace" class="seg-btn" type="button">全链路</button>
-          <button id="tabSession" class="seg-btn" type="button" title="AI 在里面的工具调用与思考">会话</button>
-        </div>
-        <button id="panelClose" type="button" class="ghost tiny">关闭</button>
-      </header>
-
-      <div class="panel-body">
-        <div id="viewIssue">
-          <h2 id="panelTitle"></h2>
-          <div id="panelMeta" class="meta"></div>
-          <div class="row">
-            <label>状态 <select id="panelStatus"></select></label>
-            <label>优先级 <select id="panelPriority"></select></label>
-          </div>
-          <div class="row dispatch">
-            <button id="panelDispatch" type="button" class="primary">让 AI 干这个</button>
-            <span id="panelDispatchHint" class="dialog-note"></span>
-          </div>
-          <div class="row">
-            <input id="panelLabel" placeholder="加标签，逗号分隔" />
-            <button id="panelLabelAdd" type="button">加</button>
-          </div>
-          <div id="panelBody" class="md"></div>
-          <h3>附件 <span id="attachmentCount" class="count"></span></h3>
-          <div class="row attach-row">
-            <button id="attachPick" type="button" class="ghost">上传图片/文件</button>
-            <input id="attachFile" type="file" multiple hidden />
-            <span class="dialog-note">也可以直接粘贴截图、把文件拖到这个面板</span>
-          </div>
-          <div id="panelAttachments" class="attachments"></div>
-          <h3>评论</h3>
-          <div id="panelComments" class="comments"></div>
-          <div class="composer">
-            <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送；截图可以直接粘进来，会作为评论里的图片）"></textarea>
-            <button id="panelCommentSend" type="button" class="primary">发送</button>
+    <main id="issuePage" class="issue-page" hidden>
+      <div class="issue-wrap">
+        <div class="issue-crumb">
+          <a href="/" id="backToBoard" class="crumb">← 看板</a>
+          <span id="panelId" class="mono issue-id"></span>
+          <div class="seg issue-tabs" role="tablist">
+            <button id="tabIssue" class="seg-btn active" type="button">工单</button>
+            <button id="tabTrace" class="seg-btn" type="button">全链路</button>
+            <button id="tabSession" class="seg-btn" type="button" title="AI 在里面的工具调用与思考">会话</button>
           </div>
         </div>
 
-        <div id="viewTrace" hidden>
-          <div id="panelTrace" class="trace"></div>
-          <div class="row">
-            <button id="showRaw" type="button">原始记录（给程序看）</button>
-          </div>
-          <pre id="panelRaw" class="raw mono" hidden></pre>
-        </div>
+        <h1 id="panelTitle"></h1>
+        <div id="panelMeta" class="meta"></div>
 
-        <div id="viewSession" hidden>
-          <div id="sessionTurns" class="session-turns"></div>
-          <div class="session-bar">
-            <span id="sessionStatus" class="session-status"></span>
-            <label class="switch small">
-              <input id="sessionThink" type="checkbox" checked />
-              <span class="switch-track" aria-hidden="true"></span>
-              思考
-            </label>
+        <div class="issue-grid">
+          <div class="issue-main">
+            <div id="viewIssue">
+              <div id="panelBody" class="md issue-body"></div>
+              <h3>附件 <span id="attachmentCount" class="count"></span></h3>
+              <div class="row attach-row">
+                <button id="attachPick" type="button" class="ghost">上传图片/文件</button>
+                <input id="attachFile" type="file" multiple hidden />
+                <span class="dialog-note">也可以直接粘贴截图、把文件拖到这个页面</span>
+              </div>
+              <div id="panelAttachments" class="attachments"></div>
+              <h3>评论</h3>
+              <div id="panelComments" class="comments"></div>
+              <div class="composer">
+                <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送；截图可以直接粘进来）"></textarea>
+                <button id="panelCommentSend" type="button" class="primary">发送</button>
+              </div>
+            </div>
+
+            <div id="viewTrace" hidden>
+              <div id="panelTrace" class="trace"></div>
+              <div class="row">
+                <button id="showRaw" type="button">原始记录（给程序看）</button>
+              </div>
+              <pre id="panelRaw" class="raw mono" hidden></pre>
+            </div>
+
+            <div id="viewSession" hidden>
+              <div id="sessionTurns" class="session-turns"></div>
+              <div class="session-bar">
+                <span id="sessionStatus" class="session-status"></span>
+                <label class="switch small">
+                  <input id="sessionThink" type="checkbox" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                  思考
+                </label>
+              </div>
+              <div id="sessionBody" class="session"></div>
+              <div class="row">
+                <button id="sessionMore" type="button" hidden>加载更多</button>
+              </div>
+            </div>
           </div>
-          <div id="sessionBody" class="session"></div>
-          <div class="row">
-            <button id="sessionMore" type="button" hidden>加载更多</button>
-          </div>
+
+          <aside class="issue-rail">
+            <div class="rail-group">
+              <label>状态<select id="panelStatus"></select></label>
+              <label>优先级<select id="panelPriority"></select></label>
+            </div>
+            <div class="rail-group">
+              <button id="panelDispatch" type="button" class="primary">让 AI 干这个</button>
+              <span id="panelDispatchHint" class="dialog-note"></span>
+            </div>
+            <div class="rail-group rail-inline">
+              <input id="panelLabel" placeholder="加标签，逗号分隔" />
+              <button id="panelLabelAdd" type="button">加</button>
+            </div>
+            <p class="rail-note">这张卡可以直接分享：把地址栏复制给别人，他打开就能看到。</p>
+          </aside>
         </div>
       </div>
-    </aside>
+    </main>
+
 
     <dialog id="lightbox" class="lightbox">
       <img id="lightboxImg" alt="" />
