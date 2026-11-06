@@ -16,6 +16,7 @@ const state = {
   project: { dir: '', recent: [] },
   filter: { q: '', ready: false },
   dispatching: false,
+  watch: { running: false, stopping: false },
 };
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
@@ -114,13 +115,61 @@ async function load() {
   try {
     const params = new URLSearchParams();
     if (state.filter.q) params.set('q', state.filter.q);
-    const { issues } = await api(`/api/issues?${params}`);
+    const [{ issues }, watchPayload] = await Promise.all([
+      api(`/api/issues?${params}`),
+      api('/api/watch').catch(() => ({ watch: null })),
+    ]);
     state.issues = issues;
+    if (watchPayload?.watch) state.watch = watchPayload.watch;
     render();
+    renderWatch();
     const suffix = state.filter.q ? `（搜索「${state.filter.q}」）` : '';
     hint(`共 ${issues.length} 张${suffix} · 自动刷新 ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     hint(`加载失败：${e.message}`, true);
+  }
+}
+
+/** 自动流水线开关：关 → 点一下开；开 → 点一下请求停（跑完手上这张）；停不下来再点就强杀 */
+function renderWatch() {
+  const btn = $('#watch');
+  const w = state.watch ?? { running: false };
+  const busy = w.running && w.state === 'running' && w.card;
+  btn.textContent = w.stopping
+    ? '自动流水线：停止中（点一下强杀）'
+    : w.running
+      ? `自动流水线：开${busy ? `（${w.card}）` : '（等单）'}`
+      : '自动流水线：关';
+  btn.classList.toggle('watch-on', Boolean(w.running) && !w.stopping);
+  btn.classList.toggle('watch-stopping', Boolean(w.stopping));
+  btn.title = w.running
+    ? `pid ${w.pid}${w.lastError ? ` · 上次：${w.lastError}` : ''} · 点一下停（跑完手上这张）`
+    : `点一下开：有就绪单就自动开干${w.lastError ? ` · 上次：${w.lastError}` : ''}`;
+}
+
+async function toggleWatch() {
+  const w = state.watch ?? { running: false };
+  const action = w.stopping ? 'force' : w.running ? 'stop' : 'start';
+  const btn = $('#watch');
+  btn.disabled = true;
+  btn.textContent = action === 'start' ? '启动中…' : '停止中…';
+  try {
+    const { watch } = await api('/api/watch', { method: 'POST', body: JSON.stringify({ action }) });
+    state.watch = watch;
+    renderWatch();
+    hint(
+      watch.stopping
+        ? '已请求停止：它跑完手上这张就退（再点一下就强杀）'
+        : watch.running
+          ? `自动流水线已开（pid ${watch.pid}）：有就绪单就自己干`
+          : '自动流水线已停',
+    );
+    load();
+  } catch (err) {
+    hint(`开关失败：${err.message}`, true);
+    renderWatch();
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -169,7 +218,7 @@ function renderDispatch(issue) {
     btn.className = 'ghost';
     hintEl.textContent =
       issue.status === 'open'
-        ? `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就会接它`
+        ? `已标 ${state.readyLabel}：${state.watch?.running ? '自动流水线会自己接它' : '点右上角「自动流水线」或 node wf.mjs work'}`
         : `已标 ${state.readyLabel}，但状态是「${statusLabel(issue.status)}」——engine 只接「${statusLabel('open')}」`;
     return;
   }
@@ -181,7 +230,9 @@ function renderDispatch(issue) {
   }
   btn.textContent = '让 AI 干这个';
   btn.className = 'primary';
-  hintEl.textContent = `加 ${state.readyLabel} 标签，之后 node wf.mjs work 就会接它`;
+  hintEl.textContent = state.watch?.running
+    ? `打上 ${state.readyLabel}，自动流水线立刻开跑`
+    : `加 ${state.readyLabel} 标签，再点右上角「自动流水线」（或 node wf.mjs work）`;
 }
 
 async function dispatchCurrent() {
@@ -364,6 +415,7 @@ async function openSettings() {
   f.actor.value = e.actor ?? 'ai';
   f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
   f.gitCommit.checked = e.gitCommit !== false;
+  f.autoWatch.checked = e.autoWatch === true;
   f.prompt_execute.value = prompts?.execute ?? '';
   f.prompt_review.value = prompts?.review ?? '';
   $('#settingsDialog').showModal();
@@ -390,6 +442,7 @@ async function saveSettings(event) {
     actor: String(f.get('actor') ?? ''),
     readyLabel: String(f.get('readyLabel') ?? ''),
     gitCommit: f.get('gitCommit') === 'on',
+    autoWatch: f.get('autoWatch') === 'on',
   };
   try {
     const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
@@ -437,6 +490,7 @@ $('#showRaw').addEventListener('click', () => {
   pre.hidden = false;
 });
 $('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
+$('#watch').addEventListener('click', toggleWatch);
 $('#panelDispatch').addEventListener('click', dispatchCurrent);
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
 $('#panelLabelAdd').addEventListener('click', () => {

@@ -20,6 +20,8 @@ import * as beads from './beads.mjs';
 import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
+const ENGINE_WATCH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'engine', 'watch.mjs');
+const WATCH_LOG = path.join(os.homedir(), '.hlwd', 'watch.log');
 const PORT = Number(process.env.PORT ?? 3100);
 const HOST = process.env.HOST ?? '127.0.0.1';
 // 设了口令就全站要口令：内网分享时至少不是裸奔（?token= 会记成 cookie，之后不用再带）
@@ -146,7 +148,82 @@ async function gatePayload(dir) {
   return { path: file, exists };
 }
 
-/** 起一个分离的黑盒进程；resolve 的是“起没起来”，不是“用户点没点开”。 */
+/** 跑 engine/watch.mjs 的 CLI：--status 读状态，--stop 请求停。跨模块只走进程。 */
+function watchCli(dir, args = [], { detach = false } = {}) {
+  return new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    const child = spawn(process.execPath, [ENGINE_WATCH, '--project', dir, ...args], {
+      cwd: dir,
+      windowsHide: true,
+      detached: detach,
+      stdio: detach ? ['ignore', 'ignore', 'ignore'] : ['ignore', 'pipe', 'pipe'],
+    });
+    if (!detach) {
+      child.stdout.setEncoding('utf8').on('data', (d) => (out += d));
+      child.stderr.setEncoding('utf8').on('data', (d) => (err += d));
+      child.on('error', (e) => resolve({ ok: false, out, err: e.message }));
+      child.on('close', (code) => resolve({ ok: code === 0, out, err }));
+      return;
+    }
+    child.unref();
+    resolve({ ok: true, out: '', err: '' });
+  });
+}
+
+async function watchState(dir) {
+  const res = await watchCli(dir, ['--status']);
+  for (const line of res.out.trim().split('\n').reverse()) {
+    try {
+      return JSON.parse(line);
+    } catch {
+      // 不是这一行
+    }
+  }
+  return { running: false, state: 'unknown', error: res.err.trim() || res.out.trim() };
+}
+
+async function watchAction(dir, action) {
+  if (action === 'start') {
+    const current = await watchState(dir);
+    if (current.running) return current;
+    await fs.mkdir(path.dirname(WATCH_LOG), { recursive: true });
+    const log = await fs.open(WATCH_LOG, 'a');
+    const child = spawn(process.execPath, [ENGINE_WATCH, '--project', dir], {
+      cwd: dir,
+      detached: true,
+      stdio: ['ignore', log.fd, log.fd],
+    });
+    child.unref();
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const st = await watchState(dir);
+      if (st.running) return st;
+    }
+    await log.close();
+    return { ...(await watchState(dir)), error: `没起来，看日志 ${WATCH_LOG}` };
+  }
+
+  // stop：先请求优雅停（它跑完手上这张），短暂等一下；还在跑就告诉前端“停止中”
+  if (action === 'force') {
+    // 强停交给 engine 自己做：它知道子进程 pid，能把跑到一半的 agent 一起杀掉
+    await watchCli(dir, ['--force']);
+    for (let i = 0; i < 15; i += 1) {
+      await new Promise((r) => setTimeout(r, 200));
+      const st = await watchState(dir);
+      if (!st.running) return st;
+    }
+    return { ...(await watchState(dir)), stopping: true };
+  }
+
+  await watchCli(dir, ['--stop']);
+  for (let i = 0; i < 8; i += 1) {
+    await new Promise((r) => setTimeout(r, 200));
+    const st = await watchState(dir);
+    if (!st.running) return st;
+  }
+  return { ...(await watchState(dir)), stopping: true };
+}
 function launch(cmd, args) {
   return new Promise((resolve) => {
     let settled = false;
@@ -313,6 +390,22 @@ async function route(req, res, url) {
 
   await project(); // 以下接口都作用于当前项目
 
+  // 自动流水线：有就绪单就自己开干，不用人守着终端
+  if (pathname === '/api/watch') {
+    const p = await project();
+    if (req.method === 'GET') return json(res, 200, { watch: await watchState(p.dir) });
+    if (req.method === 'POST') {
+      // 这个会在这台机器上起 AI：只允许本机点（内网只能看状态、派单）
+      if (!isLoopbackAddr(req.socket.remoteAddress)) {
+        return json(res, 403, { error: '只允许在本机开关自动流水线' });
+      }
+      const body = await readBody(req);
+      const action = ['stop', 'force'].includes(body.action) ? body.action : 'start';
+      return json(res, 200, { watch: await watchAction(p.dir, action) });
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
+
   // 设置里的「门禁」按钮：把用户送到 <项目>/.hlwd/gate.mjs
   if (pathname === '/api/gate/open') {
     if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
@@ -444,6 +537,11 @@ server.listen(PORT, HOST, async () => {
     const p = await project();
     console.log(`当前项目：${p.dir}`);
     if (p.created?.length) console.log(`已补齐：${p.created.join('、')}`);
+    // 项目选了「看板启动时自动开流水线」就顺手拉起来（默认关，不替人做决定）
+    if (p.config?.engine?.autoWatch) {
+      const st = await watchAction(p.dir, 'start');
+      console.log(st.running ? `自动流水线：已随看板启动（pid ${st.pid}）` : `自动流水线没起来：${st.error ?? '看 watch.log'}`);
+    }
   } catch (err) {
     console.error(`项目初始化失败：${err.message}`);
   }

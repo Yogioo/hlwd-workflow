@@ -74,12 +74,13 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
 
     const saved = await saveProjectConfig(dir, {
       labels: { priorities: { 2: '普通' } },
-      engine: { attempts: 3, gitCommit: false, runner: 'codex' },
+      engine: { attempts: 3, gitCommit: false, runner: 'codex', autoWatch: true },
     });
     assert.equal(saved.labels.priorities['2'], '普通');
     assert.equal(saved.engine.attempts, 3);
     assert.equal(saved.engine.gitCommit, false);
     assert.equal(saved.engine.runner, 'codex');
+    assert.equal(saved.engine.autoWatch, true, '看板启动时自动开流水线是个开关，要能存');
     assert.equal(saved.labels.statuses.open, '待接', '未改的字段要保留');
 
     await assert.rejects(() => saveProjectConfig(dir, { engine: { runner: 'nope' } }), /runner 只能是/);

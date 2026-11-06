@@ -29,6 +29,7 @@
     "actor": "ai",
     "readyLabel": "ready-for-agent",
     "timeoutMs": 1800000,
-    "gitCommit": true
+    "gitCommit": true,
+    "autoWatch": true
   }
 }

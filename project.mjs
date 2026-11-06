@@ -11,7 +11,7 @@ export const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
-export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit'];
+export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch'];
 const RUNNERS = ['pi', 'codex', 'agent'];
 const SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
 
@@ -31,6 +31,7 @@ export const DEFAULT_CONFIG = {
     readyLabel: 'ready-for-agent',
     timeoutMs: 1800000,
     gitCommit: true,
+    autoWatch: false,
   },
 };
 
@@ -123,6 +124,7 @@ export async function saveProjectConfig(projectDir, patch = {}) {
     next.engine.timeoutMs = n;
   }
   if (engine.gitCommit !== undefined) next.engine.gitCommit = Boolean(engine.gitCommit);
+  if (engine.autoWatch !== undefined) next.engine.autoWatch = Boolean(engine.autoWatch);
   for (const key of ['model', 'thinking', 'actor', 'readyLabel']) {
     if (engine[key] !== undefined) next.engine[key] = String(engine[key]).trim();
   }

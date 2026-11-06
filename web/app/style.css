@@ -35,6 +35,9 @@ body {
 }
 .top h1 { font-size: 16px; margin: 0; font-weight: 600; }
 .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#watch.watch-on { border-color: #2f7d4f; color: #9ee6b8; }
+#watch.watch-stopping { border-color: var(--warn); color: var(--warn); }
+#watch:disabled { opacity: 0.6; cursor: progress; }
 .hint { margin-left: auto; color: var(--muted); font-size: 12px; }
 .hint.err { color: var(--warn); }
 .chk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; }

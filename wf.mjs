@@ -24,6 +24,8 @@ const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const PID_FILE = path.join(STATE_DIR, 'board.pid');
 const BOARD_FILE = path.join(STATE_DIR, 'board.json');
 const BOARD_LOG = path.join(STATE_DIR, 'board.log');
+const WATCH_LOG = path.join(STATE_DIR, 'watch.log');
+const WATCH_SCRIPT = path.join(ROOT, 'engine', 'watch.mjs');
 
 const HELP = `用法：node wf.mjs [--project <目录>] <动词>
 
@@ -33,6 +35,8 @@ const HELP = `用法：node wf.mjs [--project <目录>] <动词>
                      --host <ip> 绑指定网卡（等价自选内网地址）
   stop               停掉后台看板
   work [参数]        让 AI 干下一张就绪单（--dry / --id <卡片> / --attempts N 原样透传）
+  watch [--bg]       自动流水线：常驻，有就绪单就自动开干
+                     --stop 优雅停（跑完手上这张）；--interval <ms> 轮询间隔
   trace <卡片id>     在终端看一张单的执行全链路
   new <标题> [描述]  建一张单，自动打可派标签
 
@@ -94,6 +98,48 @@ async function boardMeta() {
 }
 
 const boardOnline = async () => (await boardMeta()) !== null;
+
+/** 流水线状态由 engine 自己的 CLI 回答（跨模块只走进程/文件，不 import 内部）。 */
+async function watchStatus(dir) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [WATCH_SCRIPT, '--project', dir, '--status'], { windowsHide: true });
+    let out = '';
+    child.stdout.setEncoding('utf8').on('data', (d) => (out += d));
+    child.on('error', () => resolve(null));
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(out.trim().split('\n').pop()));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** 自动流水线：--bg 后台跑（日志进 ~/.hlwd/watch.log），--stop 优雅停，其余参数透传。 */
+async function watch(dir, args = []) {
+  const forward = args.filter((a) => a !== '--bg');
+  const argv = [WATCH_SCRIPT, '--project', dir, ...forward];
+  if (!args.includes('--bg')) return child(process.execPath, argv, { cwd: dir });
+
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  const log = await fs.open(WATCH_LOG, 'a');
+  const proc = spawn(process.execPath, argv, { cwd: dir, detached: true, stdio: ['ignore', log.fd, log.fd] });
+  proc.unref();
+  await log.close();
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    const st = await watchStatus(dir);
+    if (st?.running) {
+      console.log(`自动流水线已在后台跑（pid ${st.pid}）`);
+      console.log(`项目 ${dir}`);
+      console.log(`日志 ${WATCH_LOG}    停止 node wf.mjs watch --stop`);
+      return 0;
+    }
+  }
+  console.log(`自动流水线没起来，看日志：${WATCH_LOG}`);
+  return 1;
+}
 
 /** 本机自己开就看带口令的地址，不然会先看到“需要访问口令”。 */
 const localUrl = (token) => (token ? `${PROBE}/?token=${encodeURIComponent(token)}` : PROBE);
@@ -164,9 +210,16 @@ async function status({ dir, cfg, info }) {
   console.log(`\n看板 ${meta ? `在线 ${PROBE}` : '未启动'}`);
   if (meta) printShare(meta, boardInfo?.token);
 
+  const watch = await watchStatus(dir);
+  const watchLine = watch?.running
+    ? `开（pid ${watch.pid}，${watch.state === 'running' ? `正在干 ${watch.card}` : '等单'}）`
+    : `关${watch?.lastError ? ` · 上次：${watch.lastError}` : ''}`;
+  console.log(`自动流水线 ${watchLine}`);
+
   console.log('\n下一步');
   if (!meta) console.log('  node wf.mjs board            起看板，建单 / 看全链路');
   if (!meta) console.log('  node wf.mjs board --lan      同上，并暴露到内网给同事（可加 --token 口令）');
+  if (!watch?.running) console.log('  node wf.mjs watch --bg       自动流水线：有就绪单就自动开干');
   if (ready.length) console.log('  node wf.mjs work             让 AI 干下一张就绪单');
   else console.log('  先在看板里建单（或 node wf.mjs new "标题"），再 work');
 }
@@ -277,6 +330,17 @@ async function board(projectDir, flags) {
 }
 
 async function stop() {
+  // 先让流水线收尾（不在半张单中途砍），再停看板
+  const { project } = await readState().catch(() => ({ project: null }));
+  if (project) {
+    const watch = await watchStatus(project);
+    if (watch?.running) {
+      await child(process.execPath, [WATCH_SCRIPT, '--project', project, '--stop']);
+      console.log(`自动流水线：已请求停止（项目 ${project}，它跑完手上这张就退）`);
+      console.log('  要立即停（含手上的 agent）：node wf.mjs watch --force');
+    }
+  }
+
   let pid = 0;
   try {
     pid = Number((await fs.readFile(PID_FILE, 'utf8')).trim());
@@ -333,9 +397,24 @@ async function main() {
   }
   if (verb === 'stop') return stop();
 
+  if (verb === 'watch') {
+    const { dir } = await useProject(explicitProject);
+    await rememberProject(dir).catch(() => {});
+    return watch(dir, verbArgs);
+  }
+
   if (verb === 'work' || verb === 'run') {
     const { dir } = await useProject(explicitProject);
     await rememberProject(dir).catch(() => {});
+    // 流水线在跑时别再手动插手，否则两张单会被两个进程同时接单
+    if (!verbArgs.includes('--dry')) {
+      const watch = await watchStatus(dir);
+      if (watch?.running) {
+        console.error(`自动流水线正在跑（pid ${watch.pid}${watch.card ? `，当前 ${watch.card}` : ''}）：它会自己接单。`);
+        console.error('要手动跑就先 node wf.mjs watch --stop。');
+        return 2;
+      }
+    }
     return child(process.execPath, [path.join(ROOT, 'engine', 'run.mjs'), '--project', dir, ...verbArgs]);
   }
 

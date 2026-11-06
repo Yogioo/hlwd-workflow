@@ -42,7 +42,7 @@ function bdBin() {
 }
 
 // 参数走数组、正文走 stdin，不经过 shell，因此中文/引号/管道符都安全。
-function run(args, { input, cwd = workdir } = {}) {
+function runOnce(args, { input, cwd = workdir } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(bdBin(), args, { cwd, windowsHide: true });
     let out = '';
@@ -56,6 +56,26 @@ function run(args, { input, cwd = workdir } = {}) {
     });
     child.stdin.end(input ?? '');
   });
+}
+
+/**
+ * bd 刚 init 完的头一两秒数据库可能还没就绪（issue_prefix is missing）。
+ * 这类错误重试一下就好：它意味着“什么都没写”，重试不会重复建单。
+ */
+const NOT_READY = /not initialized|issue_prefix is missing|no beads configuration/i;
+
+async function run(args, opts) {
+  let last;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await runOnce(args, opts);
+    } catch (err) {
+      last = err;
+      if (!NOT_READY.test(String(err?.message ?? ''))) throw err;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  throw last;
 }
 
 function parseJson(text, args) {

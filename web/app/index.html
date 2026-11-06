@@ -17,13 +17,14 @@
       <div class="tools">
         <input id="q" type="search" placeholder="搜标题 / 描述 / 评论…" />
         <label class="chk"><input id="readyOnly" type="checkbox" /> 只看可派给 AI</label>
+        <button id="watch" type="button" class="ghost" title="自动流水线">自动流水线：关</button>
         <button id="settings" type="button" class="ghost">设置</button>
         <button id="new" type="button" class="primary">新建工单</button>
       </div>
       <div id="hint" class="hint"></div>
       <div class="legend">
         <span class="dot">·</span>
-        <b>待接</b> 可以派给 AI（<code>node wf.mjs work</code>）<span class="dot">·</span>
+        <b>待接</b> 可以派给 AI（右上角「自动流水线」或 <code>node wf.mjs work</code>）<span class="dot">·</span>
         <b>执行中</b> AI 在改<span class="dot">·</span>
         <b>待审</b> 改完了，等验收<span class="dot">·</span>
         <b>已完成</b> 已提交并关闭。点开任意卡片看全链路。
@@ -132,6 +133,7 @@
           <label>AI 账号名<input name="actor" placeholder="ai" /></label>
           <label>可派标签<input name="readyLabel" placeholder="ready-for-agent" /></label>
           <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
+          <label class="chk-row"><input name="autoWatch" type="checkbox" /> 看板启动时自动开「自动流水线」</label>
         </div>
 
         <h3>门禁（项目的 .hlwd/gate.mjs）</h3>

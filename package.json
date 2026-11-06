@@ -9,8 +9,9 @@
     "start": "node wf.mjs board --bg",
     "start:lan": "node wf.mjs board --bg --lan",
     "engine": "node wf.mjs work",
-    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs engine/gate.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs web/server.test.mjs project.test.mjs",
-    "stop": "node wf.mjs stop"
+    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs engine/gate.test.mjs engine/watch.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs web/server.test.mjs project.test.mjs",
+    "stop": "node wf.mjs stop",
+    "watch": "node wf.mjs watch --bg"
   },
   "engines": {
     "node": ">=20"

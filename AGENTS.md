@@ -15,11 +15,12 @@
 |---|---|---|
 | `beads`（`bd`） | 工单存储与状态，每个项目一份 | 不跑 AI、不判验收 |
 | `web` | 看板、建单、改单、改项目配置、切项目 | 不跑 AI、不写 git、不绕开适配层 |
-| `engine` | 接单 → 执行 → 门禁 → 审查 → 回写结论 | 不渲染页面、不定义工单字段 |
+| `engine` | 接单 → 执行 → 门禁 → 审查 → 回写结论；`watch.mjs` 常驻循环自动接单 | 不渲染页面、不定义工单字段 |
+| `web` | 看板、建单、改单、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
 | `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
-当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。看板进程信息（端口 / 绑的地址 / 口令探活用）记在 `~/.hlwd/board.json`，同属全局运行期信息。
+当前打开哪个项目，只记在全局 `~/.hlwd/state.json`（**不是**项目配置）。看板进程信息（端口 / 绑的地址 / 口令探活用）记在 `~/.hlwd/board.json`，自动流水线的心跳记在 `~/.hlwd/watch/<项目>.json`；都是全局运行期信息，不是业务数据。
 
 ## 3. 产物布局
 
@@ -48,6 +49,21 @@ gateFile(dir) -> <dir>/.hlwd/gate.mjs
 
 - 打开项目是**幂等**的：已存在的一律不覆盖，只在返回值里说明补了什么。
 - 配置写入必须校验：不认识的 runner / 非 1–5 的 attempts / 空名称一律拒绝，宁可不保存。
+
+**Watcher**（`engine/watch.mjs`，常驻循环；web 与 wf 只通过进程/心跳文件跟它说话）
+
+```
+node engine/watch.mjs --project <dir> [--interval 5000]   # 跑循环
+node engine/watch.mjs --project <dir> --stop              # 优雅停（跑完手上这张）
+node engine/watch.mjs --project <dir> --status            # 一行 JSON 状态
+```
+
+- 心跳：`~/.hlwd/watch/<项目key>.json`（`{pid, state: idle|running|stopped, card, lastCode, lastError, beatAt, interval, stopping}`）；`running` 以 pid 还活着为准，不靠文件自证。
+- 每张单起独立的 `engine/run.mjs` 子进程：单张崩了不带走循环，进程退出也不留残留状态。
+- 同一项目只跑一个（已有 pid 活着就拒绝再起）；不同项目互不干扰。
+- 停止是**协作式**：先写 `<项目key>.stop`，循环跑完手上这张才退（空转时最多 0.5s 就反应）；`--force`/看板上的「再点一下」会连子进程一起强杀（可能留下 `in_progress` 的单，需要人工改回待接）。
+- `wf.mjs work` 在流水线运行时拒绝（否则两个进程会同时接单）；`--dry` 不受影响。
+- web 侧：`GET /api/watch` 只读（内网也允许），`POST /api/watch {action: start|stop|force}` **仅本机**（它会在宿主机上起 AI）。
 
 **WorkSource**（beads 适配层，`web` 与 `engine` 共用一份实现）
 
@@ -102,7 +118,7 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 **Config / Prompts**（`<项目>/.hlwd/`）
 
 ```
-config.json: labels.statuses / labels.priorities / columns / engine.*
+config.json: labels.statuses / labels.priorities / columns / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
 prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}} / {{VERDICT}}
 ```
 
@@ -142,6 +158,7 @@ engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run / 跑门禁
   gate-run.mjs     # 门禁执行器：单独进程跑项目的 .hlwd/gate.mjs
+  watch.mjs        # 自动流水线：有就绪单就起一张，没有就等；心跳给看板看
   manifest.mjs     # 写 run.json 与 journal.ndjson
   flows/           # 一个阶段一个文件：claim / execute / gate / review / complete
   prompts/         # 默认提示词模板（项目没定制时用它）
@@ -158,6 +175,8 @@ node wf.mjs board [--bg]          # 看板（npm start = --bg）
 node wf.mjs board --lan           # 同上，绑 0.0.0.0 让内网同事打开（npm run start:lan）
 node wf.mjs stop                  # 停掉后台看板（npm run stop）
 node wf.mjs work                  # 让 AI 干下一张就绪单（npm run engine）
+node wf.mjs watch --bg            # 自动流水线：常驻，有就绪单就自动开干
+node wf.mjs watch --stop          # 优雅停（跑完手上这张；--interval <ms> 调轮询间隔）
 node wf.mjs trace <卡片id>        # 终端看一张单的全链路
 node wf.mjs new "标题" [描述]     # 建单，自动打可派标签
 
@@ -170,6 +189,8 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。
 - 依赖解析：要用能找到的 `bd` 与 `agent-tools`，找不到时设 `BD_BIN` / `AGENT_TOOLS_BIN`。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
+- **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「待接 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
+- 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。
 
 **内网分享**（给同网段的同事看/建/改单）
 
