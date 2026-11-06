@@ -91,6 +91,8 @@ async function boardMeta() {
   const headers = info?.token ? { 'x-wf-token': info.token } : {};
   try {
     const res = await fetch(`${PROBE}/api/meta`, { headers, signal: AbortSignal.timeout(500) });
+    // 401 = 看板活着、只是要登录（开了账号系统），这不算「没启动」
+    if (res.status === 401) return { auth: true };
     return res.ok ? await res.json() : null;
   } catch {
     return null;
