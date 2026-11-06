@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node web/server.mjs",
     "engine": "node engine/run.mjs",
-    "test": "node --test engine/lib.test.mjs"
+    "test": "node --test engine/lib.test.mjs engine/manifest.test.mjs"
   },
   "engines": {
     "node": ">=20"
