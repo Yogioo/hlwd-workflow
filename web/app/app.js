@@ -3,6 +3,32 @@
 import { esc, md } from './markdown.js';
 
 const AUTO_REFRESH_MS = 5000;
+const VIEW_KEY = 'hlwd.view';
+const SORT_DESC = new Set(['updated', 'comments']);
+
+/** 视图是浏览器的偏好，不写进项目：同一个项目换台电脑打开，默认还是看板。 */
+function readView() {
+  try {
+    const fromUrl = new URLSearchParams(location.search).get('view');
+    if (fromUrl === 'board' || fromUrl === 'list') {
+      try {
+        localStorage.setItem(VIEW_KEY, fromUrl);
+      } catch {
+        // 隐私模式里存不了就算了
+      }
+      return fromUrl;
+    }
+  } catch {
+    // 没有 URL API 就当没传
+  }
+  try {
+    const saved = localStorage.getItem(VIEW_KEY);
+    if (saved === 'board' || saved === 'list') return saved;
+  } catch {
+    // 存不了也照常用默认值
+  }
+  return 'board';
+}
 
 const $ = (s) => document.querySelector(s);
 const state = {
@@ -14,7 +40,11 @@ const state = {
   trace: null,
   gate: { path: '', exists: false },
   project: { dir: '', recent: [] },
-  filter: { q: '', ready: false },
+  filter: emptyFilter(),
+  // 视图配置（列 / 列宽 / 排序 / 预设）存在 ~/.hlwd/prefs/<用户>.json，按项目各一套
+  prefs: { columns: [], presets: [] },
+  view: readView(),
+  sort: { key: 'updated', dir: 'desc' },
   dispatching: false,
   watch: { running: false, stopping: false },
   lastWatchError: null,
@@ -70,6 +100,55 @@ function hint(text, isError = false) {
   }
 }
 
+/** 顶栏的「看板 / 列表」跟当前视图对齐；body 上的 data-view 给样式用。 */
+function applyViewChrome() {
+  document.body.dataset.view = state.view;
+  const board = $('#viewBoard');
+  const list = $('#viewList');
+  if (!board || !list) return;
+  board.classList.toggle('active', state.view === 'board');
+  list.classList.toggle('active', state.view === 'list');
+  board.setAttribute('aria-pressed', String(state.view === 'board'));
+  list.setAttribute('aria-pressed', String(state.view === 'list'));
+  // 「列」只对列表有意义
+  const colsBtn = $('#colsBtn');
+  if (colsBtn) colsBtn.hidden = state.view !== 'list';
+}
+
+/** 地址栏跟着视图走：/?view=list 可以直接发给别人；工单页不动它的地址。 */
+function syncViewUrl(view) {
+  if (document.body.dataset.mode === 'issue' || issueIdFromPath()) return;
+  try {
+    const url = new URL(location.href);
+    if (view === 'list') url.searchParams.set('view', 'list');
+    else url.searchParams.delete('view');
+    history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // 改不了地址栏就只记在内存里
+  }
+}
+
+function setView(view) {
+  if (view !== 'board' && view !== 'list') return;
+  const changed = state.view !== view;
+  state.view = view;
+  applyViewChrome();
+  try {
+    localStorage.setItem(VIEW_KEY, view);
+  } catch {
+    // 存不了也无所谓，这次会话里切换照样生效
+  }
+  syncViewUrl(view);
+  render();
+  if (!changed) return;
+  window.scrollTo(0, 0);
+  hint(
+    view === 'list'
+      ? '列表视图：点表头排序，按住表头拖换列序，拖右边界改列宽，点一行打开工单'
+      : '看板视图：把卡片拖到别的列就能改状态',
+  );
+}
+
 function applyConfig(cfg) {
   if (Array.isArray(cfg.statuses) && cfg.statuses.length) state.statuses = cfg.statuses;
   else if (Array.isArray(cfg.columns) && cfg.columns.length) state.statuses = cfg.columns;
@@ -109,7 +188,7 @@ function fillPrioritySelect(select, selected) {
 
 // 空列不是「—」，是告诉你这一列现在该放什么
 const laneEmpty = (status) => {
-  if (state.filter.ready || state.filter.q) return '没有符合当前筛选的单。';
+  if (hasFilter()) return '没有符合当前筛选的单。';
   return (
     {
       open: '没有待接的单。新建一张，或把别的卡拖过来。',
@@ -119,6 +198,8 @@ const laneEmpty = (status) => {
     }[status] ?? '这里空着。'
   );
 };
+const listEmpty = () =>
+  hasFilter() ? '没有符合当前筛选的单。' : '还没有工单。点右上角「新建工单」开始。';
 
 /** 一张卡：标题是主体，id 和类型退到脚注，别抢视线。 */
 function card(issue) {
@@ -135,6 +216,591 @@ function card(issue) {
       <span class="card-id mono">${esc(issue.id)}</span>
     </div>
   </article>`;
+}
+
+const dash = () => '<span class="dash">—</span>';
+function orDash(text) {
+  return text ? esc(text) : dash();
+}
+
+/** 列表能摊开的列。id 同时是排序键；w 只是第一次打开时的默认宽度（之后听用户的）。 */
+const COLUMNS = [
+  {
+    id: 'status',
+    label: '状态',
+    w: 92,
+    cls: 'c-status',
+    sort: (i) => {
+      const at = state.statuses.indexOf(i.status);
+      return at < 0 ? state.statuses.length : at;
+    },
+    cell: (i) => `<span class="row-dot" aria-hidden="true"></span>${esc(statusLabel(i.status))}`,
+  },
+  {
+    id: 'priority',
+    label: '优先级',
+    w: 62,
+    cls: 'c-prio',
+    sort: (i) => Number(i.priority) || 0,
+    attrs: (i) => `data-prio="${esc(i.priority)}"`,
+    cell: (i) => esc(prioLabel(i.priority)),
+  },
+  { id: 'type', label: '类型', w: 64, cls: 'c-type', sort: (i) => i.type || '', cell: (i) => (i.type ? `<span class="mono">${esc(i.type)}</span>` : dash()) },
+  { id: 'title', label: '工单', w: 300, cls: 'c-title', sort: (i) => i.title || '', cell: titleCell },
+  {
+    id: 'assignee',
+    label: '负责人',
+    w: 110,
+    cls: 'c-assignee',
+    sort: (i) => i.assignee || '',
+    cell: (i) => `<span title="${esc(i.assignee)}">${orDash(i.assignee)}</span>`,
+  },
+  {
+    id: 'createdBy',
+    label: '创建人',
+    w: 110,
+    cls: 'c-createdby',
+    sort: (i) => i.createdBy || '',
+    cell: (i) => `<span title="${esc(i.createdBy)}">${orDash(i.createdBy)}</span>`,
+  },
+  { id: 'created', label: '创建时间', w: 96, cls: 'c-created', sort: (i) => i.created || '', cell: (i) => timeCell(i.created) },
+  { id: 'updated', label: '最近更新', w: 96, cls: 'c-updated', sort: (i) => i.updated || '', cell: (i) => timeCell(i.updated) },
+  { id: 'labels', label: '标签', w: 160, cls: 'c-labels', sort: (i) => i.labels.join(' '), cell: labelsCell },
+  {
+    id: 'comments',
+    label: '评论',
+    w: 48,
+    cls: 'c-comments',
+    align: 'right',
+    sort: (i) => Number(i.commentCount) || 0,
+    cell: (i) => (i.commentCount ? `<span class="mono">${esc(i.commentCount)}</span>` : dash()),
+  },
+  {
+    id: 'ready',
+    label: '可派',
+    w: 64,
+    cls: 'c-ready',
+    sort: (i) => (i.labels.includes(state.readyLabel) ? 0 : 1),
+    cell: (i) => (i.labels.includes(state.readyLabel) ? '<span class="chip chip-ready">可派</span>' : dash()),
+  },
+  { id: 'id', label: '编号', w: 78, cls: 'c-id', align: 'right', sort: (i) => i.id || '', cell: (i) => `<span class="mono">${esc(i.id)}</span>` },
+];
+
+const COLUMN_BY_ID = Object.fromEntries(COLUMNS.map((c) => [c.id, c]));
+/** 和服务端 web/prefs.mjs 的 VISIBLE_DEFAULT 一致：默认还是原来那九列。 */
+const VISIBLE_DEFAULT = new Set(['status', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
+
+function defaultColumns() {
+  return COLUMNS.map((c) => ({ id: c.id, w: c.w, hidden: !VISIBLE_DEFAULT.has(c.id) }));
+}
+
+/** 用户配置里可能有本版本不认得的列（降级访问）：认不出的直接跳过，别渲染空气。 */
+function columnPrefs() {
+  const cols = Array.isArray(state.prefs.columns) && state.prefs.columns.length ? state.prefs.columns : defaultColumns();
+  return cols.filter((c) => COLUMN_BY_ID[c.id]);
+}
+
+function visibleColumns() {
+  return columnPrefs()
+    .filter((c) => !c.hidden)
+    .map((c) => ({ ...COLUMN_BY_ID[c.id], w: Number(c.w) || COLUMN_BY_ID[c.id].w }));
+}
+
+function titleCell(issue) {
+  const labels = issue.labels.map(chip).join('');
+  const summary = snippet(issue.body);
+  const mobile = [
+    `<span>${issue.type ? esc(issue.type) : dash()}</span>`,
+    `<span>负责人 ${orDash(issue.assignee)}</span>`,
+    `<span>创建人 ${orDash(issue.createdBy)}</span>`,
+    `<span>更新 ${esc(fmtAgo(issue.updated))}</span>`,
+    `<span>${issue.commentCount ? `${esc(issue.commentCount)} 条评论` : '无评论'}</span>`,
+    `<span class="mono">${esc(issue.id)}</span>`,
+  ].join('');
+  const sub = labels || summary
+    ? `<div class="row-sub">${labels ? `<span class="chips">${labels}</span>` : ''}${summary ? `<span class="row-snippet">${esc(summary)}</span>` : ''}</div>`
+    : '';
+  return `<a class="row-link" href="/issue/${encodeURIComponent(issue.id)}">${esc(issue.title)}</a>${sub}<div class="row-mobile-meta">${mobile}</div>`;
+}
+
+function labelsCell(issue) {
+  if (!issue.labels.length) return dash();
+  const shown = issue.labels.slice(0, 3).map(chip).join('');
+  const more = issue.labels.length > 3 ? `<span class="chip">+${issue.labels.length - 3}</span>` : '';
+  return `<span class="chips">${shown}${more}</span>`;
+}
+
+function timeCell(at) {
+  return `<time datetime="${esc(at)}" title="${esc(fmtTime(at))}">${esc(fmtAgo(at))}</time>`;
+}
+
+/** 点同一个表头翻方向；相同值按最近更新、编号兜底，刷新时行不会乱跳。 */
+function sortIssues(issues) {
+  const { key, dir } = state.sort;
+  const value = COLUMN_BY_ID[key]?.sort ?? COLUMN_BY_ID.updated.sort;
+  const sign = dir === 'asc' ? 1 : -1;
+  return [...issues].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    const cmp =
+      typeof va === 'number' && typeof vb === 'number'
+        ? va - vb
+        : String(va).localeCompare(String(vb), 'zh-CN', { numeric: true, sensitivity: 'base' });
+    if (cmp) return cmp * sign;
+    return (
+      String(b.updated ?? '').localeCompare(String(a.updated ?? '')) ||
+      String(a.id ?? '').localeCompare(String(b.id ?? ''))
+    );
+  });
+}
+
+function toggleSort(key) {
+  if (!COLUMN_BY_ID[key]) return;
+  if (state.sort.key === key) state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
+  else state.sort = { key, dir: SORT_DESC.has(key) ? 'desc' : 'asc' };
+  render();
+  savePrefsSoon();
+}
+
+const sortMark = (key) => (state.sort.key === key ? (state.sort.dir === 'asc' ? '↑' : '↓') : '');
+const ariaSort = (key) =>
+  state.sort.key === key ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
+
+function listHead(cols = visibleColumns()) {
+  const cells = cols
+    .map(
+      ({ id, label, cls, align }) => `<th class="${cls}${align === 'right' ? ' is-right' : ''}" scope="col" data-col="${id}" aria-sort="${ariaSort(id)}" title="拖动换列序，点一下排序">
+        <button type="button" class="sort-btn" data-sort="${id}" title="按${label}排序">${label}<span class="sort-mark" aria-hidden="true">${sortMark(id)}</span></button>
+        <span class="col-resizer" data-resize="${id}" title="拖动改列宽，双击恢复默认"></span>
+      </th>`,
+    )
+    .join('');
+  // 末尾留一条「填充列」：吃掉窗口剩余宽度，别的列才能保持用户拖出来的 px
+  return `<thead><tr>${cells}<th class="c-fill" aria-hidden="true"></th></tr></thead>`;
+}
+
+/** 列表里的摘要：把 markdown 压成一行，不显示代码块和图片地址。 */
+function snippet(body, max = 110) {
+  const text = String(body ?? '')
+    .slice(0, 1200) // 只要开头这一行，别为 300 张单把整篇描述都正则一遍
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[#>*_`~]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** 列表里的「最近更新」用相对时间，扫一眼就知道哪些是刚动过的。 */
+function fmtAgo(at) {
+  const d = new Date(at ?? '');
+  if (Number.isNaN(d.getTime())) return '—';
+  const min = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return '昨天';
+  if (days < 7) return `${days} 天前`;
+  return d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+/** 列表的一行：只渲染当前显示的列，顺序由用户拖出来的 `state.prefs.columns` 决定。 */
+function listRow(issue) {
+  const cells = visibleColumns()
+    .map(({ id, cls, align, cell, attrs }) => `<td class="${cls}${align === 'right' ? ' is-right' : ''}"${attrs ? ` ${attrs(issue)}` : ''}>${cell(issue)}</td>`)
+    .join('');
+  return `<tr class="list-row" data-id="${esc(issue.id)}" data-status="${esc(issue.status)}">${cells}<td class="c-fill"></td></tr>`;
+}
+
+function listTable(issues) {
+  const cols = visibleColumns();
+  if (!cols.length) {
+    return '<div class="list-view"><div class="list-empty">所有列都收起来了：点「列」把想看的打开。</div></div>';
+  }
+  // 列宽是 px，窗口更宽时表格撑满、更窄时横向滚（不把每列挤成一条缝）
+  const total = cols.reduce((sum, c) => sum + c.w, 0);
+  const rows = issues.length
+    ? issues.map(listRow).join('')
+    : `<tr class="list-empty-row"><td colspan="${cols.length + 1}">${esc(listEmpty())}</td></tr>`;
+  // 不要套滚动容器：表头是 sticky，一旦有 overflow 祖先就会相对那个容器算 top，整行被推下去
+  return `<div class="list-view"><table class="list-table" style="min-width:${total}px">
+    <colgroup>${cols.map((c) => `<col style="width:${c.w}px">`).join('')}<col></colgroup>
+    ${listHead(cols)}<tbody>${rows}</tbody></table></div>`;
+}
+
+function renderList(issues) {
+  const board = $('#board');
+  board.innerHTML = listTable(sortIssues(issues));
+  delete board.dataset.loading;
+}
+
+// —— 筛选：字段条件按 AND 叠加，搜索框只是它的快捷入口；看板和列表共用一套条件 ——
+
+function emptyFilter() {
+  return {
+    q: '',
+    ready: false,
+    status: [],
+    priority: [],
+    type: [],
+    assignee: [],
+    createdBy: [],
+    labels: [],
+    updated: { period: '', from: '', to: '' },
+  };
+}
+
+const normFilter = (f) =>
+  JSON.stringify({
+    q: f.q ?? '',
+    ready: Boolean(f.ready),
+    status: f.status ?? [],
+    priority: (f.priority ?? []).map(Number).sort((a, b) => a - b),
+    type: f.type ?? [],
+    assignee: f.assignee ?? [],
+    createdBy: f.createdBy ?? [],
+    labels: f.labels ?? [],
+    updated: { period: f.updated?.period ?? '', from: f.updated?.from ?? '', to: f.updated?.to ?? '' },
+  });
+
+function normalizeFilter(input = {}) {
+  const f = input && typeof input === 'object' ? input : {};
+  const arr = (v) => (Array.isArray(v) ? [...v] : []);
+  return {
+    q: String(f.q ?? ''),
+    ready: Boolean(f.ready),
+    status: arr(f.status),
+    priority: arr(f.priority).map(Number),
+    type: arr(f.type),
+    assignee: arr(f.assignee),
+    createdBy: arr(f.createdBy),
+    labels: arr(f.labels),
+    updated: { period: f.updated?.period ?? '', from: f.updated?.from ?? '', to: f.updated?.to ?? '' },
+  };
+}
+
+function hasFilter(f = state.filter) {
+  return Boolean(
+    (f.q ?? '') ||
+      f.ready ||
+      f.status?.length ||
+      f.priority?.length ||
+      f.type?.length ||
+      f.assignee?.length ||
+      f.createdBy?.length ||
+      f.labels?.length ||
+      f.updated?.period,
+  );
+}
+
+/** 「最近更新」的时间窗；null 表示不限。包成函数是为了跟着时钟走，不用每次重算状态。 */
+function updatedWindow(u) {
+  const period = u?.period;
+  if (!period) return null;
+  const now = new Date();
+  if (period === 'custom') {
+    const from = u.from ? new Date(`${u.from}T00:00:00`).getTime() : -Infinity;
+    const to = u.to ? new Date(`${u.to}T23:59:59.999`).getTime() : Infinity;
+    if (!Number.isFinite(from) && !Number.isFinite(to)) return null;
+    return { from: Number.isFinite(from) ? from : -Infinity, to: Number.isFinite(to) ? to : Infinity };
+  }
+  if (period === 'today') return { from: new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(), to: Infinity };
+  const days = period === '7d' ? 7 : 30;
+  return { from: now.getTime() - days * 86400000, to: Infinity };
+}
+
+function matchesFilter(issue, f = state.filter) {
+  if (f.ready && !issue.labels.includes(state.readyLabel)) return false;
+  if (f.status.length && !f.status.includes(issue.status)) return false;
+  if (f.priority.length && !f.priority.includes(Number(issue.priority))) return false;
+  if (f.type.length && !f.type.includes(issue.type || '')) return false;
+  if (f.assignee.length && !f.assignee.includes(issue.assignee || '')) return false;
+  if (f.createdBy.length && !f.createdBy.includes(issue.createdBy || '')) return false;
+  if (f.labels.length && !f.labels.every((l) => issue.labels.includes(l))) return false;
+  const win = updatedWindow(f.updated);
+  if (win) {
+    const at = Date.parse(issue.updated);
+    if (!(at >= win.from && at <= win.to)) return false;
+  }
+  return true;
+}
+
+// —— 预设：内置三条（全部 / 可派 / 我负责）+ 自己存的；自建的跟着这个项目走 ——
+
+const meName = () => state.auth?.user?.display || state.auth?.user?.name || '';
+
+function builtinPresets() {
+  const out = [
+    { id: 'builtin:all', name: '全部', filter: emptyFilter() },
+    { id: 'builtin:ready', name: '可派', filter: { ...emptyFilter(), ready: true } },
+  ];
+  const me = meName();
+  if (me) out.push({ id: 'builtin:mine', name: '我负责', filter: { ...emptyFilter(), assignee: [me] } });
+  return out;
+}
+const allPresets = () => [...builtinPresets(), ...(state.prefs.presets ?? [])];
+
+function applyFilter(next) {
+  state.filter = normalizeFilter(next);
+  const q = $('#q');
+  if (q && q.value !== state.filter.q) q.value = state.filter.q;
+  render();
+  renderFilterbar();
+  updateFilterCount();
+}
+
+function applyPreset(preset) {
+  const before = state.filter.q;
+  closePanels(); // 面板里的勾选跟着预设走，收起来避免看起来还是旧的
+  applyFilter(preset.filter);
+  if (state.filter.q !== before) {
+    clearTimeout(state.qTimer);
+    state.qTimer = setTimeout(load, 200);
+  }
+  hint(`筛选：${preset.name}`);
+}
+
+function updateFilterCount() {
+  const el = $('#filterCount');
+  if (!el) return;
+  const n = state.issues.filter((i) => matchesFilter(i)).length;
+  el.textContent = hasFilter() ? `${n} / ${state.issues.length} 张` : '';
+}
+
+function addPreset(name) {
+  const presets = [...(state.prefs.presets ?? [])];
+  presets.push({ id: `p_${Date.now().toString(36)}`, name: name.slice(0, 30), filter: normalizeFilter(state.filter) });
+  state.prefs.presets = presets;
+  savePrefsSoon();
+  renderFilterbar();
+  hint(`已存为预设「${name}」`);
+}
+
+function deletePreset(id) {
+  const target = (state.prefs.presets ?? []).find((p) => p.id === id);
+  if (!target) return;
+  state.prefs.presets = state.prefs.presets.filter((p) => p.id !== id);
+  savePrefsSoon();
+  renderFilterbar();
+  hint(`已删除预设「${target.name}」`);
+}
+
+/** 存预设用行内输入框，不弹原生 prompt：一眼知道名字存到哪一行。 */
+function askPresetName() {
+  const host = $('#presetChips');
+  const btn = host?.querySelector('#savePreset');
+  if (!btn) return;
+  const input = document.createElement('input');
+  input.className = 'preset-name';
+  input.placeholder = '预设名称，回车保存';
+  input.maxLength = 30;
+  btn.replaceWith(input);
+  input.focus();
+  // 回车保存时浏览器会顺手发 blur：用一个闸门保证只结算一次
+  let settled = false;
+  const done = (save) => {
+    if (settled) return;
+    settled = true;
+    const name = input.value.trim();
+    if (input.parentNode) input.remove();
+    if (save && name) addPreset(name);
+    else renderFilterbar();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      done(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      done(false);
+    }
+  });
+  input.addEventListener('blur', () => done(false));
+}
+
+function renderFilterbar() {
+  const chips = $('#presetChips');
+  if (!chips) return;
+  const active = allPresets().find((p) => normFilter(p.filter) === normFilter(state.filter));
+  const customIds = new Set((state.prefs.presets ?? []).map((p) => p.id));
+  const chipHtml = (p) => `<span class="preset${active?.id === p.id ? ' is-active' : ''}">
+      <button type="button" class="preset-btn" data-preset="${esc(p.id)}" title="${customIds.has(p.id) ? '双击改名' : '内置预设'}">${esc(p.name)}</button>
+      ${customIds.has(p.id) ? `<button type="button" class="preset-x" data-del="${esc(p.id)}" aria-label="删除预设 ${esc(p.name)}" title="删除这个预设">×</button>` : ''}
+    </span>`;
+  chips.innerHTML = `${allPresets().map(chipHtml).join('')}${
+    hasFilter() && !active ? '<span class="preset-note">自定义筛选</span>' : ''
+  }${hasFilter() ? '<button type="button" class="ghost tiny" id="clearFilter">清除</button>' : ''}<button type="button" class="ghost tiny" id="savePreset">存为预设</button>`;
+  $('#filterBtn').classList.toggle('is-on', hasFilter());
+}
+
+// —— 用户偏好：列 / 列宽 / 排序 / 预设，按「人 + 项目」存在服务端 ——
+
+let prefsTimer = null;
+function savePrefsSoon() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(savePrefsNow, 400);
+}
+
+async function savePrefsNow() {
+  try {
+    const out = await api('/api/prefs', {
+      method: 'PUT',
+      body: JSON.stringify({ list: { columns: state.prefs.columns, sort: state.sort, presets: state.prefs.presets ?? [] } }),
+    });
+    if (out?.list) {
+      state.prefs.columns = out.list.columns;
+      state.prefs.presets = out.list.presets ?? [];
+      state.sort = out.list.sort ?? state.sort;
+    }
+  } catch (e) {
+    hint(`视图设置没存上：${e.message}`, true);
+  }
+}
+
+function afterFilterChange() {
+  render();
+  renderFilterbar();
+  updateFilterCount();
+}
+
+// —— 筛选面板 / 列面板：共用一套 popover，点外面、Esc、再点按钮都能关 ——
+
+function closePanels() {
+  for (const sel of ['#filterPanel', '#colsPanel']) {
+    const el = $(sel);
+    if (el) el.hidden = true;
+  }
+  for (const sel of ['#filterBtn', '#colsBtn']) {
+    const el = $(sel);
+    if (!el) continue;
+    el.setAttribute('aria-expanded', 'false');
+    el.classList.remove('is-open');
+  }
+}
+
+function sortedUnique(values) {
+  return [...new Set(values.filter((v) => v !== undefined && v !== null && v !== ''))].sort((a, b) =>
+    String(a).localeCompare(String(b), 'zh-CN', { numeric: true }),
+  );
+}
+
+/** 选项从当前项目的工单里长出来：没出现过的类型/人/标签不占位置。 */
+function filterOptions() {
+  const issues = state.issues;
+  return {
+    status: state.statuses.map((s) => ({ v: s, label: statusLabel(s) })),
+    priority: [0, 1, 2, 3, 4].map((p) => ({ v: String(p), label: prioLabel(p) })),
+    type: sortedUnique(issues.map((i) => i.type)).map((v) => ({ v, label: v })),
+    assignee: ['', ...sortedUnique(issues.map((i) => i.assignee))].map((v) => ({ v, label: v || '未指派' })),
+    createdBy: sortedUnique(issues.map((i) => i.createdBy)).map((v) => ({ v, label: v })),
+    labels: sortedUnique(issues.flatMap((i) => i.labels)).map((v) => ({ v, label: v === state.readyLabel ? '可派给 AI' : v })),
+  };
+}
+
+function openFilterPanel() {
+  const panel = $('#filterPanel');
+  if (!panel) return;
+  if (!panel.hidden) {
+    closePanels();
+    return;
+  }
+  closePanels();
+  const f = state.filter;
+  const opts = filterOptions();
+  const group = (field, label, items) =>
+    `<div class="fgroup"><div class="fgroup-head">${label}</div><div class="fopts">${
+      items.length
+        ? items
+            .map(
+              ({ v, label: text }) =>
+                `<label class="fopt"><input type="checkbox" data-field="${field}" value="${esc(v)}"${
+                  f[field].includes(field === 'priority' ? Number(v) : v) ? ' checked' : ''
+                }><span>${esc(text)}</span></label>`,
+            )
+            .join('')
+        : '<span class="fnone">还没有可选项</span>'
+    }</div></div>`;
+  const period = f.updated.period;
+  panel.innerHTML = `<div class="popover-head"><b>筛选</b><span class="popover-sub">看板和列表共用</span><button type="button" class="ghost tiny" data-close>关闭</button></div>
+    <div class="popover-body">
+      <div class="fgroup"><div class="fgroup-head">关键词</div><input id="fq" class="fq" placeholder="标题、描述、评论" value="${esc(f.q)}"></div>
+      ${group('status', '状态', opts.status)}
+      ${group('priority', '优先级', opts.priority)}
+      ${group('type', '类型', opts.type)}
+      ${group('assignee', '负责人', opts.assignee)}
+      ${group('createdBy', '创建人', opts.createdBy)}
+      ${group('labels', '标签', opts.labels)}
+      <div class="fgroup"><div class="fgroup-head">最近更新</div>
+        <div class="frow">
+          <select id="fPeriod">
+            <option value="">不限</option>
+            <option value="today"${period === 'today' ? ' selected' : ''}>今天</option>
+            <option value="7d"${period === '7d' ? ' selected' : ''}>近 7 天</option>
+            <option value="30d"${period === '30d' ? ' selected' : ''}>近 30 天</option>
+            <option value="custom"${period === 'custom' ? ' selected' : ''}>指定日期</option>
+          </select>
+          <input type="date" id="fFrom" value="${esc(f.updated.from)}"${period === 'custom' ? '' : ' disabled'}>
+          <span class="farrow">→</span>
+          <input type="date" id="fTo" value="${esc(f.updated.to)}"${period === 'custom' ? '' : ' disabled'}>
+        </div>
+      </div>
+    </div>
+    <div class="popover-foot"><button type="button" class="ghost tiny" data-clear>清除全部</button><span class="popover-count" id="filterCount"></span></div>`;
+  panel.hidden = false;
+  const btn = $('#filterBtn');
+  placePopover(panel, btn);
+  btn?.setAttribute('aria-expanded', 'true');
+  btn?.classList.add('is-open');
+  updateFilterCount();
+}
+
+function openColsPanel() {
+  const panel = $('#colsPanel');
+  if (!panel) return;
+  if (!panel.hidden) {
+    closePanels();
+    return;
+  }
+  closePanels();
+  const cols = columnPrefs();
+  panel.innerHTML = `<div class="popover-head"><b>列</b><span class="popover-sub">勾选显示，拖表头换序</span><button type="button" class="ghost tiny" data-close>关闭</button></div>
+    <div class="popover-body"><div class="colpicks">${cols
+      .map(
+        (c) =>
+          `<label class="colpick"><input type="checkbox" data-col="${c.id}"${c.hidden ? '' : ' checked'}><span>${esc(COLUMN_BY_ID[c.id].label)}</span></label>`,
+      )
+      .join('')}</div></div>
+    <div class="popover-foot"><button type="button" class="ghost tiny" data-reset>恢复默认列与宽度</button></div>`;
+  panel.hidden = false;
+  const btn = $('#colsBtn');
+  placePopover(panel, btn);
+  btn?.setAttribute('aria-expanded', 'true');
+  btn?.classList.add('is-open');
+}
+
+/** 面板贴着按钮下方：顶栏换行、页面滚动时也不会跑到别处去。 */
+function placePopover(panel, btn) {
+  if (!btn) return;
+  const rect = btn.getBoundingClientRect();
+  panel.style.top = `${Math.round(rect.bottom + 8)}px`;
+  panel.style.right = `${Math.round(Math.max(12, window.innerWidth - rect.right))}px`;
+}
+
+window.addEventListener('resize', () => closePanels());
+
+async function loadPrefs() {
+  try {
+    const { list } = await api('/api/prefs');
+    state.prefs = { columns: list.columns ?? defaultColumns(), presets: list.presets ?? [] };
+    state.sort = list.sort ?? state.sort;
+  } catch {
+    // 老版本服务端没有这个接口：退回内置列，页面照样能用
+    state.prefs = { columns: defaultColumns(), presets: [] };
+  }
+  renderFilterbar();
 }
 
 /** 卡片换列时从旧位置滑到新位置：只动真正挪窝的那几张。 */
@@ -154,12 +820,11 @@ function animateMoves(prev) {
   }
 }
 
-function render() {
+function renderBoard(issues) {
   const board = $('#board');
   const prev = new Map();
   for (const el of board.querySelectorAll('.card')) prev.set(el.dataset.id, el.getBoundingClientRect());
 
-  const issues = state.issues.filter((i) => !state.filter.ready || i.labels.includes(state.readyLabel));
   board.innerHTML = state.statuses
     .map((status, i) => {
       const list = issues.filter((i) => i.status === status);
@@ -176,11 +841,25 @@ function render() {
   animateMoves(prev);
 }
 
+function render() {
+  const issues = state.issues.filter((i) => matchesFilter(i));
+  if (state.view === 'list') {
+    renderList(issues);
+    return;
+  }
+  renderBoard(issues);
+}
+
 /** 数据没回来之前先把四条列画出来，不让人对着一片空白的板。 */
 function renderSkeleton() {
   const board = $('#board');
-  if (board.querySelector('.card')) return;
+  if (board.querySelector('.card, .list-row')) return;
   board.dataset.loading = '1';
+  if (state.view === 'list') {
+    const cols = visibleColumns();
+    board.innerHTML = `<div class="list-view"><table class="list-table" style="min-width:${cols.reduce((n, c) => n + c.w, 0)}px"><colgroup>${cols.map((c) => `<col style="width:${c.w}px">`).join('')}<col></colgroup>${listHead(cols)}<tbody><tr class="list-empty-row"><td colspan="${(cols.length || 1) + 1}">读取工单…</td></tr></tbody></table></div>`;
+    return;
+  }
   board.innerHTML = state.statuses
     .map(
       (status, i) => `<section class="col" data-status="${esc(status)}" style="--i:${i}">
@@ -195,6 +874,8 @@ function renderSkeleton() {
 }
 
 async function load() {
+  // 正在拖列宽时别重画表格，否则拖到一半宽度被重置
+  if (document.body.classList.contains('is-col-resizing')) return;
   try {
     const params = new URLSearchParams();
     if (state.filter.q) params.set('q', state.filter.q);
@@ -206,7 +887,9 @@ async function load() {
     if (watchPayload?.watch) state.watch = watchPayload.watch;
     render();
     renderWatch();
-    const suffix = state.filter.q ? `（搜索「${state.filter.q}」）` : '';
+    updateFilterCount();
+    const shown = issues.filter((i) => matchesFilter(i)).length;
+    const suffix = hasFilter() ? `（筛选后 ${shown} 张）` : '';
     hint(`共 ${issues.length} 张${suffix} · 自动刷新 ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     hint(`加载失败：${e.message}`, true);
@@ -286,6 +969,8 @@ async function openIssue(id, { keepTab = false } = {}) {
   state.comments = comments;
 
   document.body.dataset.mode = 'issue';
+  $('#filterbar').hidden = true;
+  closePanels();
   $('#issuePage').hidden = false;
   $('#issuePage').dataset.status = issue.status; // 顶部那道状态线
   $('#panelId').textContent = issue.id;
@@ -1004,6 +1689,7 @@ async function sendComment() {
 // —— 自动刷新：看板常刷；面板只在没人输入时悄悄刷新 ——
 async function tick() {
   if (!state.authed) return; // 停在登录页时别空转
+  if (document.body.classList.contains('is-col-resizing')) return; // 拖列宽时别抢着重画
   if ($('#create').open || $('#settingsDialog').open) return;
   if (document.body.dataset.mode === 'board') {
     await load();
@@ -1161,9 +1847,15 @@ async function saveSettings(event) {
   }
 }
 
-// 点卡片 = 打开这张卡的独立地址（能直接复制给别人；Ctrl/⌘ 点会开新标签页）
+// 点卡片 / 列表行 = 打开这张卡的独立地址；标题本身就是链接，中键 / Ctrl 点能开新标签页
 $('#board').addEventListener('click', (e) => {
-  const el = e.target.closest('.card');
+  const sortBtn = e.target.closest('.sort-btn');
+  if (sortBtn) {
+    toggleSort(sortBtn.dataset.sort);
+    return;
+  }
+  if (e.target.closest('a')) return; // 链接交给浏览器，别抢它的默认行为
+  const el = e.target.closest('.card, .list-row');
   if (!el) return;
   location.assign(`/issue/${encodeURIComponent(el.dataset.id)}`);
 });
@@ -1220,15 +1912,253 @@ $('#board').addEventListener('drop', async (e) => {
   const ok = await patch({ status }, id);
   hint(ok ? `「${issue.title}」从「${from}」移到「${statusLabel(status)}」` : '改状态失败', !ok);
 });
+// —— 搜索 / 筛选条 / 预设 ——
+
 $('#q').addEventListener('input', (e) => {
   state.filter.q = e.target.value.trim();
+  renderFilterbar();
   clearTimeout(state.qTimer);
   state.qTimer = setTimeout(load, 300);
 });
-$('#readyOnly').addEventListener('change', (e) => {
-  state.filter.ready = e.target.checked;
-  render();
+
+$('#presetChips').addEventListener('click', (e) => {
+  const del = e.target.closest('[data-del]');
+  if (del) {
+    e.stopPropagation();
+    deletePreset(del.dataset.del);
+    return;
+  }
+  const btn = e.target.closest('[data-preset]');
+  if (btn) {
+    const preset = allPresets().find((p) => p.id === btn.dataset.preset);
+    if (preset) applyPreset(preset);
+    return;
+  }
+  if (e.target.closest('#clearFilter')) applyFilter(emptyFilter());
+  else if (e.target.closest('#savePreset')) askPresetName();
 });
+
+// 自建的预设双击改名（内置的三条不给改）
+$('#presetChips').addEventListener('dblclick', (e) => {
+  const btn = e.target.closest('[data-preset]');
+  const preset = btn ? (state.prefs.presets ?? []).find((p) => p.id === btn.dataset.preset) : null;
+  if (!preset) return;
+  const name = window.prompt('给这个预设改个名字', preset.name);
+  if (name === null) return;
+  const clean = name.trim().slice(0, 30);
+  if (!clean) return;
+  preset.name = clean;
+  savePrefsSoon();
+  renderFilterbar();
+  hint(`预设改名为「${clean}」`);
+});
+
+$('#filterBtn').addEventListener('click', () => openFilterPanel());
+$('#colsBtn').addEventListener('click', () => openColsPanel());
+
+$('#filterPanel').addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) return closePanels();
+  if (e.target.closest('[data-clear]')) {
+    applyFilter(emptyFilter());
+    closePanels();
+    openFilterPanel(); // 重画一次，把勾选状态清干净
+  }
+});
+
+$('#filterPanel').addEventListener('change', (e) => {
+  const box = e.target.closest('input[type="checkbox"][data-field]');
+  if (box) {
+    const field = box.dataset.field;
+    const value = field === 'priority' ? Number(box.value) : box.value;
+    const set = new Set(state.filter[field]);
+    if (box.checked) set.add(value);
+    else set.delete(value);
+    state.filter[field] = [...set];
+    afterFilterChange();
+    return;
+  }
+  if (e.target.closest('#fPeriod')) {
+    const period = e.target.value;
+    state.filter.updated.period = period;
+    const custom = period === 'custom';
+    if ($('#fFrom')) $('#fFrom').disabled = !custom;
+    if ($('#fTo')) $('#fTo').disabled = !custom;
+    if (!custom) {
+      state.filter.updated.from = '';
+      state.filter.updated.to = '';
+    }
+    afterFilterChange();
+    return;
+  }
+  if (e.target.closest('#fFrom') || e.target.closest('#fTo')) {
+    state.filter.updated.from = $('#fFrom')?.value ?? '';
+    state.filter.updated.to = $('#fTo')?.value ?? '';
+    afterFilterChange();
+  }
+});
+
+// 面板里的关键词和顶栏搜索是同一个条件，两边同步
+$('#filterPanel').addEventListener('input', (e) => {
+  if (e.target.id !== 'fq') return;
+  state.filter.q = e.target.value.trim();
+  const q = $('#q');
+  if (q) q.value = e.target.value;
+  renderFilterbar();
+  clearTimeout(state.qTimer);
+  state.qTimer = setTimeout(load, 300);
+});
+
+$('#colsPanel').addEventListener('change', (e) => {
+  const box = e.target.closest('input[data-col]');
+  if (!box) return;
+  const col = columnPrefs().find((c) => c.id === box.dataset.col);
+  if (!col) return;
+  col.hidden = !box.checked;
+  state.prefs.columns = columnPrefs();
+  render();
+  savePrefsSoon();
+});
+
+$('#colsPanel').addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) return closePanels();
+  if (e.target.closest('[data-reset]')) {
+    state.prefs.columns = defaultColumns();
+    render();
+    closePanels();
+    openColsPanel();
+    savePrefsSoon();
+    hint('列和列宽已恢复默认');
+  }
+});
+
+// 点面板外面收起（点在按钮上不算，否则一开就关）
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#filterPanel, #colsPanel, #filterBtn, #colsBtn')) return;
+  closePanels();
+});
+
+// —— 列表：按住表头拖动换列序，拖右边界改列宽 ——
+
+const COL_MIN_W = 56;
+const COL_MAX_W = 720;
+let colResize = null;
+let colDrag = null;
+let suppressClick = false;
+
+// 拖完列序会跟一次 click：在捕获阶段吃掉，不落到排序按钮上
+document.addEventListener(
+  'click',
+  (e) => {
+    if (!suppressClick) return;
+    suppressClick = false;
+    e.stopPropagation();
+    e.preventDefault();
+  },
+  true,
+);
+
+$('#board').addEventListener('pointerdown', (e) => {
+  if (e.button !== undefined && e.button !== 0) return;
+  // 最右边那一窄条 = 改宽度；表头其余地方按住拖动 = 换列序，点一下 = 排序
+  const handle = e.target.closest?.('.col-resizer');
+  const th = handle?.closest('th[data-col]');
+  if (th) {
+    e.preventDefault();
+    colResize = { id: th.dataset.col, x: e.clientX, w: th.getBoundingClientRect().width, th, next: null };
+    document.body.classList.add('is-col-resizing');
+    return;
+  }
+  const head = e.target.closest?.('th[data-col]');
+  if (!head) return;
+  colDrag = { from: head.dataset.col, th: head, x: e.clientX, y: e.clientY, moved: false };
+});
+
+document.addEventListener('pointermove', (e) => {
+  if (colDrag) {
+    if (!colDrag.moved && Math.hypot(e.clientX - colDrag.x, e.clientY - colDrag.y) < 5) return;
+    if (!colDrag.moved) {
+      colDrag.moved = true;
+      suppressClick = true; // 松手后浏览器还会补一次 click，别让它顺手排序
+      document.body.classList.add('is-col-dragging');
+      colDrag.th.classList.add('is-dragging');
+      getSelection()?.removeAllRanges(); // 拖动时别把表头文字选中
+    }
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('th[data-col]');
+    for (const other of document.querySelectorAll('th.is-drop')) if (other !== over) other.classList.remove('is-drop');
+    if (over && over !== colDrag.th) over.classList.add('is-drop');
+    return;
+  }
+  if (!colResize) return;
+  const next = Math.max(COL_MIN_W, Math.min(COL_MAX_W, Math.round(colResize.w + (e.clientX - colResize.x))));
+  colResize.next = next;
+  const table = colResize.th.closest('table');
+  const index = [...colResize.th.parentElement.children].indexOf(colResize.th);
+  // 只改 <col>：表头跟着列走，不用等重画
+  const col = table?.querySelectorAll('colgroup col')[index];
+  if (col) col.style.width = `${next}px`;
+});
+
+document.addEventListener('pointerup', (e) => {
+  if (colDrag) {
+    const drag = colDrag;
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('th[data-col]');
+    colDrag = null;
+    document.body.classList.remove('is-col-dragging');
+    drag.th.classList.remove('is-dragging');
+    for (const el of document.querySelectorAll('th.is-drop')) el.classList.remove('is-drop');
+    // 拖完浏览器可能补一次 click；这一发吃掉，但别让它留到下一次真正的点击
+    if (drag.moved) {
+      setTimeout(() => {
+        suppressClick = false;
+      }, 0);
+    }
+    if (!drag.moved || !over || over === drag.th) return;
+    const rect = over.getBoundingClientRect();
+    moveColumn(drag.from, over.dataset.col, e.clientX > rect.left + rect.width / 2);
+    return;
+  }
+  if (!colResize) return;
+  const { id, next } = colResize;
+  colResize = null;
+  document.body.classList.remove('is-col-resizing');
+  if (!next) return;
+  const col = state.prefs.columns.find((c) => c.id === id);
+  if (!col) return;
+  col.w = next;
+  savePrefsSoon();
+});
+
+// 双击边界 = 这列恢复默认宽度
+$('#board').addEventListener('dblclick', (e) => {
+  const handle = e.target.closest?.('.col-resizer');
+  if (!handle) return;
+  const id = handle.dataset.resize;
+  const col = state.prefs.columns.find((c) => c.id === id);
+  if (!col) return;
+  col.w = COLUMN_BY_ID[id].w;
+  render();
+  savePrefsSoon();
+  hint(`「${COLUMN_BY_ID[id].label}」列宽已恢复默认`);
+});
+
+function moveColumn(fromId, toId, after) {
+  if (fromId === toId) return;
+  const cols = columnPrefs();
+  const [moved] = cols.splice(
+    cols.findIndex((c) => c.id === fromId),
+    1,
+  );
+  if (!moved) return;
+  const at = cols.findIndex((c) => c.id === toId);
+  if (at < 0) return;
+  cols.splice(after ? at + 1 : at, 0, moved);
+  state.prefs.columns = cols;
+  render();
+  savePrefsSoon();
+  hint(`「${COLUMN_BY_ID[moved.id].label}」挪到了「${COLUMN_BY_ID[toId].label}」${after ? '后面' : '前面'}`);
+}
+$('#viewBoard').addEventListener('click', () => setView('board'));
+$('#viewList').addEventListener('click', () => setView('list'));
 $('#tabIssue').addEventListener('click', () => showTab('issue'));
 $('#tabTrace').addEventListener('click', () => showTab('trace'));
 $('#tabSession').addEventListener('click', () => showTab('session'));
@@ -1287,6 +2217,7 @@ document.addEventListener('keydown', (e) => {
   const t = e.target;
   const typing = t?.closest?.('input, textarea, select, [contenteditable="true"]');
   const dialogOpen = $('#create').open || $('#settingsDialog').open || $('#projectDialog').open || $('#lightbox').open;
+  if (e.key === 'Escape' && !dialogOpen) closePanels(); // 先收筛选/列面板，别一按就离开页面
   if (e.key === 'Escape' && !dialogOpen && document.body.dataset.mode === 'issue') {
     e.preventDefault();
     location.assign('/');
@@ -1405,6 +2336,18 @@ $('#gateCopy').addEventListener('click', async () => {
   }
 });
 
+// 弹窗：点背景或右上角 × 就能关，不必滚到底部找「取消」
+for (const dialog of document.querySelectorAll('dialog.dialog')) {
+  dialog.addEventListener('click', (e) => {
+    if (e.target.closest?.('[data-close]')) {
+      dialog.close();
+      return;
+    }
+    // 内容都在 form 里（dialog 自身没有 padding），点到 dialog = 点到背景
+    if (e.target === dialog) dialog.close();
+  });
+}
+
 $('#settingsCancel').addEventListener('click', () => $('#settingsDialog').close());
 $('#settingsForm').addEventListener('submit', saveSettings);
 
@@ -1429,6 +2372,11 @@ async function submitProject(event) {
   try {
     const p = await api('/api/project', { method: 'POST', body: JSON.stringify({ dir }) });
     applyProject(p);
+    closePanels();
+    // 换项目就清空筛选：上一个项目的「P1」留下来只会让人以为新项目没单
+    state.filter = emptyFilter();
+    $('#q').value = '';
+    await loadPrefs();
     if (document.body.dataset.mode === 'issue') location.assign('/'); // 换了项目，当前这张卡不属于它了
     $('#projectDialog').close();
     await load();
@@ -1463,6 +2411,7 @@ async function enterBoard() {
       hint(`项目 ${p.dir}`);
     })
     .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
+  await loadPrefs(); // 列/列宽/预设按「人 + 项目」来，换人换项目都是另一套
 
   const issueId = issueIdFromPath();
   if (issueId) {
@@ -1485,6 +2434,7 @@ async function showBoard() {
   closeIssueStream();
   sessionClear();
   document.body.dataset.mode = 'board';
+  $('#filterbar').hidden = false;
   $('#issuePage').hidden = true;
   state.current = null;
   state.comments = [];
@@ -1494,6 +2444,8 @@ async function showBoard() {
 }
 
 (async function boot() {
+  applyViewChrome();
+  syncViewUrl(state.view);
   let me = { auth: false, user: null, firstRun: false };
   try {
     me = await api('/api/auth/me');

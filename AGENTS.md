@@ -24,6 +24,8 @@
 
 **账号也属于这台机器，不属于项目**：`~/.hlwd/users.json`（密码只存 scrypt 加盐哈希）与 `~/.hlwd/sessions.json`（登录会话，重启不踢人）。一个人一个身份，切项目还是他。
 
+**视图偏好也属于这台机器**：`~/.hlwd/prefs/<用户名>.json` 存这个人「每个项目」的列表列、列宽、排序、筛选预设（`WF_AUTH=off` 时是 `_local.json`）。它是可以随时重算的视图配置，不是业务数据，所以不进项目目录、不进 beads。
+
 ## 3. 产物布局
 
 ```
@@ -101,6 +103,21 @@ publicUser(user) -> {name, display, role, createdAt}   # 对外的唯一形状�
 - 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，改状态补一条 `状态：A → B` 的评论。
 - `WF_AUTH=off` 关掉登录（单机自用）：不拦接口，写操作不带 actor，评论按 bd 的默认值记。
 - 权限**还没做**：`role` 已经存在（owner / member），以后判权限只改 auth.mjs，不动页面。
+
+**UserPrefs**（`web/prefs.mjs`，只有 web 读写）
+
+```
+readPrefs(user) -> {version, defaults, projects}
+prefsFor(user, projectDir) -> {list: {columns, sort, presets}}
+savePrefs(user, projectDir, {list}) -> {list}
+```
+
+- `columns`: `[{id, w, hidden}]`，id 取自固定候选集（status / priority / type / title / assignee / createdBy / created / updated / labels / comments / ready / id），`w` 夹在 56–720。
+- `sort`: `{key, dir}`，单列排序；`presets`: `[{id, name, filter}]`，最多 30 条。
+- `filter` 只有 AND 组合：`q / ready / status[] / priority[] / type[] / assignee[] / createdBy[] / labels[] / updated{period, from, to}`，没有 OR、没有表达式。
+- 存的键是「项目绝对路径」，所以换项目是另一套；新项目没见过就继承 `defaults` 里的列与排序（每次保存都会把 `defaults` 滚成刚存的那套）。预设不继承：它是给某个项目存的筛选。
+- 校验在服务端做：不认识的值一律丢掉，文件被手改坏也只是回落到默认列，不会让页面崩。
+- HTTP 面只有 `GET /api/prefs` 与 `PUT /api/prefs`，只读写**当前登录人**自己的文件，不暴露别人的。
 
 **AgentRunner**（`engine` 内部，对外只暴露一个函数）
 
@@ -197,6 +214,7 @@ project.mjs        # 项目层：打开目录、补齐 .hlwd/、配置与提示�
 package.json       # 只有 scripts，没有依赖
 .hlwd/ .beads/     # 本仓库自己作为项目时的配置与工单
 web/               # 页面 + beads 适配层
+  prefs.mjs        # 用户偏好：列表列 / 列宽 / 排序 / 筛选预设（~/.hlwd/prefs/<用户>.json）
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
   runs.mjs         # 只读端口：把 <项目>/.hlwd/runs 与 journal 给看板
   sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
@@ -242,6 +260,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 依赖解析：要用能找到的 `bd` 与 AI CLI；`agent-tools` 用仓库自带的 `vendor/agent-tools`（`AGENT_TOOLS_BIN` 可覆盖）。
 - 首次打开空项目：`bd init` 会建 `.beads/` 并 `git init` + 提交一次（bd 基于 git 工作），项目的 `.gitignore` 也是它写的。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
+- 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列，「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
 - **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「待接 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
 - 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。
 

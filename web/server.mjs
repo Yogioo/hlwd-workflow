@@ -25,6 +25,7 @@ import {
   savePrompts,
 } from '../project.mjs';
 import * as beads from './beads.mjs';
+import { prefsFor, savePrefs } from './prefs.mjs';
 import {
   AuthError,
   SESSION_COOKIE,
@@ -715,6 +716,23 @@ async function route(req, res, url) {
   }
 
   await project(); // 以下接口都作用于当前项目
+
+  // 用户偏好（列表列 / 列宽 / 排序 / 筛选预设）：只读写当前登录人自己的文件。
+  // 没登录（WF_AUTH=off）时落到 ~/.hlwd/prefs/_local.json。
+  if (pathname === '/api/prefs') {
+    const p = await project();
+    const dir = path.resolve(p.dir);
+    if (req.method === 'GET') return json(res, 200, await prefsFor(user, dir));
+    if (req.method === 'PUT') {
+      const body = await readBody(req);
+      try {
+        return json(res, 200, await savePrefs(user, dir, body));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
 
   // 自动流水线：有就绪单就自己开干，不用人守着终端
   if (pathname === '/api/watch') {

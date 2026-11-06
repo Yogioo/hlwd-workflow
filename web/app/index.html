@@ -61,11 +61,10 @@
           <input id="q" type="search" placeholder="搜标题、描述、评论" />
           <kbd>/</kbd>
         </label>
-        <label class="switch">
-          <input id="readyOnly" type="checkbox" />
-          <span class="switch-track" aria-hidden="true"></span>
-          只看可派
-        </label>
+        <div class="seg view-switch" role="group" aria-label="看板视图">
+          <button id="viewBoard" class="seg-btn active" type="button" aria-pressed="true" title="卡片按状态分列，可拖动改状态">看板</button>
+          <button id="viewList" class="seg-btn" type="button" aria-pressed="false" title="一行一张单，能看到负责人、创建人、更新时间">列表</button>
+        </div>
         <button id="watch" type="button" class="ghost" title="自动流水线">
           <span class="live-dot" aria-hidden="true"></span><span id="watchText">自动流水线：关</span>
         </button>
@@ -79,6 +78,16 @@
       </div>
     </header>
 
+    <section id="filterbar" class="filterbar" hidden>
+      <div id="presetChips" class="preset-row"></div>
+      <div class="filter-tools">
+        <button id="filterBtn" type="button" class="ghost tiny" aria-expanded="false" title="按状态、负责人、标签、时间等条件筛选">筛选</button>
+        <button id="colsBtn" type="button" class="ghost tiny" hidden aria-expanded="false" title="显示哪些列">列</button>
+      </div>
+    </section>
+    <div id="filterPanel" class="popover" role="dialog" aria-label="高级筛选" hidden></div>
+    <div id="colsPanel" class="popover" role="dialog" aria-label="显示哪些列" hidden></div>
+
     <main id="board" class="board"></main>
 
     <footer class="statusbar">
@@ -90,7 +99,9 @@
           <p><b>执行中</b> AI 正在改这个工作区。</p>
           <p><b>待审</b> 改完并通过门禁，等人验收。</p>
           <p><b>已完成</b> 已提交并关闭，点开卡片看全链路。</p>
-          <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 卡片可拖到别的列改状态</p>
+          <p><b>看板 / 列表</b> 右上角切换：看板按状态分列、卡片可拖；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
+          <p><b>筛选</b> 顶栏下面的「筛选」按字段组合过滤，结果同时作用于看板和列表；常看的条件「存为预设」，点一下切回来。列与列宽是列表自己的事，存在你名下（<code>~/.hlwd/prefs/</code>），换项目各是各的。</p>
+          <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 看板可拖卡改状态 · 列表点表头排序</p>
         </div>
       </details>
     </footer>
@@ -183,6 +194,7 @@
     </dialog>
 
     <dialog id="create" class="dialog">
+      <button type="button" class="dialog-x" data-close aria-label="关闭">×</button>
       <form id="createForm" method="dialog">
         <h2>新建工单</h2>
         <label>标题<input name="title" required maxlength="200" /></label>
@@ -209,6 +221,7 @@
     </dialog>
 
     <dialog id="settingsDialog" class="dialog wide">
+      <button type="button" class="dialog-x" data-close aria-label="关闭设置">×</button>
       <form id="settingsForm" method="dialog">
         <h2>设置</h2>
         <p class="dialog-note">改的是仓库根的 <code>config.json</code>：状态/优先级中文名 + AI 执行配置。保存后看板立即生效，engine 下次执行也用它。</p>
@@ -273,6 +286,7 @@
     </dialog>
 
     <dialog id="projectDialog" class="dialog">
+      <button type="button" class="dialog-x" data-close aria-label="关闭">×</button>
       <form id="projectForm" method="dialog">
         <h2>打开项目</h2>
         <p class="dialog-note">填一个本地目录的绝对路径。目录里没有 <code>.hlwd/</code> 就自动建，并把配置与提示词写进去；没有 <code>.beads/</code> 就顺手 <code>bd init</code>。</p>
