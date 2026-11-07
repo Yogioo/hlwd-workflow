@@ -62,7 +62,7 @@
           <kbd>/</kbd>
         </label>
         <div class="seg view-switch" role="group" aria-label="看板视图">
-          <button id="viewBoard" class="seg-btn active" type="button" aria-pressed="true" title="卡片按状态分列，可拖动改状态">看板</button>
+          <button id="viewBoard" class="seg-btn active" type="button" aria-pressed="true" title="卡片按 AI 工作流进度分列">看板</button>
           <button id="viewList" class="seg-btn" type="button" aria-pressed="false" title="一行一张单，能看到负责人、创建人、更新时间">列表</button>
         </div>
         <button id="watch" type="button" class="ghost" title="自动流水线">
@@ -81,7 +81,7 @@
     <section id="filterbar" class="filterbar" hidden>
       <div id="presetChips" class="preset-row"></div>
       <div class="filter-tools">
-        <button id="filterBtn" type="button" class="ghost tiny" aria-expanded="false" title="按状态、负责人、标签、时间等条件筛选">筛选</button>
+        <button id="filterBtn" type="button" class="ghost tiny" aria-expanded="false" title="按进度、负责人、标签、时间等条件筛选">筛选</button>
         <button id="colsBtn" type="button" class="ghost tiny" hidden aria-expanded="false" title="显示哪些列">列</button>
       </div>
     </section>
@@ -96,12 +96,13 @@
         <summary>怎么看这张板</summary>
         <div class="legend-body">
           <p><b>待接</b> 可以派给 AI。开「自动流水线」或跑 <code>node wf.mjs work</code>。</p>
-          <p><b>执行中</b> AI 正在改这个工作区。</p>
-          <p><b>待审</b> 改完并通过门禁，等人验收。</p>
+          <p><b>执行中</b> AI 已接单，正在执行 / 过门禁。卡片上的徽章会显示具体到哪一步。</p>
+          <p><b>审查中</b> 执行完成，正在跑审查回合。</p>
           <p><b>已完成</b> 已提交并关闭，点开卡片看全链路。</p>
-          <p><b>看板 / 列表</b> 右上角切换：看板按状态分列、卡片可拖；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
+          <p><b>标签</b> 是工单唯一的自定义分类；状态由 engine 的工作流管理，不再作为工单字段配置。</p>
+          <p><b>看板 / 列表</b> 右上角切换：看板按工作流分列；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
           <p><b>筛选</b> 顶栏下面的「筛选」按字段组合过滤，结果同时作用于看板和列表；常看的条件「存为预设」，点一下切回来。列与列宽是列表自己的事，存在你名下（<code>~/.hlwd/prefs/</code>），换项目各是各的。</p>
-          <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 看板可拖卡改状态 · 列表点表头排序</p>
+          <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 列表点表头排序</p>
         </div>
       </details>
     </footer>
@@ -167,16 +168,38 @@
 
           <aside class="issue-rail">
             <div class="rail-group">
-              <label>状态<select id="panelStatus"></select></label>
+              <div class="rail-label">AI 进度</div>
+              <div id="panelWorkflow" class="panel-workflow"></div>
+            </div>
+            <div class="rail-group">
               <label>优先级<select id="panelPriority"></select></label>
             </div>
             <div class="rail-group">
               <button id="panelDispatch" type="button" class="primary">让 AI 干这个</button>
               <span id="panelDispatchHint" class="dialog-note"></span>
             </div>
-            <div class="rail-group rail-inline">
-              <input id="panelLabel" placeholder="加标签，逗号分隔" />
-              <button id="panelLabelAdd" type="button">加</button>
+            <div class="rail-group">
+              <div class="rail-label">标签</div>
+              <div id="panelLabels" class="chips panel-labels"></div>
+              <div class="label-combo" id="labelCombo">
+                <div class="rail-inline">
+                  <input
+                    id="panelLabel"
+                    placeholder="搜标签 / 输入新标签"
+                    autocomplete="off"
+                    role="combobox"
+                    aria-expanded="false"
+                    aria-controls="labelMenu"
+                    aria-autocomplete="list"
+                  />
+                  <button id="panelLabelAdd" type="button">加</button>
+                </div>
+                <div id="labelMenu" class="label-menu" role="listbox" aria-label="标签候选" hidden></div>
+              </div>
+            </div>
+            <div class="rail-group">
+              <button id="panelClose" type="button" class="ghost">关闭工单</button>
+              <span id="panelCloseHint" class="dialog-note"></span>
             </div>
             <p class="rail-note">这张卡可以直接分享：把地址栏复制给别人，他打开就能看到。</p>
           </aside>
@@ -212,7 +235,25 @@
             <select name="priority" id="createPriority"></select>
           </label>
         </div>
-        <label>标签（逗号分隔）<input name="labels" placeholder="ready-for-agent" /></label>
+        <div class="label-field">
+          <span>标签</span>
+          <div id="createLabels" class="chips" hidden></div>
+          <div class="label-combo" id="createLabelCombo">
+            <div class="rail-inline">
+              <input
+                id="createLabel"
+                placeholder="搜标签 / 输入新标签"
+                autocomplete="off"
+                role="combobox"
+                aria-expanded="false"
+                aria-controls="createLabelMenu"
+                aria-autocomplete="list"
+              />
+              <button id="createLabelAdd" type="button">加</button>
+            </div>
+            <div id="createLabelMenu" class="label-menu" role="listbox" aria-label="标签候选" hidden></div>
+          </div>
+        </div>
         <menu>
           <button type="button" class="ghost" id="createCancel">取消</button>
           <button type="submit" class="primary">创建</button>
@@ -220,69 +261,110 @@
       </form>
     </dialog>
 
-    <dialog id="settingsDialog" class="dialog wide">
+    <dialog id="settingsDialog" class="dialog settings-dialog">
       <button type="button" class="dialog-x" data-close aria-label="关闭设置">×</button>
-      <form id="settingsForm" method="dialog">
-        <h2>设置</h2>
-        <p class="dialog-note">改的是仓库根的 <code>config.json</code>：状态/优先级中文名 + AI 执行配置。保存后看板立即生效，engine 下次执行也用它。</p>
-
-        <h3>状态名称</h3>
-        <div id="statusLabels" class="settings-grid"></div>
-
-        <h3>优先级名称</h3>
-        <div id="priorityLabels" class="settings-grid"></div>
-
-        <h3>AI 执行</h3>
-        <div class="settings-grid">
-          <label>执行器
-            <select name="runner">
-              <option value="pi">pi</option>
-              <option value="codex">codex</option>
-              <option value="agent">cursor agent</option>
-            </select>
-          </label>
-          <label>沙箱
-            <select name="sandbox">
-              <option value="workspace-write">workspace-write（可改文件）</option>
-              <option value="read-only">read-only（只读）</option>
-              <option value="danger-full-access">danger-full-access（全权限）</option>
-            </select>
-          </label>
-          <label>模型（空=默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
-          <label>思考强度（空=默认）<input name="thinking" placeholder="如 high" /></label>
-          <label>最多轮数<input name="attempts" type="number" min="1" max="5" /></label>
-          <label>AI 账号名<input name="actor" placeholder="ai" /></label>
-          <label>可派标签<input name="readyLabel" placeholder="ready-for-agent" /></label>
-          <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
-          <label class="chk-row"><input name="autoWatch" type="checkbox" /> 看板启动时自动开「自动流水线」</label>
-        </div>
-
-        <h3>门禁（项目的 .hlwd/gate.mjs）</h3>
-        <p class="dialog-note">engine 每轮都按 <b>执行 → 门禁 → 审查</b> 跑它：返回 <code>true</code> 才进审查，<code>{ pass: false, reason }</code> 就把 reason 打回执行端继续改。默认 always true，改这个文件就能加测试/构建/自定义检查。</p>
-        <div class="gate-row">
-          <code id="gatePath" class="mono">—</code>
-          <div class="gate-actions">
-            <button type="button" class="ghost" id="gateOpen">打开脚本</button>
-            <button type="button" class="ghost" id="gateReveal">打开所在目录</button>
-            <button type="button" class="ghost" id="gateCopy">复制路径</button>
+      <div class="settings-shell">
+        <aside class="settings-side">
+          <div class="settings-side-head">
+            <h2>设置</h2>
+            <p class="dialog-note">当前项目 <span id="settingsProject" class="mono">—</span></p>
           </div>
-        </div>
+          <nav id="settingsNav" class="settings-nav" aria-label="设置分区">
+            <button type="button" data-sec="tags" class="active">标签库</button>
+            <button type="button" data-sec="engine">AI 执行</button>
+            <button type="button" data-sec="gate">门禁</button>
+            <button type="button" data-sec="prompts">提示词</button>
+          </nav>
+          <p class="settings-side-note">工作流状态由 engine 固定管理：待接 → 执行 → 门禁 → 审查 → 完成。它不再作为工单字段配置。</p>
+        </aside>
 
-        <h3>提示词（存在项目的 .hlwd/prompts/）</h3>
-        <div class="settings-grid one">
-          <label>执行提示词 execute.md
-            <textarea name="prompt_execute" rows="10" spellcheck="false"></textarea>
-          </label>
-          <label>审查提示词 review.md
-            <textarea name="prompt_review" rows="10" spellcheck="false"></textarea>
-          </label>
-        </div>
+        <div class="settings-main">
+          <section class="settings-panel" data-panel="tags">
+            <div class="settings-head">
+              <h3>标签库</h3>
+              <p class="dialog-note">标签是工单唯一的自定义分类；<code>ready-for-agent</code> 是 engine 的派单开关，受保护。使用数实时从 beads 算，不另外存。</p>
+            </div>
+            <form id="tagAddForm" class="tag-add">
+              <input name="name" placeholder="标签名，如 bug / area:web" required maxlength="40" />
+              <input name="color" type="color" value="#7fb0c9" title="标签颜色" />
+              <input name="desc" placeholder="说明（可选）" maxlength="200" />
+              <button type="submit" class="primary">添加</button>
+            </form>
+            <div id="tagList" class="tag-list"><div class="empty">读取标签中…</div></div>
+          </section>
 
-        <menu>
-          <button type="button" class="ghost" id="settingsCancel">取消</button>
-          <button type="submit" class="primary">保存</button>
-        </menu>
-      </form>
+          <section class="settings-panel" data-panel="engine" hidden>
+            <div class="settings-head">
+              <h3>AI 执行</h3>
+              <p class="dialog-note">保存后看板立即生效，engine 下次执行也用它。优先级仍是 bd 原生 P0–P4，固定名称。可派标签建议去「标签库」改名（会级联历史工单）；这里直接改只影响以后接单。</p>
+            </div>
+            <form id="engineForm">
+              <div class="settings-grid">
+                <label>执行器
+                  <select name="runner">
+                    <option value="pi">pi</option>
+                    <option value="codex">codex</option>
+                    <option value="agent">cursor agent</option>
+                  </select>
+                </label>
+                <label>沙箱
+                  <select name="sandbox">
+                    <option value="workspace-write">workspace-write（可改文件）</option>
+                    <option value="read-only">read-only（只读）</option>
+                    <option value="danger-full-access">danger-full-access（全权限）</option>
+                  </select>
+                </label>
+                <label>模型（空=默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
+                <label>思考强度（空=默认）<input name="thinking" placeholder="如 high" /></label>
+                <label>最多轮数<input name="attempts" type="number" min="1" max="5" /></label>
+                <label>单轮超时（分钟）<input name="timeoutMin" type="number" min="1" max="240" /></label>
+                <label>AI 账号名<input name="actor" placeholder="ai" /></label>
+                <label>可派标签<input name="readyLabel" placeholder="ready-for-agent" /></label>
+                <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
+                <label class="chk-row"><input name="autoWatch" type="checkbox" /> 看板启动时自动开「自动流水线」</label>
+              </div>
+              <menu>
+                <button type="submit" class="primary">保存执行配置</button>
+              </menu>
+            </form>
+          </section>
+
+          <section class="settings-panel" data-panel="gate" hidden>
+            <div class="settings-head">
+              <h3>门禁</h3>
+              <p class="dialog-note">engine 每轮都按 <b>执行 → 门禁 → 审查</b> 跑它：返回 <code>true</code> 才进审查，<code>{ pass: false, reason }</code> 就把 reason 打回执行端继续改。默认 always true，改这个文件就能加测试/构建/自定义检查。</p>
+            </div>
+            <div class="gate-row">
+              <code id="gatePath" class="mono">—</code>
+              <div class="gate-actions">
+                <button type="button" class="ghost" id="gateOpen">打开脚本</button>
+                <button type="button" class="ghost" id="gateReveal">打开所在目录</button>
+                <button type="button" class="ghost" id="gateCopy">复制路径</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-panel="prompts" hidden>
+            <div class="settings-head">
+              <h3>提示词</h3>
+              <p class="dialog-note">存在项目的 <code>.hlwd/prompts/</code>；清空并保存 = 恢复工具自带模板。占位符用 <code>{{ID}}</code> / <code>{{TITLE}}</code> / <code>{{BODY}}</code> / <code>{{HISTORY}}</code> / <code>{{FEEDBACK}}</code> / <code>{{VERDICT}}</code>。</p>
+            </div>
+            <form id="promptForm">
+              <div class="settings-grid one">
+                <label>执行提示词 execute.md
+                  <textarea name="prompt_execute" rows="12" spellcheck="false"></textarea>
+                </label>
+                <label>审查提示词 review.md
+                  <textarea name="prompt_review" rows="12" spellcheck="false"></textarea>
+                </label>
+              </div>
+              <menu>
+                <button type="submit" class="primary">保存提示词</button>
+              </menu>
+            </form>
+          </section>
+        </div>
+      </div>
     </dialog>
 
     <dialog id="projectDialog" class="dialog">

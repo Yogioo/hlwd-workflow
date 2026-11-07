@@ -28,6 +28,7 @@ export async function createManifest({ workdir, cfg, issue }) {
     card: { id: issue.id, title: issue.title, labels: issue.labels, priority: issue.priority },
     runner: cfg.runner,
     actor: cfg.actor,
+    pid: process.pid, // 看板据此判断「执行中」是不是还活着
     startedAt: iso(),
     endedAt: null,
     outcome: 'running',
@@ -38,7 +39,14 @@ export async function createManifest({ workdir, cfg, issue }) {
 
   const save = async () => {
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, 'run.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    const file = path.join(dir, 'run.json');
+    const tmp = `${file}.tmp`;
+    // 看板会随时读 run.json；先写临时文件再换名，避免读到半截 JSON。
+    await fs.writeFile(tmp, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    await fs.rename(tmp, file).catch(async () => {
+      await fs.rm(file, { force: true });
+      await fs.rename(tmp, file);
+    });
   };
 
   const journal = (event, extra = {}) => appendJournal(workdir, { at: iso(), event, card: issue.id, run: runId, ...extra });

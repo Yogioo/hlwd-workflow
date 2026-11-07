@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { ensureProject } from '../project.mjs';
 import * as beads from '../web/beads.mjs';
+import { setProjectDir } from '../web/runs.mjs';
 import { complete, handback } from './flows/complete.mjs';
 import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
@@ -72,6 +73,7 @@ async function main() {
   // 项目缺 .hlwd/ 或 .beads/ 就补齐；engine 的所有路径都以项目目录为基准
   const info = await ensureProject(workdir);
   beads.setWorkdir(workdir);
+  setProjectDir(workdir);
   log(`项目 ${workdir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
 
   const cfg = await loadConfig(workdir);

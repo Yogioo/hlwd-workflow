@@ -14,6 +14,10 @@ const STATE_FILE = path.join(STATE_DIR, 'state.json');
 export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch'];
 const RUNNERS = ['pi', 'codex', 'agent'];
 const SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
+export const MAX_TAGS = 200;
+const TAG_NAME_MAX = 40;
+const TAG_DESC_MAX = 200;
+const TAG_COLOR = /^#[0-9a-f]{6}$/i;
 
 export const DEFAULT_CONFIG = {
   labels: {
@@ -21,6 +25,8 @@ export const DEFAULT_CONFIG = {
     priorities: { 0: '紧急', 1: '高', 2: '中', 3: '低', 4: '最低' },
   },
   columns: ['open', 'in_progress', 'review', 'closed'],
+  // 标签目录只存展示信息（颜色/说明/归档）；哪些单有什么标签仍从 beads 读。
+  tags: [],
   engine: {
     runner: 'pi',
     model: '',
@@ -73,6 +79,57 @@ export async function rememberProject(dir) {
   return setState({ project: dir, recent: next });
 }
 
+// —— 标签目录 ——
+// 标签名是 beads 的原生 label；这里只校验展示层能接受的形状，不去改 bd 的命名规则。
+export function tagName(value, { strict = true } = {}) {
+  const name = String(value ?? '').trim();
+  if (!name) {
+    if (strict) throw new Error('标签名不能为空');
+    return '';
+  }
+  if (name.length > TAG_NAME_MAX) throw new Error(`标签名不能超过 ${TAG_NAME_MAX} 个字符`);
+  if (name.includes(',')) throw new Error('标签名不能包含逗号（新建工单时用逗号分隔标签）');
+  if (/[\u0000-\u001f\u007f]/.test(name)) throw new Error('标签名不能包含控制字符');
+  return name;
+}
+
+export function tagColor(value) {
+  const color = String(value ?? '').trim();
+  if (!color) return '';
+  if (!TAG_COLOR.test(color)) throw new Error('标签颜色只能是 #rrggbb');
+  return color.toLowerCase();
+}
+
+/** 把用户手改的配置收敛成能用的目录：坏的条目丢掉，不把页面带崩。 */
+function cleanTags(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of input) {
+    let name = '';
+    try {
+      name = tagName(raw?.name, { strict: false });
+    } catch {
+      continue;
+    }
+    if (!name || seen.has(name) || out.length >= MAX_TAGS) continue;
+    let color = '';
+    try {
+      color = tagColor(raw?.color);
+    } catch {
+      color = '';
+    }
+    seen.add(name);
+    out.push({
+      name,
+      color,
+      desc: String(raw?.desc ?? '').trim().slice(0, TAG_DESC_MAX),
+      archived: raw?.archived === true,
+    });
+  }
+  return out;
+}
+
 // —— 项目配置 ——
 export async function readProjectConfig(projectDir) {
   const raw = await readJson(configFile(projectDir), {});
@@ -82,6 +139,7 @@ export async function readProjectConfig(projectDir) {
       priorities: { ...DEFAULT_CONFIG.labels.priorities, ...(raw.labels?.priorities ?? {}) },
     },
     columns: Array.isArray(raw.columns) && raw.columns.length ? raw.columns.map(String) : [...DEFAULT_CONFIG.columns],
+    tags: cleanTags(raw.tags),
     engine: { ...DEFAULT_CONFIG.engine, ...(raw.engine ?? {}) },
   };
 }
@@ -128,6 +186,26 @@ export async function saveProjectConfig(projectDir, patch = {}) {
   for (const key of ['model', 'thinking', 'actor', 'readyLabel']) {
     if (engine[key] !== undefined) next.engine[key] = String(engine[key]).trim();
   }
+  if (!next.engine.readyLabel) throw new Error('可派标签不能为空：engine 靠它找就绪单');
+
+  if (patch.tags !== undefined) {
+    if (!Array.isArray(patch.tags)) throw new Error('tags 必须是数组');
+    if (patch.tags.length > MAX_TAGS) throw new Error(`标签最多 ${MAX_TAGS} 个`);
+    const seen = new Set();
+    const tags = [];
+    for (const raw of patch.tags) {
+      const name = tagName(raw?.name);
+      if (seen.has(name)) throw new Error(`标签「${name}」重复`);
+      seen.add(name);
+      tags.push({
+        name,
+        color: tagColor(raw?.color),
+        desc: String(raw?.desc ?? '').trim().slice(0, TAG_DESC_MAX),
+        archived: raw?.archived === true,
+      });
+    }
+    next.tags = tags;
+  }
 
   next.columns = [...new Set([...next.columns, ...Object.keys(next.labels.statuses)])];
   await fsp.mkdir(hlwdDir(projectDir), { recursive: true });
@@ -156,8 +234,17 @@ export async function readPrompts(projectDir) {
 export async function savePrompts(projectDir, prompts = {}) {
   await fsp.mkdir(promptsDir(projectDir), { recursive: true });
   for (const name of Object.keys(DEFAULT_PROMPTS)) {
-    if (typeof prompts[name] !== 'string' || !prompts[name].trim()) continue;
-    await fsp.writeFile(path.join(promptsDir(projectDir), `${name}.md`), prompts[name], 'utf8');
+    if (typeof prompts[name] !== 'string') continue;
+    const file = path.join(promptsDir(projectDir), `${name}.md`);
+    // 清空 = 把工具自带模板写回项目文件。不能只删文件：ensureProject 下次打开
+    // 发现缺文件又会补一份，用户会以为“恢复默认”没生效。
+    if (!prompts[name].trim()) {
+      await fsp.copyFile(DEFAULT_PROMPTS[name], file).catch(async () => {
+        await fsp.writeFile(file, await fsp.readFile(DEFAULT_PROMPTS[name], 'utf8'), 'utf8');
+      });
+      continue;
+    }
+    await fsp.writeFile(file, prompts[name], 'utf8');
   }
   return readPrompts(projectDir);
 }
@@ -457,7 +544,7 @@ export async function ensureProject(inputDir) {
     if (missing.length) await fsp.writeFile(hlwdIgnore, `${currentIgnore.replace(/\n?$/, '\n')}${missing.join('\n')}\n`, 'utf8');
   }
 
-  // review 是工作流用的自定义状态；已配置过就跳过
+  // review 只为旧数据兼容保留：新流程把审查阶段放在 run.json 里，不再写这个工单状态。
   await bd(['config', 'set', 'status.custom', 'review:wip'], dir).catch(() => {});
 
   const config = await readProjectConfig(dir);

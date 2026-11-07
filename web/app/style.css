@@ -1,5 +1,5 @@
 /* 工单看板 —— 值班台。
-   四条状态是流水线上真实的一串珠子：颜色只用来标状态，其余一律安静。
+   四条工作流列是流水线上真实的一串珠子：颜色只用来标进度，其余一律安静。
    排版靠字号与间距分层，不靠圆角、阴影和渐变。 */
 
 :root {
@@ -84,7 +84,19 @@ body {
   margin: 0 5px;
 }
 
-/* 状态 → 颜色的唯一映射：给区块用 data-status，颜色从这里继承 */
+/* 工作流进度 → 颜色；data-status 保留给旧链接/旧数据兜底 */
+[data-workflow="queued"] {
+  --state: var(--open);
+}
+[data-workflow="active"] {
+  --state: var(--run);
+}
+[data-workflow="review"] {
+  --state: var(--review);
+}
+[data-workflow="done"] {
+  --state: var(--done);
+}
 [data-status="open"] {
   --state: var(--open);
 }
@@ -542,10 +554,6 @@ select {
   outline: 2px solid var(--state);
   outline-offset: 2px;
 }
-.card.is-dragging {
-  opacity: 0.4;
-  border-color: var(--line-hi);
-}
 .card.is-fresh {
   border-color: var(--state);
 }
@@ -614,22 +622,234 @@ select {
   background: color-mix(in srgb, var(--run) 20%, transparent);
   color: var(--run);
 }
+.chip-archived {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.chip[style*="--tag"] {
+  border-color: color-mix(in srgb, var(--tag) 45%, transparent);
+  color: color-mix(in srgb, var(--tag) 72%, var(--bone));
+  background: color-mix(in srgb, var(--tag) 12%, transparent);
+}
+.chip-removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 3px;
+}
+.chip-x {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: currentColor;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.55;
+}
+.chip-x:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  opacity: 1;
+}
+.panel-labels {
+  gap: 5px;
+}
+
+/* 标签快选：输入框 + 候选面板（↑↓ / Enter / 鼠标都行）。
+   面板在流内展开而不浮层——右侧栏窄，浮层容易被裁掉。 */
+.label-combo {
+  display: flex;
+  flex-direction: column;
+}
+.label-menu {
+  max-height: 240px;
+  margin-top: 6px;
+  padding: 3px;
+  overflow-y: auto;
+  border: 1px solid var(--line-hi);
+  border-radius: 8px;
+  background: var(--card);
+}
+.label-menu[hidden] {
+  display: none;
+}
+.label-opt-group {
+  padding: 6px 8px 2px;
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.label-opt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--dim);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.label-opt.is-active {
+  background: var(--card-hi);
+  color: var(--bone);
+}
+.label-opt.is-on {
+  color: var(--bone);
+}
+.label-opt.is-archived .label-opt-name {
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+.label-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tag, var(--line-hi));
+}
+.label-opt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.label-opt-meta {
+  flex: none;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.label-opt-check {
+  flex: none;
+  width: 11px;
+  color: var(--done);
+  font-size: 11px;
+  text-align: center;
+  opacity: 0;
+}
+.label-opt.is-on .label-opt-check {
+  opacity: 1;
+}
+.label-opt-create {
+  color: var(--run);
+}
+.label-empty {
+  padding: 8px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.chips[hidden] {
+  display: none;
+}
+
+/* 新建弹窗里的标签：已选的 chip 在上，输入框在下，和工单页同一套快选 */
+.dialog .label-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.dialog .label-field .label-menu {
+  max-height: 190px;
+}
+.dialog .label-field .rail-inline input {
+  color: var(--bone);
+}
+
+/* 工作流进度：卡片/详情页共用。颜色只表示这一步的状态。 */
+.wf {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--line-hi);
+  border-radius: 999px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.wf i {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.wf b {
+  font-weight: 500;
+}
+.wf-detail {
+  overflow: hidden;
+  max-width: 18ch;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+}
+.wf-live {
+  border-color: color-mix(in srgb, var(--run) 42%, transparent);
+  background: color-mix(in srgb, var(--run) 10%, transparent);
+  color: #f3d491;
+}
+.wf-live i {
+  animation: beat 1.8s ease-in-out infinite;
+}
+.wf-ok {
+  border-color: color-mix(in srgb, var(--done) 42%, transparent);
+  background: color-mix(in srgb, var(--done) 10%, transparent);
+  color: #8fd8bc;
+}
+.wf-warn {
+  border-color: color-mix(in srgb, var(--review) 42%, transparent);
+  background: color-mix(in srgb, var(--review) 10%, transparent);
+  color: #d3b9ef;
+}
+.wf-bad {
+  border-color: color-mix(in srgb, var(--oops) 48%, transparent);
+  background: color-mix(in srgb, var(--oops) 10%, transparent);
+  color: #f0a19a;
+}
+.wf-idle {
+  color: var(--dim);
+}
+.card-wf {
+  margin-top: 7px;
+}
+.panel-workflow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.panel-wf-when {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.rail-label {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+button.danger,
+button.ghost.danger {
+  color: #f0a19a;
+}
+button.ghost.danger:hover {
+  border-color: color-mix(in srgb, var(--oops) 55%, transparent);
+  background: color-mix(in srgb, var(--oops) 10%, transparent);
+}
 
 .col-empty {
   color: var(--faint);
   font-size: 12px;
   padding: 8px 0 4px;
-}
-
-/* 拖拽：目标列亮起来，说明「松手就改状态」 */
-.col.is-drop-target {
-  outline: 1px dashed color-mix(in srgb, var(--state) 70%, transparent);
-  outline-offset: 6px;
-  border-radius: 10px;
-}
-.col.is-drop-target .col-body::before {
-  background: var(--state);
-  opacity: 0.6;
 }
 
 .empty {
@@ -1333,6 +1553,7 @@ body[data-mode='issue'] {
   width: 100%;
 }
 .rail-inline {
+  display: flex;
   flex-direction: row;
   align-items: center;
   gap: 6px;
@@ -2006,6 +2227,194 @@ body[data-mode='issue'] {
   font-size: 12px;
   padding: 4px 9px;
 }
+
+/* ---------- 设置：左侧分区 + 标签库 ---------- */
+
+.settings-dialog {
+  width: min(1040px, 94vw);
+  overflow: hidden;
+}
+.settings-shell {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  max-height: 86vh;
+}
+.settings-side {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px 14px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 45%, var(--desk));
+}
+.settings-side-head h2 {
+  margin: 0 0 4px;
+}
+.settings-side-head .dialog-note {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-nav button {
+  padding: 7px 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--dim);
+  text-align: left;
+  font-size: 13px;
+}
+.settings-nav button:hover {
+  background: var(--card);
+  color: var(--bone);
+}
+.settings-nav button.active {
+  border-color: var(--line);
+  background: var(--card);
+  color: var(--bone);
+}
+.settings-side-note {
+  margin: auto 0 0;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.settings-main {
+  min-width: 0;
+  max-height: 86vh;
+  padding: 20px 22px 0;
+  overflow-y: auto;
+}
+.settings-head h3 {
+  margin: 0 0 4px;
+  color: var(--bone);
+  font-size: 15px;
+  letter-spacing: 0;
+}
+.settings-head .dialog-note {
+  margin: 0 0 14px;
+}
+.settings-panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+}
+.settings-panel form menu {
+  margin: 8px 0 0;
+  padding: 14px 0;
+}
+.settings-panel .settings-grid textarea {
+  min-height: 200px;
+}
+.settings-panel form.tag-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+}
+.settings-panel form.tag-add input[type="color"] {
+  width: 44px;
+  height: 34px;
+  padding: 2px;
+  cursor: pointer;
+}
+.tag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0 24px;
+}
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+.tag-row.is-archived {
+  opacity: 0.58;
+}
+.tag-row.is-editing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr) auto auto;
+}
+.tag-swatch {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--tag, var(--line-hi));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tag, var(--line-hi)) 14%, transparent);
+}
+.tag-main {
+  flex: 1;
+  min-width: 0;
+}
+.tag-name {
+  overflow: hidden;
+  color: var(--bone);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-desc {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-count {
+  flex: none;
+  color: var(--faint);
+}
+.tag-actions {
+  display: flex;
+  flex: none;
+  gap: 3px;
+}
+.tag-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line-hi);
+  border-radius: 999px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 15px;
+  vertical-align: 1px;
+}
+.tag-system {
+  border-color: color-mix(in srgb, var(--run) 42%, transparent);
+  color: var(--run);
+}
+.tag-archived {
+  border-color: var(--line-hi);
+  color: var(--dim);
+}
+.tag-protected {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.tag-edit-name,
+.tag-edit-desc {
+  min-width: 0;
+}
+.tag-edit-color {
+  width: 44px;
+  height: 32px;
+  padding: 2px;
+}
 .recent {
   display: flex;
   flex-direction: column;
@@ -2221,6 +2630,48 @@ body[data-mode='issue'] {
   }
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+  .settings-dialog {
+    width: 94vw;
+  }
+  .settings-shell {
+    grid-template-columns: 1fr;
+    max-height: 92vh;
+  }
+  .settings-side {
+    gap: 10px;
+    padding: 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .settings-nav button {
+    white-space: nowrap;
+  }
+  .settings-side-note {
+    display: none;
+  }
+  .settings-main {
+    max-height: calc(92vh - 150px);
+    padding: 14px;
+  }
+  .settings-panel form.tag-add {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+  .settings-panel form.tag-add input[name="desc"] {
+    grid-column: 1 / -1;
+  }
+  .tag-row {
+    flex-wrap: wrap;
+  }
+  .tag-row.is-editing {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+  .tag-edit-desc {
+    grid-column: 1 / -1;
   }
   .search {
     order: -1;

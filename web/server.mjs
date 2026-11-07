@@ -26,6 +26,8 @@ import {
 } from '../project.mjs';
 import * as beads from './beads.mjs';
 import { prefsFor, savePrefs } from './prefs.mjs';
+import { createTag, deleteTag, listTags, updateTag } from './tags.mjs';
+import { WORKFLOW_COLUMNS, workflowOf } from './workflow.mjs';
 import {
   AuthError,
   SESSION_COOKIE,
@@ -41,7 +43,7 @@ import {
   renameUser,
   verify,
 } from './auth.mjs';
-import { getRun, journalFor, listRuns, setProjectDir } from './runs.mjs';
+import { getRun, journalFor, latestRun, latestRuns, listRuns, setProjectDir } from './runs.mjs';
 import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
@@ -202,6 +204,13 @@ async function projectPayload() {
   const [config, prompts, state] = await Promise.all([readProjectConfig(p.dir), readPrompts(p.dir), readState()]);
   return { dir: p.dir, created: p.created ?? [], config, prompts, recent: state.recent };
 }
+
+// —— 工作流进度：从最新 run 派生，不写回 beads ——
+const withWorkflow = (issue, run) => ({ ...issue, workflow: workflowOf(issue, run) });
+const runSig = (run) =>
+  run
+    ? [run.runId, run.outcome, run.endedAt, run.attempts?.length, run.attempts?.at(-1)?.execute?.ok, run.attempts?.at(-1)?.gate?.pass, run.attempts?.at(-1)?.review?.pass].join('|')
+    : '';
 
 // —— 门禁：只负责把用户送到那个文件（不读内容、不编辑，改脚本是编辑器的事） ——
 async function gatePayload(dir) {
@@ -514,9 +523,9 @@ async function broadcastCard(cardId) {
   const entry = cardStreams.get(cardId);
   if (!entry?.clients.size) return;
   try {
-    entry.stamp = await beads.issueStamp(cardId);
-    const { issue, comments } = await beads.getIssue(cardId);
-    pushCard(cardId, { issue, comments });
+    const [stamp, run, payload] = await Promise.all([beads.issueStamp(cardId), latestRun(cardId), beads.getIssue(cardId)]);
+    entry.stamp = `${stamp}|${runSig(run)}`;
+    pushCard(cardId, { ...payload, issue: withWorkflow(payload.issue, run) });
   } catch {
     // 工单被删了之类：这一轮就算了
   }
@@ -533,11 +542,12 @@ function startCardPoll(cardId) {
       return;
     }
     try {
-      const stamp = await beads.issueStamp(cardId);
-      if (stamp === entry.stamp) return;
-      entry.stamp = stamp;
+      const [stamp, run] = await Promise.all([beads.issueStamp(cardId), latestRun(cardId)]);
+      const seen = `${stamp}|${runSig(run)}`;
+      if (seen === entry.stamp) return;
+      entry.stamp = seen;
       const { issue, comments } = await beads.getIssue(cardId);
-      pushCard(cardId, { issue, comments });
+      pushCard(cardId, { issue: withWorkflow(issue, run), comments });
     } catch {
       // 临时读不到就算了，下一轮再说
     }
@@ -576,9 +586,9 @@ async function streamCard(req, res, cardId) {
   res.on('close', bye);
 
   try {
-    const { issue, comments } = await beads.getIssue(cardId);
-    entry.stamp = `${issue.updated}|${issue.commentCount}`;
-    send('issue', { issue, comments });
+    const [{ issue, comments }, run] = await Promise.all([beads.getIssue(cardId), latestRun(cardId)]);
+    entry.stamp = `${issue.updated}|${issue.commentCount}|${runSig(run)}`;
+    send('issue', { issue: withWorkflow(issue, run), comments });
   } catch (err) {
     send('gone', { error: err.message });
   }
@@ -670,8 +680,11 @@ async function route(req, res, url) {
     const p = await project();
     const cfg = await readProjectConfig(p.dir);
     return json(res, 200, {
+      // 兼容旧前端：状态不再作为工单字段展示；工作流列是固定的。
       statuses: cfg.columns,
+      workflow: WORKFLOW_COLUMNS,
       labels: cfg.labels,
+      tags: cfg.tags ?? [],
       readyLabel: cfg.engine.readyLabel,
       workspace: p.dir,
       share: { host: HOST, port: PORT, token: Boolean(TOKEN), lan: lanUrls(PORT) },
@@ -716,6 +729,44 @@ async function route(req, res, url) {
   }
 
   await project(); // 以下接口都作用于当前项目
+
+  // 标签库：目录存项目配置，使用数实时从 beads 算；改名会级联到历史工单。
+  if (pathname === '/api/tags') {
+    const p = await project();
+    if (req.method === 'GET') return json(res, 200, { tags: await listTags(p.dir) });
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 201, { tags: await createTag(p.dir, body) });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
+  const tagMatch = pathname.match(/^\/api\/tags\/([^/]+)$/);
+  if (tagMatch) {
+    const p = await project();
+    const name = decodeURIComponent(tagMatch[1]);
+    if (req.method === 'PATCH') {
+      const body = await readBody(req);
+      try {
+        const out = await updateTag(p.dir, name, body, { actor: actorOf(user) });
+        return json(res, 200, out);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (req.method === 'DELETE') {
+      try {
+        const out = await deleteTag(p.dir, name, { purge: searchParams.get('purge') === '1', actor: actorOf(user) });
+        return json(res, 200, out);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
 
   // 用户偏好（列表列 / 列宽 / 排序 / 筛选预设）：只读写当前登录人自己的文件。
   // 没登录（WF_AUTH=off）时落到 ~/.hlwd/prefs/_local.json。
@@ -777,6 +828,8 @@ async function route(req, res, url) {
       });
       const q = (searchParams.get('q') ?? '').trim();
       if (q) issues = await searchIssues(issues, q);
+      const runs = await latestRuns();
+      issues = issues.map((i) => withWorkflow(i, runs.get(i.id) ?? null));
       return json(res, 200, { issues });
     }
     if (req.method === 'POST') {
@@ -790,7 +843,7 @@ async function route(req, res, url) {
         assignee: body.assignee ?? undefined,
         actor: actorOf(user), // 记下是谁建的（bd 原生 created_by）
       });
-      return json(res, 201, { issue });
+      return json(res, 201, { issue: withWorkflow(issue, null) });
     }
     return json(res, 405, { error: 'method not allowed' });
   }
@@ -853,7 +906,10 @@ async function route(req, res, url) {
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
     if (m[2] === '/journal') return json(res, 200, { journal: await journalFor(id) });
     if (m[2] === '/history') return json(res, 200, { history: await beads.listStatusHistory(id) });
-    if (req.method === 'GET') return json(res, 200, await beads.getIssue(id));
+    if (req.method === 'GET') {
+      const payload = await beads.getIssue(id);
+      return json(res, 200, { ...payload, issue: withWorkflow(payload.issue, await latestRun(id)) });
+    }
     if (req.method === 'PATCH') {
       const body = await readBody(req);
       const actor = actorOf(user);
@@ -879,7 +935,7 @@ async function route(req, res, url) {
           .catch(() => {}); // 留不下痕迹也不影响改单本身
       }
       if (body.status || body.priority !== undefined || body.addLabels || body.removeLabels) broadcastCard(id);
-      return json(res, 200, { issue });
+      return json(res, 200, { issue: withWorkflow(issue, await latestRun(id)) });
     }
     return json(res, 405, { error: 'method not allowed' });
   }

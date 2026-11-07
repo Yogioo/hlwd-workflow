@@ -11,7 +11,7 @@ const VERSION = 1;
 
 /** 列表认得的列。id 同时是前端排序键；加列要同时改 app.js 的 COLUMNS。 */
 export const COLUMN_IDS = [
-  'status',
+  'workflow',
   'priority',
   'type',
   'title',
@@ -25,7 +25,7 @@ export const COLUMN_IDS = [
   'id',
 ];
 const DEFAULT_W = {
-  status: 92,
+  workflow: 100,
   priority: 62,
   type: 64,
   title: 300,
@@ -39,7 +39,7 @@ const DEFAULT_W = {
   id: 78,
 };
 // 和改版前的九列一致：新加的「创建时间 / 标签 / 可派」默认收起来
-const VISIBLE_DEFAULT = new Set(['status', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
+const VISIBLE_DEFAULT = new Set(['workflow', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
 const MIN_W = 56;
 const MAX_W = 720;
 const MAX_PRESETS = 30;
@@ -56,7 +56,7 @@ export function emptyFilter() {
   return {
     q: '',
     ready: false,
-    status: [],
+    workflow: [],
     priority: [],
     type: [],
     assignee: [],
@@ -70,10 +70,12 @@ export function emptyFilter() {
 function cleanFilter(input = {}) {
   const f = input && typeof input === 'object' ? input : {};
   const u = f.updated && typeof f.updated === 'object' ? f.updated : {};
+  const LEGACY = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
+  const workflow = f.workflow !== undefined ? list(f.workflow) : list(f.status).map((s) => LEGACY[s] ?? s);
   return {
     q: str(f.q, 120),
     ready: f.ready === true,
-    status: list(f.status),
+    workflow,
     priority: Array.isArray(f.priority)
       ? [...new Set(f.priority.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 4))].sort((a, b) => a - b)
       : [],
@@ -93,7 +95,8 @@ function cleanColumns(input) {
   const seen = new Set();
   const out = [];
   for (const c of Array.isArray(input) ? input : []) {
-    const id = c?.id;
+    // 旧版把这一列叫 status；迁移时保留原来的宽度与顺序。
+    const id = c?.id === 'status' ? 'workflow' : c?.id;
     if (!COLUMN_IDS.includes(id) || seen.has(id)) continue;
     seen.add(id);
     const w = Number(c.w);
@@ -110,10 +113,10 @@ function cleanColumns(input) {
   return out;
 }
 
-const cleanSort = (s) => ({
-  key: COLUMN_IDS.includes(s?.key) ? s.key : 'updated',
-  dir: s?.dir === 'asc' ? 'asc' : 'desc',
-});
+const cleanSort = (s) => {
+  const key = s?.key === 'status' ? 'workflow' : s?.key;
+  return { key: COLUMN_IDS.includes(key) ? key : 'updated', dir: s?.dir === 'asc' ? 'asc' : 'desc' };
+};
 
 function cleanPresets(input) {
   const out = [];

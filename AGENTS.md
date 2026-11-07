@@ -14,9 +14,8 @@
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `beads`（`bd`） | 工单存储与状态，每个项目一份 | 不跑 AI、不判验收 |
-| `web` | 看板、建单、改单、改项目配置、切项目 | 不跑 AI、不写 git、不绕开适配层 |
+| `web` | 看板、建单、改单、标签库、关单/重开、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
 | `engine` | 接单 → 执行 → 门禁 → 审查 → 回写结论；`watch.mjs` 常驻循环自动接单 | 不渲染页面、不定义工单字段 |
-| `web` | 看板、建单、改单、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
 | `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
@@ -30,7 +29,7 @@
 
 ```
 工具（本仓库）                     项目（被开发的目标目录）
-  wf.mjs                             .hlwd/config.json     状态/优先级中文名 + engine 配置
+  wf.mjs                             .hlwd/config.json     标签目录 + engine 配置（状态不再配置）
   project.mjs                        .hlwd/prompts/*.md    项目定制的提示词
   web/  engine/                      .hlwd/gate.mjs        项目门禁（默认 always true）
                                      .hlwd/attachments/<卡片>/  图片/附件（gitignore）
@@ -56,7 +55,7 @@ gateFile(dir) -> <dir>/.hlwd/gate.mjs
 ```
 
 - 打开项目是**幂等**的：已存在的一律不覆盖，只在返回值里说明补了什么。
-- 配置写入必须校验：不认识的 runner / 非 1–5 的 attempts / 空名称一律拒绝，宁可不保存。
+- 配置写入必须校验：不认识的 runner / 非 1–5 的 attempts / 空的 readyLabel / 非法标签名或颜色一律拒绝，宁可不保存。
 
 **Watcher**（`engine/watch.mjs`，常驻循环；web 与 wf 只通过进程/心跳文件跟它说话）
 
@@ -84,7 +83,7 @@ update(id, patch) -> Issue     # 含状态迁移
 comment(id, text) -> void
 ```
 
-- `Issue` 最小字段集：`id, title, body, status, labels, assignee, created, updated, createdBy`。
+- `Issue` 最小字段集：`id, title, body, status, labels, assignee, created, updated, createdBy`。`status` 只剩 `open/closed` 作为系统开关；界面不把它当工作流，也不配置它。
 - `createdBy` 是 bd 原生字段：建单时把 `--actor` 传进去，谁建的就是谁。
 - 写操作都能带 `actor`（`createIssue / updateIssue / commentIssue`）。没带就用 `setActor()` 设的默认值（engine 设成 `cfg.actor`）；都没有就不带，由 bd 回落到 git user。
 - 只能用 `bd` CLI（或 beads 官方 HTTP 接口）。禁止直连 `.beads/*.db` 写数据。
@@ -100,7 +99,7 @@ publicUser(user) -> {name, display, role, createdAt}   # 对外的唯一形状�
 ```
 
 - 身份是**全局**的（`~/.hlwd/users.json`），HTTP 面只有 `GET /api/auth/me` 与 `POST /api/auth/{register,login,logout}`；cookie 里是随机 token，不是密码。
-- 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，改状态补一条 `状态：A → B` 的评论。
+- 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，人工关单/重开补一条工单开关评论。
 - `WF_AUTH=off` 关掉登录（单机自用）：不拦接口，写操作不带 actor，评论按 bd 的默认值记。
 - 权限**还没做**：`role` 已经存在（owner / member），以后判权限只改 auth.mjs，不动页面。
 
@@ -112,9 +111,9 @@ prefsFor(user, projectDir) -> {list: {columns, sort, presets}}
 savePrefs(user, projectDir, {list}) -> {list}
 ```
 
-- `columns`: `[{id, w, hidden}]`，id 取自固定候选集（status / priority / type / title / assignee / createdBy / created / updated / labels / comments / ready / id），`w` 夹在 56–720。
+- `columns`: `[{id, w, hidden}]`，id 取自固定候选集（workflow / priority / type / title / assignee / createdBy / created / updated / labels / comments / ready / id），`w` 夹在 56–720。旧文件里的 `status` 列会在读取时迁成 `workflow`。
 - `sort`: `{key, dir}`，单列排序；`presets`: `[{id, name, filter}]`，最多 30 条。
-- `filter` 只有 AND 组合：`q / ready / status[] / priority[] / type[] / assignee[] / createdBy[] / labels[] / updated{period, from, to}`，没有 OR、没有表达式。
+- `filter` 只有 AND 组合：`q / ready / workflow[] / priority[] / type[] / assignee[] / createdBy[] / labels[] / updated{period, from, to}`，没有 OR、没有表达式。旧预设里的 `status[]` 会按 `open→queued / in_progress→active / review→review / closed→done` 迁移。
 - 存的键是「项目绝对路径」，所以换项目是另一套；新项目没见过就继承 `defaults` 里的列与排序（每次保存都会把 `defaults` 滚成刚存的那套）。预设不继承：它是给某个项目存的筛选。
 - 校验在服务端做：不认识的值一律丢掉，文件被手改坏也只是回落到默认列，不会让页面崩。
 - HTTP 面只有 `GET /api/prefs` 与 `PUT /api/prefs`，只读写**当前登录人**自己的文件，不暴露别人的。
@@ -154,7 +153,7 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 <项目>/.hlwd/journal.ndjson                      # append-only，一行一事件
 ```
 
-- 这三处都是**产物，不是状态**：删掉它们工单照样成立，只是追溯变模糊。
+- 这三处都是**产物，不是工单状态**：删掉它们工单照样成立，只是追溯变模糊。看板的「AI 进度」是从最新 `run.json` 的 attempts 推导的投影，不写回 beads、不另建状态库。
 - 写方只有 `engine`（`exec/review` 子目录由 `agent-tools agent-run` 写）；读方只有 `web`。
   `web` 不读 engine 的代码，只读这些路径。
 - `attempts[].execute/gate/review` 里 `ms`/`ok`/`pass` 为 `null` 表示**此刻正在跑这一步**：
@@ -172,9 +171,9 @@ GET /api/issues/<id>/events      # SSE：连上先给一份快照，之后字段
 GET /issue/<id>                  # 工单独立页面（返回同一个单页，id 由前端从 URL 读）
 ```
 
-- 一个卡片一条流，推送的是**整张卡**（issue + comments，都很小），前端按 id 覆盖渲染。
-- 触发：① 我们自己的写路径（评论 / 改状态 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
-  比对 `updated_at + comment_count`，把 engine 或别的进程直接改 bd 的变化也接进来。
+- 一个卡片一条流，推送的是**整张卡**（issue + comments + 最新的 workflow 进度，都很小），前端按 id 覆盖渲染。
+- 触发：① 我们自己的写路径（评论 / 关单重开 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
+  比对 `updated_at + comment_count + run 签名`，把 engine 或别的进程直接改 bd / run.json 的变化也接进来。
   轮询是**每卡一份**，不随观看人数增长；没人看就自己停。
 - 推送只走 HTTP，不落库：删了看板/重启，数据仍然只有 beads 一份。
 - 换项目时所有流立刻断开（bd 的 workdir 是全局的，跨项目读会错位）。
@@ -182,28 +181,33 @@ GET /issue/<id>                  # 工单独立页面（返回同一个单页，
 **Config / Prompts**（`<项目>/.hlwd/`）
 
 ```
-config.json: labels.statuses / labels.priorities / columns / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
+config.json: tags[]（name/color/desc/archived）/ labels.priorities / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
+# 旧版的 labels.statuses / columns 仍可读，只为兼容；设置面板不再写它们。
 prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}} / {{VERDICT}}
 ```
 
-- 写方是 `web`（看板「设置」→ `PUT /api/settings`）；读方是 `engine`（每次运行开始时读）。
-- 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`。
+- 写方是 `web`（看板「设置」→ `PUT /api/settings`，标签走 `/api/tags`）；读方是 `engine`（每次运行开始时读）。
+- 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`；在设置里清空提示词并保存 = 把默认模板写回项目文件（不是留空）。
+- 标签改名会级联到历史工单（先加新、再去旧）；删除默认要求确认，`?purge=1` 才从工单上摘掉。
 
-## 5. 状态机（就这四个，别加）
+## 5. 工作流状态机（固定四段，工单只有 open/closed + 标签）
+
+工单（beads）只保留两个系统开关：`open` / `closed`。看板四列不是工单字段，而是最新一次 engine run 的投影：
 
 ```
-open ──ready-for-agent──> in_progress ──> review ──> closed
-                              │              │
-                              └──失败/超时──> open（回退，附原因评论）
-                                            └──审查不通过──> in_progress（同一工作区继续改）
+待接 ──claim──> 执行中 ──gate/review──> 审查中 ──pass──> 已完成
+                    │
+                    └──失败/中断──> 待接（带「上次失败 / 已中断」徽章）
 ```
 
-- 状态用 beads 原生 `status`；`review` 是自定义状态，靠 `bd config set status.custom "review:wip"` 注册。
-- 门禁不通过等同审查不通过：**留在 `in_progress`**，原因回灌执行端，不单独引入新状态。
-- 看板绑内网时（`--lan`）只是多了一个入口，状态机不变；谁能改单由 `--token` 决定。
-- `ready-for-agent` 用 label 表达，与 `status` 正交：它回答「能不能派给 AI」。
-- 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。
-- **谁改的**：人工在看板改状态时，web 自动补一条 `状态：待接 → 执行中` 的评论，作者就是登录的人（bd 的 update 本身不记变更人）；engine 的迁移用 `cfg.actor`，评论由各阶段写。
+- `open` / `closed` 只表示工单是否归档；人工在看板上只能「关闭 / 重新打开」，不再拖列改状态。
+- 看板列固定：**待接 / 执行中 / 审查中 / 已完成**；由 `web/workflow.mjs` 从最新 `run.json` 推导。卡上再细分「已接单 / 执行中 / 门禁中 / 审查中 / 已完成 / 上次失败 / 已中断」。
+- engine 内部仍用 `status=in_progress` 当接单锁（务实版，界面不展示），完成时置 `closed`；失败时按需要回 `open` 或留 `in_progress`。`review` 自定义状态不再由 engine 使用。
+- `ready-for-agent` 用 label 表达，与状态机正交：它回答「能不能派给 AI」。接单候选是 `open + ready`，看板不会把已有活跃 run 的卡再派一次。
+- 进度不是新状态库：`run.json` 是运行记录，删掉只丢追溯；工作流阶段从 `attempts[].execute/gate/review` 的未完成步骤推导。
+- 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。人工关单/重开补一条工单开关评论。
+- **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
+- **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
 
 ## 6. 目录
 
@@ -216,6 +220,8 @@ package.json       # 只有 scripts，没有依赖
 web/               # 页面 + beads 适配层
   prefs.mjs        # 用户偏好：列表列 / 列宽 / 排序 / 筛选预设（~/.hlwd/prefs/<用户>.json）
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
+  workflow.mjs     # 固定工作流阶段：从最新 run.json 推导「AI 进度」
+  tags.mjs         # 标签库：目录 + 使用数 + 改名级联 / 归档 / 删除
   runs.mjs         # 只读端口：把 <项目>/.hlwd/runs 与 journal 给看板
   sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
@@ -260,7 +266,8 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 依赖解析：要用能找到的 `bd` 与 AI CLI；`agent-tools` 用仓库自带的 `vendor/agent-tools`（`AGENT_TOOLS_BIN` 可覆盖）。
 - 首次打开空项目：`bd init` 会建 `.beads/` 并 `git init` + 提交一次（bd 基于 git 工作），项目的 `.gitignore` 也是它写的。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
-- 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列，「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
+- 看板四列是固定工作流（待接 / 执行中 / 审查中 / 已完成），不能拖列改状态；工单本身只有 open/closed + 标签。人工只能在工单页「关闭 / 重新打开」。
+- 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列（含「进度」），「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
 - **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「待接 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
 - 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。
 
@@ -282,7 +289,7 @@ node wf.mjs board --host 192.168.1.7 --bg      # 只绑某块网卡
 
 ## 8. 给 AI 的作业守则
 
-- **动手前先读**：工单状态、已有评论、当前项目（`node wf.mjs` 第一行就写着）。
+- **动手前先读**：工单开关与标签、最新工作流进度、已有评论、当前项目（`node wf.mjs` 第一行就写着）。
 - **一次只推进一步**：接单就只接单，执行就只执行，审查就只审查。跳阶段等于伪造记录。
 - **改动最小**：能改一个函数不新建文件，能改配置不加抽象层。新增抽象要说清它挡住了什么。
 - **不留暗门**：不做「先注释掉」「临时硬编码」；临时方案写进工单评论并标回滚条件。

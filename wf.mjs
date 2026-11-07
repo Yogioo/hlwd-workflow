@@ -13,7 +13,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureProject, readProjectConfig, readState, rememberProject } from './project.mjs';
 import * as beads from './web/beads.mjs';
-import { listRuns, setProjectDir } from './web/runs.mjs';
+import { latestRuns, listRuns, setProjectDir } from './web/runs.mjs';
+import { WORKFLOW_COLUMNS, workflowOf } from './web/workflow.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -196,14 +197,18 @@ const prioName = (cfg, p) => cfg.labels.priorities[p] ?? `P${p}`;
 
 async function status({ dir, cfg, info }) {
   const issues = await beads.listIssues({ all: true });
+  const runs = await latestRuns();
+  const rows = issues.map((issue) => ({ issue, wf: workflowOf(issue, runs.get(issue.id)) }));
   const readyLabel = cfg.engine.readyLabel;
-  const counts = cfg.columns.map((s) => [s, issues.filter((i) => i.status === s).length]);
-  const ready = issues.filter((i) => i.status === 'open' && i.labels.includes(readyLabel));
-  const running = issues.filter((i) => i.status !== 'open' && i.status !== 'closed' && i.labels.includes(readyLabel));
+  const counts = WORKFLOW_COLUMNS.map((c) => [c.label, rows.filter((r) => r.wf.column === c.id).length]);
+  const ready = rows
+    .filter((r) => r.issue.status === 'open' && r.issue.labels.includes(readyLabel) && !r.wf.active)
+    .map((r) => r.issue);
+  const running = rows.filter((r) => r.wf.active).length;
 
   console.log(`项目 ${dir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
-  console.log(`工单 ${issues.length} 张：${counts.map(([s, n]) => `${statusName(cfg, s)} ${n}`).join(' · ')}`);
-  console.log(`就绪 ${ready.length} 张${running.length ? `，另有 ${running.length} 张在流水线里` : ''}`);
+  console.log(`工单 ${issues.length} 张：${counts.map(([label, n]) => `${label} ${n}`).join(' · ')}`);
+  console.log(`就绪 ${ready.length} 张${running ? `，另有 ${running} 张在流水线里` : ''}`);
   for (const issue of ready.slice(0, 5)) console.log(`  · ${issue.id}  ${issue.title}  [${prioName(cfg, issue.priority)}]`);
   if (ready.length > 5) console.log(`  … 还有 ${ready.length - 5} 张`);
 
@@ -232,10 +237,11 @@ async function trace(cardId, cfg) {
   const [history, runs] = await Promise.all([beads.listStatusHistory(cardId), listRuns(cardId)]);
 
   console.log(`${issue.id}  ${issue.title}`);
-  console.log(`状态 ${statusName(cfg, issue.status)}（${issue.status}） · 负责人 ${issue.assignee || '—'} · 优先级 ${prioName(cfg, issue.priority)}`);
+  const wf = workflowOf(issue, runs[0] ?? null);
+  console.log(`进度 ${wf.label || wf.column}${wf.detail ? `（${wf.detail}）` : ''} · 负责人 ${issue.assignee || '—'} · 优先级 ${prioName(cfg, issue.priority)}`);
 
   if (history.length) {
-    console.log('\n状态变更');
+    console.log('\n工单开关变更');
     for (const h of history) console.log(`  ${time(h.at)}  ${statusName(cfg, h.status)}${h.assignee ? ` · ${h.assignee}` : ''}`);
   }
 
@@ -249,7 +255,7 @@ async function trace(cardId, cfg) {
     console.log(`\n运行 ${run.runId}  ${dur(total)}  → ${run.outcome}${run.commit ? `  提交 ${run.commit}` : ''}`);
     for (const a of run.attempts ?? []) {
       const e = a.execute ?? {};
-      console.log(`  #${a.attempt} 执行 ${dur(e.ms)} ${e.ok ? 'ok' : '失败'}`);
+      console.log(`  #${a.attempt} 执行 ${dur(e.ms)} ${e.ok == null ? '进行中' : e.ok ? 'ok' : '失败'}`);
       if (!e.ok && e.error) console.log(`       ${String(e.error).split('\n')[0]}`);
       const g = a.gate;
       if (g) console.log(`  #${a.attempt} 门禁 ${dur(g.ms)} ${g.pass ? 'pass' : 'fail'} — ${String(g.reason ?? '').split('\n')[0].slice(0, 150)}`);

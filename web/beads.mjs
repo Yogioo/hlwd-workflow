@@ -130,6 +130,34 @@ export function normalize(raw) {
   };
 }
 
+/** 项目里出现过的标签 + 使用数。bd 自己算，不缓存。 */
+export async function listLabels() {
+  const rows = await bdJson(['label', 'list-all', '--json']);
+  return (Array.isArray(rows) ? rows : [])
+    .map((r) => ({ name: String(r.label ?? '').trim(), count: Number(r.count ?? 0) }))
+    .filter((r) => r.name);
+}
+
+/** 批量加/减标签：改名、合并时一次改一批，不用一张张 bd update。 */
+export async function addLabelToIssues(ids, label, { actor } = {}) {
+  return labelBatch('add', ids, label, actor);
+}
+
+export async function removeLabelFromIssues(ids, label, { actor } = {}) {
+  return labelBatch('remove', ids, label, actor);
+}
+
+async function labelBatch(action, ids, label, actor) {
+  const clean = [...new Set((ids ?? []).map(String).filter(Boolean))];
+  if (!clean.length) return 0;
+  // Windows 命令行有长度上限；按 40 张一批，失败也不会一次拖垮全部。
+  for (let i = 0; i < clean.length; i += 40) {
+    const chunk = clean.slice(i, i + 40);
+    await run(withActor(['label', action, ...chunk, label], actor));
+  }
+  return clean.length;
+}
+
 export async function listIssues({ status, ready, label, assignee, q, limit = 300, all = true } = {}) {
   const args = ['list', '--json', '--flat', '-n', String(limit)];
   if (all) args.push('--all');

@@ -15,6 +15,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { ensureProject } from '../project.mjs';
 import * as beads from '../web/beads.mjs';
+import { latestRun, setProjectDir } from '../web/runs.mjs';
+import { workflowOf } from '../web/workflow.mjs';
 import { loadConfig, log } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -111,7 +113,14 @@ function killTree(pid) {
 }
 
 async function listReady(dir, cfg) {
-  return beads.listIssues({ status: 'open', ready: true, label: cfg.readyLabel });
+  setProjectDir(dir);
+  const issues = await beads.listIssues({ status: 'open', ready: true, label: cfg.readyLabel });
+  const out = [];
+  for (const issue of issues) {
+    const wf = workflowOf(issue, await latestRun(issue.id));
+    if (!wf.active) out.push(issue);
+  }
+  return out;
 }
 
 async function loop({ dir, interval }) {
@@ -223,6 +232,7 @@ async function main() {
 
   await ensureProject(dir);
   beads.setWorkdir(dir);
+  setProjectDir(dir);
   await loop({ dir, interval: args.interval });
   return 0;
 }

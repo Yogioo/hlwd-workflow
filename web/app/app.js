@@ -1,10 +1,20 @@
-// 单页看板：只做「看 + 建 + 改状态 + 评论」，全部走 /api/*。
-// 状态名、优先级名、AI 配置都来自 config.json（设置弹窗可改）。
+// 单页看板：看 + 建 + 关单/重开 + 评论，全部走 /api/*。
+// 工单只有 open/closed + 标签；看板列是 engine run 的工作流投影。
 import { esc, md } from './markdown.js';
 
 const AUTO_REFRESH_MS = 5000;
 const VIEW_KEY = 'hlwd.view';
 const SORT_DESC = new Set(['updated', 'comments']);
+
+// 工作流列是固定的：engine 的状态机不跟项目配置走。
+// 工单本身只有 open/closed + 标签；这些列只是 run.json 的投影。
+const WORKFLOW_FALLBACK = [
+  { id: 'queued', label: '待接', empty: '没有待接的单。' },
+  { id: 'active', label: '执行中', empty: '没有在跑的单。' },
+  { id: 'review', label: '审查中', empty: '没有在审查的单。' },
+  { id: 'done', label: '已完成', empty: '还没有完成的单。' },
+];
+const WORKFLOW_ORDER = Object.fromEntries(WORKFLOW_FALLBACK.map((c, i) => [c.id, i]));
 
 /** 视图是浏览器的偏好，不写进项目：同一个项目换台电脑打开，默认还是看板。 */
 function readView() {
@@ -33,8 +43,12 @@ function readView() {
 const $ = (s) => document.querySelector(s);
 const state = {
   issues: [],
-  statuses: ['open', 'in_progress', 'review', 'closed'],
+  workflowColumns: WORKFLOW_FALLBACK,
   labels: { statuses: {}, priorities: {} },
+  tags: [],
+  tagCatalog: [],
+  tagError: null,
+  editTag: null,
   readyLabel: 'ready-for-agent',
   current: null,
   trace: null,
@@ -50,6 +64,7 @@ const state = {
   lastWatchError: null,
   attachments: [],
   comments: [],
+  combos: {}, // 标签快选的实例（工单页 / 新建工单）
   newComments: new Set(), // 页面开着期间新进来的评论（一直标记，刷新才清）
   auth: { auth: false, user: null, firstRun: false },
   authed: false,
@@ -58,6 +73,26 @@ const state = {
 
 const statusLabel = (s) => state.labels.statuses[s] ?? s;
 const prioLabel = (p) => state.labels.priorities[p] ?? `P${p}`;
+
+const LEGACY_WORKFLOW = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
+const workflowOf = (issue) => issue.workflow ?? { column: LEGACY_WORKFLOW[issue.status] ?? 'queued', label: '', tone: 'idle', detail: '' };
+const workflowColumn = (issue) => workflowOf(issue).column;
+const workflowOrder = (issue) => WORKFLOW_ORDER[workflowColumn(issue)] ?? 99;
+const workflowName = (column) => (state.workflowColumns.find((c) => c.id === column) ?? WORKFLOW_FALLBACK.find((c) => c.id === column))?.label ?? column;
+
+const tagDef = (name) => state.tags.find((t) => t.name === name) ?? null;
+const tagColorStyle = (name) => {
+  const color = tagDef(name)?.color ?? '';
+  return /^#[0-9a-f]{6}$/i.test(color) ? ` style="--tag:${color}"` : '';
+};
+
+const workflowBadge = (issue, { compact = false } = {}) => {
+  const wf = workflowOf(issue);
+  if (!wf?.label || wf.column === 'queued' && wf.tone === 'idle') return '';
+  return `<span class="wf wf-${esc(wf.tone ?? 'idle')}${compact ? ' wf-compact' : ''}" title="${esc([wf.label, wf.detail].filter(Boolean).join(' · '))}">
+    <i aria-hidden="true"></i><b>${esc(wf.label)}</b>${wf.detail ? `<span class="wf-detail">${esc(wf.detail)}</span>` : ''}
+  </span>`;
+};
 // 全链路里的原因：一行放不下就折起来，别把面板拉成长条
 const reasonCell = (text) => {
   const s = String(text ?? '');
@@ -66,11 +101,17 @@ const reasonCell = (text) => {
     : esc(s);
 };
 
-// ready-for-agent 对人没意义，直接说「可派给 AI」
+// ready-for-agent 对人没意义，直接说「可派给 AI」；其余标签带上颜色。
 const chip = (label) =>
   label === state.readyLabel
     ? '<span class="chip chip-ready">可派给 AI</span>'
-    : `<span class="chip">${esc(label)}</span>`;
+    : `<span class="chip${tagDef(label)?.archived ? ' chip-archived' : ''}"${tagColorStyle(label)}>${esc(label)}</span>`;
+
+/** 工单页的标签可以逐个摘掉；label 本身放 data 里，显示名可读。 */
+const removableChip = (label) => `<span class="chip chip-removable${label === state.readyLabel ? ' chip-ready' : ''}${tagDef(label)?.archived ? ' chip-archived' : ''}"${label === state.readyLabel ? '' : tagColorStyle(label)}>
+  ${label === state.readyLabel ? '可派给 AI' : esc(label)}
+  <button type="button" class="chip-x" data-remove-label="${esc(label)}" aria-label="移除标签 ${esc(label)}" title="从这张单上移除">×</button>
+</span>`;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -145,13 +186,13 @@ function setView(view) {
   hint(
     view === 'list'
       ? '列表视图：点表头排序，按住表头拖换列序，拖右边界改列宽，点一行打开工单'
-      : '看板视图：把卡片拖到别的列就能改状态',
+      : '看板视图：列是 AI 工作流进度，卡片上显示标签与当前步骤',
   );
 }
 
 function applyConfig(cfg) {
-  if (Array.isArray(cfg.statuses) && cfg.statuses.length) state.statuses = cfg.statuses;
-  else if (Array.isArray(cfg.columns) && cfg.columns.length) state.statuses = cfg.columns;
+  if (Array.isArray(cfg.workflow) && cfg.workflow.length) state.workflowColumns = cfg.workflow;
+  if (Array.isArray(cfg.tags)) state.tags = cfg.tags;
   if (cfg.labels) {
     state.labels = {
       statuses: { ...state.labels.statuses, ...(cfg.labels.statuses ?? {}) },
@@ -162,6 +203,19 @@ function applyConfig(cfg) {
   else if (cfg.engine?.readyLabel) state.readyLabel = cfg.engine.readyLabel;
   fillPrioritySelect($('#createPriority'), 2);
   fillPrioritySelect($('#panelPriority'), state.current?.priority ?? 2);
+}
+
+/** 标签目录来自真实使用数（含未登记标签）；失败不影响页面。 */
+async function loadTagCatalog() {
+  try {
+    const { tags } = await api('/api/tags');
+    state.tagCatalog = tags ?? [];
+    // 目录变了，开着的候选跟着刷（使用数 / 归档状态都可能变）
+    state.combos?.issue?.render();
+    state.combos?.create?.render();
+  } catch {
+    // 旧服务端没有 /api/tags 时退回 meta 里的目录
+  }
 }
 
 /** /api/project 的返回：{dir, config, prompts, recent, created} */
@@ -175,7 +229,13 @@ function applyProject(payload) {
     }
   }
   const cfg = payload.config ?? payload;
-  applyConfig({ statuses: cfg.columns, labels: cfg.labels, readyLabel: cfg.engine?.readyLabel ?? cfg.readyLabel });
+  state.tagCatalog = [];
+  applyConfig({
+    workflow: WORKFLOW_FALLBACK,
+    tags: cfg.tags ?? [],
+    labels: cfg.labels,
+    readyLabel: cfg.engine?.readyLabel ?? cfg.readyLabel,
+  });
   return payload;
 }
 
@@ -187,16 +247,9 @@ function fillPrioritySelect(select, selected) {
 }
 
 // 空列不是「—」，是告诉你这一列现在该放什么
-const laneEmpty = (status) => {
+const laneEmpty = (column) => {
   if (hasFilter()) return '没有符合当前筛选的单。';
-  return (
-    {
-      open: '没有待接的单。新建一张，或把别的卡拖过来。',
-      in_progress: '没有在跑的单。',
-      review: '没有等验收的单。',
-      closed: '还没有完成的单。',
-    }[status] ?? '这里空着。'
-  );
+  return (state.workflowColumns.find((c) => c.id === column) ?? WORKFLOW_FALLBACK.find((c) => c.id === column))?.empty ?? '这里空着。';
 };
 const listEmpty = () =>
   hasFilter() ? '没有符合当前筛选的单。' : '还没有工单。点右上角「新建工单」开始。';
@@ -204,11 +257,12 @@ const listEmpty = () =>
 /** 一张卡：标题是主体，id 和类型退到脚注，别抢视线。 */
 function card(issue) {
   const labels = issue.labels.map(chip).join('');
-  return `<article class="card" data-id="${esc(issue.id)}" tabindex="0" draggable="true" title="拖到别的列就能改状态">
+  return `<article class="card" data-id="${esc(issue.id)}" data-workflow="${esc(workflowColumn(issue))}" tabindex="0" title="打开工单">
     <div class="card-top">
       <div class="card-title">${esc(issue.title)}</div>
       <span class="card-prio mono" data-prio="${esc(issue.priority)}">${esc(prioLabel(issue.priority))}</span>
     </div>
+    ${workflowBadge(issue) ? `<div class="card-wf">${workflowBadge(issue)}</div>` : ''}
     ${labels ? `<div class="chips">${labels}</div>` : ''}
     <div class="card-foot">
       <span class="mono">${esc(issue.type)}</span>
@@ -226,15 +280,13 @@ function orDash(text) {
 /** 列表能摊开的列。id 同时是排序键；w 只是第一次打开时的默认宽度（之后听用户的）。 */
 const COLUMNS = [
   {
-    id: 'status',
-    label: '状态',
-    w: 92,
+    id: 'workflow',
+    label: '进度',
+    w: 100,
     cls: 'c-status',
-    sort: (i) => {
-      const at = state.statuses.indexOf(i.status);
-      return at < 0 ? state.statuses.length : at;
-    },
-    cell: (i) => `<span class="row-dot" aria-hidden="true"></span>${esc(statusLabel(i.status))}`,
+    sort: workflowOrder,
+    attrs: (i) => `data-workflow="${esc(workflowColumn(i))}"`,
+    cell: (i) => `<span class="row-dot" aria-hidden="true"></span>${esc(workflowOf(i).label || workflowName(workflowColumn(i)))}`,
   },
   {
     id: 'priority',
@@ -288,7 +340,7 @@ const COLUMNS = [
 
 const COLUMN_BY_ID = Object.fromEntries(COLUMNS.map((c) => [c.id, c]));
 /** 和服务端 web/prefs.mjs 的 VISIBLE_DEFAULT 一致：默认还是原来那九列。 */
-const VISIBLE_DEFAULT = new Set(['status', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
+const VISIBLE_DEFAULT = new Set(['workflow', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
 
 function defaultColumns() {
   return COLUMNS.map((c) => ({ id: c.id, w: c.w, hidden: !VISIBLE_DEFAULT.has(c.id) }));
@@ -412,7 +464,7 @@ function listRow(issue) {
   const cells = visibleColumns()
     .map(({ id, cls, align, cell, attrs }) => `<td class="${cls}${align === 'right' ? ' is-right' : ''}"${attrs ? ` ${attrs(issue)}` : ''}>${cell(issue)}</td>`)
     .join('');
-  return `<tr class="list-row" data-id="${esc(issue.id)}" data-status="${esc(issue.status)}">${cells}<td class="c-fill"></td></tr>`;
+  return `<tr class="list-row" data-id="${esc(issue.id)}" data-workflow="${esc(workflowColumn(issue))}">${cells}<td class="c-fill"></td></tr>`;
 }
 
 function listTable(issues) {
@@ -443,7 +495,7 @@ function emptyFilter() {
   return {
     q: '',
     ready: false,
-    status: [],
+    workflow: [],
     priority: [],
     type: [],
     assignee: [],
@@ -453,11 +505,15 @@ function emptyFilter() {
   };
 }
 
+const LEGACY_WORKFLOW_VALUE = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
+const filterWorkflow = (f) =>
+  Array.isArray(f?.workflow) ? f.workflow : (Array.isArray(f?.status) ? f.status : []).map((s) => LEGACY_WORKFLOW_VALUE[s] ?? s);
+
 const normFilter = (f) =>
   JSON.stringify({
     q: f.q ?? '',
     ready: Boolean(f.ready),
-    status: f.status ?? [],
+    workflow: filterWorkflow(f),
     priority: (f.priority ?? []).map(Number).sort((a, b) => a - b),
     type: f.type ?? [],
     assignee: f.assignee ?? [],
@@ -472,7 +528,7 @@ function normalizeFilter(input = {}) {
   return {
     q: String(f.q ?? ''),
     ready: Boolean(f.ready),
-    status: arr(f.status),
+    workflow: filterWorkflow(f),
     priority: arr(f.priority).map(Number),
     type: arr(f.type),
     assignee: arr(f.assignee),
@@ -486,7 +542,7 @@ function hasFilter(f = state.filter) {
   return Boolean(
     (f.q ?? '') ||
       f.ready ||
-      f.status?.length ||
+      f.workflow?.length ||
       f.priority?.length ||
       f.type?.length ||
       f.assignee?.length ||
@@ -514,7 +570,7 @@ function updatedWindow(u) {
 
 function matchesFilter(issue, f = state.filter) {
   if (f.ready && !issue.labels.includes(state.readyLabel)) return false;
-  if (f.status.length && !f.status.includes(issue.status)) return false;
+  if (f.workflow.length && !f.workflow.includes(workflowColumn(issue))) return false;
   if (f.priority.length && !f.priority.includes(Number(issue.priority))) return false;
   if (f.type.length && !f.type.includes(issue.type || '')) return false;
   if (f.assignee.length && !f.assignee.includes(issue.assignee || '')) return false;
@@ -691,7 +747,7 @@ function sortedUnique(values) {
 function filterOptions() {
   const issues = state.issues;
   return {
-    status: state.statuses.map((s) => ({ v: s, label: statusLabel(s) })),
+    workflow: state.workflowColumns.map((s) => ({ v: s.id, label: s.label })),
     priority: [0, 1, 2, 3, 4].map((p) => ({ v: String(p), label: prioLabel(p) })),
     type: sortedUnique(issues.map((i) => i.type)).map((v) => ({ v, label: v })),
     assignee: ['', ...sortedUnique(issues.map((i) => i.assignee))].map((v) => ({ v, label: v || '未指派' })),
@@ -727,7 +783,7 @@ function openFilterPanel() {
   panel.innerHTML = `<div class="popover-head"><b>筛选</b><span class="popover-sub">看板和列表共用</span><button type="button" class="ghost tiny" data-close>关闭</button></div>
     <div class="popover-body">
       <div class="fgroup"><div class="fgroup-head">关键词</div><input id="fq" class="fq" placeholder="标题、描述、评论" value="${esc(f.q)}"></div>
-      ${group('status', '状态', opts.status)}
+      ${group('workflow', '进度', opts.workflow)}
       ${group('priority', '优先级', opts.priority)}
       ${group('type', '类型', opts.type)}
       ${group('assignee', '负责人', opts.assignee)}
@@ -794,8 +850,9 @@ window.addEventListener('resize', () => closePanels());
 async function loadPrefs() {
   try {
     const { list } = await api('/api/prefs');
-    state.prefs = { columns: list.columns ?? defaultColumns(), presets: list.presets ?? [] };
-    state.sort = list.sort ?? state.sort;
+    const cols = (list.columns ?? defaultColumns()).map((c) => (c.id === 'status' ? { ...c, id: 'workflow' } : c));
+    state.prefs = { columns: cols, presets: list.presets ?? [] };
+    state.sort = list.sort?.key === 'status' ? { ...list.sort, key: 'workflow' } : (list.sort ?? state.sort);
   } catch {
     // 老版本服务端没有这个接口：退回内置列，页面照样能用
     state.prefs = { columns: defaultColumns(), presets: [] };
@@ -825,15 +882,15 @@ function renderBoard(issues) {
   const prev = new Map();
   for (const el of board.querySelectorAll('.card')) prev.set(el.dataset.id, el.getBoundingClientRect());
 
-  board.innerHTML = state.statuses
-    .map((status, i) => {
-      const list = issues.filter((i) => i.status === status);
-      return `<section class="col" data-status="${esc(status)}" style="--i:${i}">
+  board.innerHTML = state.workflowColumns
+    .map((column, i) => {
+      const list = issues.filter((issue) => workflowColumn(issue) === column.id);
+      return `<section class="col" data-workflow="${esc(column.id)}" style="--i:${i}">
         <div class="col-head">
-          <h2 class="col-name">${esc(statusLabel(status))}</h2>
+          <h2 class="col-name">${esc(column.label)}</h2>
           <span class="col-count mono">${list.length}</span>
         </div>
-        <div class="col-body${list.length ? '' : ' is-empty'}">${list.map(card).join('') || `<div class="col-empty">${esc(laneEmpty(status))}</div>`}</div>
+        <div class="col-body${list.length ? '' : ' is-empty'}">${list.map(card).join('') || `<div class="col-empty">${esc(laneEmpty(column.id))}</div>`}</div>
       </section>`;
     })
     .join('');
@@ -860,11 +917,11 @@ function renderSkeleton() {
     board.innerHTML = `<div class="list-view"><table class="list-table" style="min-width:${cols.reduce((n, c) => n + c.w, 0)}px"><colgroup>${cols.map((c) => `<col style="width:${c.w}px">`).join('')}<col></colgroup>${listHead(cols)}<tbody><tr class="list-empty-row"><td colspan="${(cols.length || 1) + 1}">读取工单…</td></tr></tbody></table></div>`;
     return;
   }
-  board.innerHTML = state.statuses
+  board.innerHTML = state.workflowColumns
     .map(
-      (status, i) => `<section class="col" data-status="${esc(status)}" style="--i:${i}">
+      (column, i) => `<section class="col" data-workflow="${esc(column.id)}" style="--i:${i}">
         <div class="col-head">
-          <h2 class="col-name">${esc(statusLabel(status))}</h2>
+          <h2 class="col-name">${esc(column.label)}</h2>
           <span class="col-count mono">·</span>
         </div>
         <div class="col-body"></div>
@@ -972,7 +1029,7 @@ async function openIssue(id, { keepTab = false } = {}) {
   $('#filterbar').hidden = true;
   closePanels();
   $('#issuePage').hidden = false;
-  $('#issuePage').dataset.status = issue.status; // 顶部那道状态线
+  $('#issuePage').dataset.workflow = workflowColumn(issue); // 顶部那道进度线
   $('#panelId').textContent = issue.id;
   $('#panelTitle').textContent = issue.title;
   renderIssueMeta(issue);
@@ -983,6 +1040,7 @@ async function openIssue(id, { keepTab = false } = {}) {
 
   if (!keepTab) {
     $('#panelLabel').value = '';
+    state.combos?.issue?.close();
     state.trace = null;
     $('#panelTrace').innerHTML = '';
     $('#panelRaw').hidden = true;
@@ -999,21 +1057,323 @@ function renderIssueMeta(issue) {
     issue.createdBy ? `<span class="meta-item"><i>创建</i>${esc(issue.createdBy)}</span>` : '',
     `<span class="meta-item"><i>负责人</i>${esc(issue.assignee || '—')}</span>`,
     `<span class="meta-item"><i>更新</i>${esc(fmtTime(issue.updated))}</span>`,
-    issue.labels.map(chip).join(''),
   ].join('');
 }
 
-/** 状态 / 优先级 / 派单按钮：别人改了也要跟着变，但正在操作的那个控件不打扰。 */
+/** 工作流进度 / 优先级 / 派单 / 关单：别人改了也要跟着变，但正在操作的那个控件不打扰。 */
 function renderIssueFields(issue) {
-  const status = $('#panelStatus');
-  if (document.activeElement !== status) {
-    status.innerHTML = state.statuses
-      .map((s) => `<option value="${s}"${s === issue.status ? ' selected' : ''}>${esc(statusLabel(s))}</option>`)
-      .join('');
-  }
+  renderPanelWorkflow(issue);
+  renderPanelLabels(issue);
   const prio = $('#panelPriority');
   if (document.activeElement !== prio) fillPrioritySelect(prio, issue.priority);
   renderDispatch(issue);
+  renderCloseButton(issue);
+}
+
+function renderPanelLabels(issue) {
+  const box = $('#panelLabels');
+  if (!box) return;
+  box.innerHTML = issue.labels.length
+    ? issue.labels.map(removableChip).join('')
+    : '<span class="dash">还没有标签</span>';
+  state.combos?.issue?.render(); // 别人也在改这张单时，候选跟着变
+}
+
+// —— 标签快选：一个输入框 + 候选面板。工单页和「新建工单」共用一套实现。
+//    ↑↓ 选、Enter 打上/摘掉、Esc 收；逗号仍可批量。
+const labelOnIssue = (name) => (state.current?.labels ?? []).includes(name);
+const splitLabels = (value) =>
+  String(value ?? '')
+    .split(/[,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+/** 候选来源：真实目录优先（带使用数），旧服务端退回 config 里的 tags。 */
+function labelCatalog() {
+  const list = [...(state.tagCatalog.length ? state.tagCatalog : state.tags)].filter((t) => t?.name);
+  if (state.readyLabel && !list.some((t) => t.name === state.readyLabel)) {
+    list.unshift({ name: state.readyLabel, color: '', count: 0, system: true, archived: false });
+  }
+  return list;
+}
+
+/** 候选：selected 是「已经选中的标签」。空输入给 已加/常用/全部/已归档，有输入按匹配排，最后一行新建。 */
+function labelMenuItems(query, selected = [], groupLabel = '已加') {
+  const q = String(query ?? '').trim().toLowerCase();
+  const onIssue = selected ?? [];
+  const all = labelCatalog().map((t) => ({ ...t, added: onIssue.includes(t.name) }));
+  const rank = (t) => ((q && t.name.toLowerCase().startsWith(q) ? 0 : 1) * 1e6) - (t.count ?? 0);
+  const sortBy = (a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name);
+  const item = (t) => ({ kind: 'label', ...t });
+  const items = [];
+
+  if (!q) {
+    const added = onIssue.map((name) => all.find((t) => t.name === name) ?? { name, color: '', count: 0, archived: false });
+    if (added.length) items.push({ kind: 'group', text: groupLabel }, ...added.map((t) => item({ ...t, added: true })));
+    const rest = all.filter((t) => !t.added && !t.archived).sort(sortBy);
+    const hot = rest.filter((t) => (t.count ?? 0) > 0).slice(0, 5);
+    if (hot.length) items.push({ kind: 'group', text: '常用' }, ...hot.map(item));
+    const more = rest.filter((t) => !hot.includes(t));
+    if (more.length) items.push({ kind: 'group', text: '全部' }, ...more.map(item));
+    const gone = all.filter((t) => !t.added && t.archived).sort(sortBy);
+    if (gone.length) items.push({ kind: 'group', text: '已归档' }, ...gone.map(item));
+    if (!items.length) items.push({ kind: 'empty', text: '标签库还是空的，输入名字就能新建' });
+    return items;
+  }
+
+  const hit = all.filter((t) => t.name.toLowerCase().includes(q)).sort(sortBy);
+  items.push(...hit.filter((t) => t.added).map(item), ...hit.filter((t) => !t.added).map(item));
+  // 没有同名标签才给「新建」，避免把已有标签敲成重复的
+  if (!all.some((t) => t.name.toLowerCase() === q)) items.push({ kind: 'create', name: String(query).trim() });
+  return items;
+}
+
+/** 候选面板的 DOM：两个输入框共用同一套结构，差别只在数据。 */
+function labelMenuHtml(items, active, hintText) {
+  return items
+    .map((it, i) => {
+      if (it.kind === 'group') return `<div class="label-opt-group">${esc(it.text)}</div>`;
+      if (it.kind === 'empty') return `<div class="label-empty">${esc(it.text)}</div>`;
+      if (it.kind === 'create') {
+        return `<div class="label-opt label-opt-create${active === i ? ' is-active' : ''}" role="option" data-create="${esc(it.name)}">
+          <span class="label-opt-name">新建标签 “${esc(it.name)}”</span>
+        </div>`;
+      }
+      const color = /^#[0-9a-f]{6}$/i.test(it.color ?? '') ? ` style="--tag:${it.color}"` : '';
+      const meta = it.system ? '可派' : it.archived ? '已归档' : it.count > 0 ? String(it.count) : '';
+      return `<div class="label-opt${it.added ? ' is-on' : ''}${it.archived ? ' is-archived' : ''}${active === i ? ' is-active' : ''}"
+        role="option" aria-selected="${it.added}" data-label="${esc(it.name)}"
+        title="${esc(it.added ? hintText[0] : hintText[1])}">
+        <span class="label-dot"${color}></span>
+        <span class="label-opt-name">${esc(it.name)}</span>
+        ${meta ? `<span class="label-opt-meta">${esc(meta)}</span>` : ''}
+        <span class="label-opt-check" aria-hidden="true">✓</span>
+      </div>`;
+    })
+    .join('');
+}
+
+/**
+ * 挂一个标签输入框：自己管开合、键盘、鼠标和候选重绘。
+ * selected() 给当前选中的标签；onPick(item) 真正去加/摘，返回 false 表示这次没改动。
+ * item.kind: 'label'（单个标签）| 'create'（新建）| 'many'（逗号批量）。
+ */
+function mountLabelCombo({ root, input, menu, selected, onPick, hints, groupLabel }) {
+  if (!root || !input || !menu) return null;
+  const combo = { open: false, items: [], active: -1 };
+  const tip = hints ?? ['点一下摘掉', '点一下打上'];
+
+  const render = () => {
+    if (!combo.open) {
+      menu.hidden = true;
+      return;
+    }
+    combo.items = labelMenuItems(input.value, selected(), groupLabel);
+    menu.innerHTML = labelMenuHtml(combo.items, combo.active, tip);
+    menu.hidden = false;
+    menu.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+  };
+
+  const open = () => {
+    combo.open = true;
+    combo.active = -1;
+    render();
+    input.setAttribute('aria-expanded', 'true');
+  };
+
+  const close = () => {
+    combo.open = false;
+    combo.items = [];
+    combo.active = -1;
+    menu.hidden = true;
+    menu.innerHTML = '';
+    input.setAttribute('aria-expanded', 'false');
+  };
+
+  /** 只在可点的行之间跳，组标题不算一格。 */
+  const move = (step) => {
+    const pickable = [];
+    combo.items.forEach((it, i) => {
+      if (it.kind === 'label' || it.kind === 'create') pickable.push(i);
+    });
+    if (!pickable.length) return;
+    const at = pickable.indexOf(combo.active);
+    const next = at < 0 ? (step > 0 ? 0 : pickable.length - 1) : (at + step + pickable.length) % pickable.length;
+    combo.active = pickable[next];
+    render();
+  };
+
+  const apply = async (item) => {
+    if (!item) return;
+    const ok = await onPick(item);
+    if (ok === false) return;
+    input.value = '';
+    combo.active = -1;
+    render();
+  };
+
+  /** Enter / 「加」：有高亮就取高亮，否则同名 > 能补全的 > 新建。 */
+  const submitText = async () => {
+    const raw = input.value;
+    // 输入框是空的、但已经用 ↑↓ 选中一行：回车就取那一行（摘掉也是在这里）
+    if (combo.open && combo.active >= 0) return apply(combo.items[combo.active]);
+    if (!raw.trim()) {
+      if (!combo.open) open();
+      return;
+    }
+    const many = splitLabels(raw);
+    if (many.length > 1) return apply({ kind: 'many', names: many }); // 逗号分隔 = 批量贴，不猜高亮
+    const typed = raw.trim();
+    const q = typed.toLowerCase();
+    const labels = combo.items.filter((it) => it.kind === 'label');
+    // 手打的「bu」补成「bug」，但「性能测试」不会悄悄变成「性能」
+    const exact = labels.find((it) => it.name.toLowerCase() === q);
+    const completing = labels.find((it) => it.name.toLowerCase().startsWith(q));
+    const create = combo.items.find((it) => it.kind === 'create') ?? { kind: 'create', name: typed };
+    const chosen = exact ?? completing ?? create;
+    // 手打的只会「加」；要摘掉请点那一行（带 ✓）或 chip 上的 ×，免得回车误删
+    await apply(chosen.kind === 'label' ? { ...chosen, added: false } : chosen);
+  };
+
+  input.setAttribute('autocomplete', 'off');
+  input.addEventListener('focus', open);
+  // Esc 收起后输入框还留着焦点，再点一下不会有 focus 事件，所以点击也要能开
+  input.addEventListener('click', () => {
+    if (!combo.open) open();
+  });
+  input.addEventListener('input', () => {
+    if (!combo.open) open();
+    else {
+      combo.active = -1;
+      render();
+    }
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing) return; // 中文输入法选词时别抢 Enter / ↑↓
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!combo.open) open();
+      else move(e.key === 'ArrowDown' ? 1 : -1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      submitText();
+    } else if (e.key === 'Escape') {
+      if (combo.open) {
+        e.preventDefault();
+        e.stopPropagation(); // 别让全局 Esc 把整页踢回看板 / 关掉弹窗
+        close();
+      }
+    } else if (e.key === 'Tab') {
+      close();
+    }
+  });
+  // 面板里的按下别让输入框失焦，否则 click 还没到菜单就关了
+  menu.addEventListener('mousedown', (e) => e.preventDefault());
+  menu.addEventListener('click', (e) => {
+    const create = e.target.closest('[data-create]');
+    if (create) return apply({ kind: 'create', name: create.dataset.create });
+    const row = e.target.closest('[data-label]');
+    if (!row) return;
+    apply(combo.items.find((it) => it.kind === 'label' && it.name === row.dataset.label));
+  });
+  document.addEventListener('click', (e) => {
+    if (combo.open && !root.contains(e.target)) close();
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (!root.contains(document.activeElement)) close();
+    }, 0);
+  });
+
+  return { combo, render, open, close, submitText };
+}
+
+async function addLabels(names) {
+  const fresh = [...new Set(names)].filter((n) => n && !labelOnIssue(n));
+  if (!fresh.length) {
+    hint('这些标签已经在单上了');
+    return true; // 目标已达成：不发请求，但当作做完了，好让输入框清空
+  }
+  const ok = await patch({ addLabels: fresh });
+  if (ok) hint(`已加标签：${fresh.join('、')}`);
+  return ok;
+}
+
+async function removeLabel(label) {
+  const ok = await patch({ removeLabels: [label] });
+  if (ok) hint(label === state.readyLabel ? '已取消派单' : `已移除标签：${label}`);
+  return ok;
+}
+
+/** 工单页：选中一行直接改 beads。 */
+state.combos.issue = mountLabelCombo({
+  root: $('#labelCombo'),
+  input: $('#panelLabel'),
+  menu: $('#labelMenu'),
+  selected: () => state.current?.labels ?? [],
+  onPick: (item) => {
+    if (item.kind === 'many') return addLabels(item.names);
+    if (item.kind === 'create') return addLabels([item.name]);
+    return item.added ? removeLabel(item.name) : addLabels([item.name]);
+  },
+});
+
+// —— 新建工单：标签先攒在本地，点「创建」再一起提交 ——
+let createLabels = [];
+
+function renderCreateLabels() {
+  const box = $('#createLabels');
+  if (!box) return;
+  box.innerHTML = createLabels.map(removableChip).join('');
+  box.hidden = !createLabels.length;
+}
+
+function addCreateLabel(name) {
+  if (!name || createLabels.includes(name)) return;
+  createLabels = [...createLabels, name];
+}
+
+state.combos.create = mountLabelCombo({
+  root: $('#createLabelCombo'),
+  input: $('#createLabel'),
+  menu: $('#createLabelMenu'),
+  selected: () => createLabels,
+  groupLabel: '已选',
+  hints: ['点一下从这次要打的标签里去掉', '点一下加进这次要打的标签'],
+  onPick: (item) => {
+    if (item.kind === 'many') item.names.forEach(addCreateLabel);
+    else if (item.kind === 'create') addCreateLabel(item.name);
+    else if (item.added) createLabels = createLabels.filter((n) => n !== item.name);
+    else addCreateLabel(item.name);
+    renderCreateLabels();
+    return true;
+  },
+});
+
+function renderPanelWorkflow(issue) {
+  const wf = workflowOf(issue);
+  const label = wf.label || workflowName(wf.column);
+  const detail = wf.detail ? `<span class="wf-detail">${esc(wf.detail)}</span>` : '';
+  let when = '';
+  if (wf.column === 'done' && wf.endedAt) when = `<span class="panel-wf-when mono">${esc(fmtTime(wf.endedAt))} 完成</span>`;
+  else if (wf.active) when = `<span class="panel-wf-when mono">${esc(fmtTime(wf.startedAt))} 接单</span>`;
+  else if (wf.tone === 'bad' && wf.startedAt) when = `<span class="panel-wf-when mono">最近一次 ${esc(fmtTime(wf.startedAt))}</span>`;
+  $('#panelWorkflow').innerHTML = `<span class="wf wf-${esc(wf.tone ?? 'idle')}"><i aria-hidden="true"></i><b>${esc(label)}</b>${detail}</span>${when}`;
+}
+
+function renderCloseButton(issue) {
+  const btn = $('#panelClose');
+  const hint = $('#panelCloseHint');
+  if (!btn || !hint) return;
+  const closed = issue.status === 'closed';
+  btn.textContent = closed ? '重新打开工单' : '关闭工单';
+  btn.className = closed ? 'ghost' : 'ghost danger';
+  const wf = workflowOf(issue);
+  hint.textContent = closed
+    ? '重开后不会自动派单；需要时再点「让 AI 干这个」。'
+    : wf.active
+      ? 'AI 还在跑。关单只是归档，不会中断这一轮。'
+      : '关闭 = 归档；不是验收通过。';
 }
 
 const commentKey = (c) => `${c.author}|${c.created}|${String(c.text ?? '').slice(0, 24)}`;
@@ -1067,7 +1427,10 @@ function applyLiveIssue(issue, comments) {
   const prev = state.current;
   if (!prev) return;
   const changed = [];
-  if (issue.status !== prev.status) changed.push(`状态改成「${statusLabel(issue.status)}」`);
+  if (issue.status !== prev.status) changed.push(issue.status === 'closed' ? '工单已关闭' : '工单已重新打开');
+  const wfA = workflowOf(prev);
+  const wfB = workflowOf(issue);
+  if (wfA.column !== wfB.column || wfA.label !== wfB.label) changed.push(`AI 进度：${wfB.label || workflowName(wfB.column)}`);
   if (Number(issue.priority) !== Number(prev.priority)) changed.push(`优先级改成「${prioLabel(issue.priority)}」`);
   if (issue.title !== prev.title) changed.push('标题改了');
   const labelsA = [...(prev.labels ?? [])].sort().join(',');
@@ -1107,19 +1470,28 @@ function scrollToNewComments() {
 function renderDispatch(issue) {
   const btn = $('#panelDispatch');
   const hintEl = $('#panelDispatchHint');
+  const wf = workflowOf(issue);
+  // 已关闭的单优先给「重开」：即使它身上还留着可派标签，也不该显示成「取消派单」。
+  if (issue.status === 'closed') {
+    btn.textContent = '重开并派给 AI';
+    btn.className = 'primary';
+    hintEl.textContent = `会重新打开并打上 ${state.readyLabel}`;
+    return;
+  }
+  // 上一轮没跑完（需要人 / 已中断）：给一个明确的重派入口，而不是「取消派单」。
+  if (wf.column === 'active' && !wf.active) {
+    btn.textContent = '重新派给 AI';
+    btn.className = 'primary';
+    hintEl.textContent = '会把工单改回待接并保留可派标签；下一轮会重新接单';
+    return;
+  }
   if (issue.labels.includes(state.readyLabel)) {
     btn.textContent = '取消派单';
     btn.className = 'ghost';
     hintEl.textContent =
       issue.status === 'open'
         ? `已标 ${state.readyLabel}：${state.watch?.running ? '自动流水线会自己接它' : '点右上角「自动流水线」或 node wf.mjs work'}`
-        : `已标 ${state.readyLabel}，但状态是「${statusLabel(issue.status)}」——engine 只接「${statusLabel('open')}」`;
-    return;
-  }
-  if (issue.status === 'closed') {
-    btn.textContent = '重开并派给 AI';
-    btn.className = 'primary';
-    hintEl.textContent = `会改回「${statusLabel('open')}」并打上 ${state.readyLabel}`;
+        : `已标 ${state.readyLabel}，但工单不是待接（${wf.label || workflowName(wf.column)}）——engine 只接 open + 可派`;
     return;
   }
   btn.textContent = '让 AI 干这个';
@@ -1133,13 +1505,17 @@ async function dispatchCurrent() {
   const issue = state.current;
   if (!issue || state.dispatching) return;
   const ready = issue.labels.includes(state.readyLabel);
-  const body = ready
-    ? { removeLabels: [state.readyLabel] }
-    : { addLabels: [state.readyLabel], ...(issue.status === 'closed' ? { status: 'open' } : {}) };
+  const wf = workflowOf(issue);
+  const reopening = issue.status === 'closed' || (issue.status !== 'open' && !wf.active);
+  const body = reopening
+    ? { status: 'open', addLabels: [state.readyLabel] }
+    : ready
+      ? { removeLabels: [state.readyLabel] }
+      : { addLabels: [state.readyLabel] };
   state.dispatching = true;
   const btn = $('#panelDispatch');
   btn.disabled = true;
-  btn.textContent = ready ? '取消中…' : '派单中…'; // bd 往返要半秒，先给个反馈
+  btn.textContent = reopening ? '重开中…' : ready ? '取消中…' : '派单中…'; // bd 往返要半秒，先给个反馈
   try {
     // 用 PATCH 的返回值直接翻面，不等 bd 列表刷新（否则连点会错一步）
     const { issue: saved } = await api(`/api/issues/${encodeURIComponent(issue.id)}`, {
@@ -1148,7 +1524,7 @@ async function dispatchCurrent() {
     });
     state.current = saved;
     renderDispatch(saved);
-    hint(ready ? '已取消派单' : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`);
+    hint(reopening ? `已重新打开并标 ${state.readyLabel}` : ready ? '已取消派单' : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`);
     // 后台对齐：不堵按钮（bd 列表 + 评论要一两秒）
     const sync = document.body.dataset.mode === 'board' ? load() : Promise.resolve();
     Promise.all([sync, openIssue(saved.id, { keepTab: true })]).catch(() => {});
@@ -1307,7 +1683,7 @@ function renderTrace({ runs, history }) {
 
   if (history.length) {
     blocks.push(`<div class="trace-block">
-      <div class="trace-title">状态变更（bd history）</div>
+      <div class="trace-title">工单开关（bd history）</div>
       ${history
         .map(
           (h) =>
@@ -1318,7 +1694,7 @@ function renderTrace({ runs, history }) {
   }
 
   if (!runs.length) {
-    blocks.push('<div class="trace-block"><div class="empty">还没有 engine 运行记录（.engine/runs）</div></div>');
+    blocks.push('<div class="trace-block"><div class="empty">还没有 engine 运行记录（.hlwd/runs）</div></div>');
   }
 
   for (const run of runs) {
@@ -1347,7 +1723,7 @@ function renderTrace({ runs, history }) {
     blocks.push(`<div class="trace-block">
       <div class="trace-title mono">${esc(run.runId)}</div>
       ${steps.join('')}
-      <div class="trace-foot">.engine/runs/${esc(run.runId)}/</div>
+      <div class="trace-foot">.hlwd/runs/${esc(run.runId)}/</div>
     </div>`);
   }
 
@@ -1662,6 +2038,7 @@ async function patch(fields, id = state.current?.id) {
     });
     if (document.body.dataset.mode === 'board') await load();
     if (state.current?.id === id) await openIssue(id, { keepTab: true });
+    if (fields.addLabels || fields.removeLabels) loadTagCatalog();
     return true;
   } catch (e) {
     hint(`改动失败：${e.message}`, true);
@@ -1784,68 +2161,257 @@ async function logout() {
 }
 
 
-// —— 设置 ——
+// —— 设置：左侧分区，各自保存；标签库直接操作，不再挤一张大表单 ——
+function showSettingsSection(name) {
+  for (const btn of document.querySelectorAll('#settingsNav [data-sec]')) {
+    btn.classList.toggle('active', btn.dataset.sec === name);
+  }
+  for (const panel of document.querySelectorAll('#settingsDialog [data-panel]')) {
+    panel.hidden = panel.dataset.panel !== name;
+  }
+}
+
 async function openSettings() {
-  const { config: cfg, prompts, gate } = await api('/api/settings');
+  const [{ config: cfg, prompts, gate }, tagResult] = await Promise.all([
+    api('/api/settings'),
+    api('/api/tags')
+      .then((payload) => ({ tags: payload.tags ?? [] }))
+      .catch((error) => ({ error })),
+  ]);
   state.gate = gate ?? { path: '', exists: false };
+  state.tagCatalog = tagResult.tags ?? [];
+  state.tagError = tagResult.error ?? null;
+  state.editTag = null;
+  state.tags = cfg.tags ?? state.tags;
+  $('#settingsProject').textContent = state.project.dir || '—';
   $('#gatePath').textContent = gate?.path ?? '—';
   $('#gatePath').title = gate?.exists ? '门禁脚本路径' : '门禁脚本还不存在（重新打开项目会自动创建）';
-  $('#statusLabels').innerHTML = (cfg.columns ?? state.statuses)
-    .map((s) => `<label>${esc(s)}<input name="status:${esc(s)}" value="${esc(cfg.labels?.statuses?.[s] ?? '')}" /></label>`)
-    .join('');
-  $('#priorityLabels').innerHTML = [0, 1, 2, 3, 4]
-    .map((p) => `<label>P${p}<input name="prio:${p}" value="${esc(cfg.labels?.priorities?.[p] ?? '')}" /></label>`)
-    .join('');
-  const f = $('#settingsForm');
+  const f = $('#engineForm');
   const e = cfg.engine ?? {};
   f.runner.value = e.runner ?? 'pi';
   f.sandbox.value = e.sandbox ?? 'workspace-write';
   f.model.value = e.model ?? '';
   f.thinking.value = e.thinking ?? '';
   f.attempts.value = e.attempts ?? 2;
+  f.timeoutMin.value = Math.max(1, Math.round((e.timeoutMs ?? 1800000) / 60000));
   f.actor.value = e.actor ?? 'ai';
   f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
   f.gitCommit.checked = e.gitCommit !== false;
   f.autoWatch.checked = e.autoWatch === true;
-  f.prompt_execute.value = prompts?.execute ?? '';
-  f.prompt_review.value = prompts?.review ?? '';
+  const p = $('#promptForm');
+  p.prompt_execute.value = prompts?.execute ?? '';
+  p.prompt_review.value = prompts?.review ?? '';
+  renderTagList();
+  showSettingsSection('tags');
   $('#settingsDialog').showModal();
 }
 
-async function saveSettings(event) {
+async function saveEngine(event) {
   event.preventDefault();
   const f = new FormData(event.target);
-  const payload = { labels: { statuses: {}, priorities: {} }, engine: {} };
-  for (const [key, value] of f.entries()) {
-    if (key.startsWith('status:')) payload.labels.statuses[key.slice(7)] = String(value);
-    else if (key.startsWith('prio:')) payload.labels.priorities[key.slice(5)] = String(value);
-  }
-  payload.prompts = {
-    execute: String(f.get('prompt_execute') ?? ''),
-    review: String(f.get('prompt_review') ?? ''),
-  };
-  payload.engine = {
-    runner: f.get('runner'),
-    sandbox: f.get('sandbox'),
-    model: String(f.get('model') ?? ''),
-    thinking: String(f.get('thinking') ?? ''),
-    attempts: Number(f.get('attempts')),
-    actor: String(f.get('actor') ?? ''),
-    readyLabel: String(f.get('readyLabel') ?? ''),
-    gitCommit: f.get('gitCommit') === 'on',
-    autoWatch: f.get('autoWatch') === 'on',
+  const payload = {
+    engine: {
+      runner: f.get('runner'),
+      sandbox: f.get('sandbox'),
+      model: String(f.get('model') ?? ''),
+      thinking: String(f.get('thinking') ?? ''),
+      attempts: Number(f.get('attempts')),
+      timeoutMs: Math.round(Number(f.get('timeoutMin') ?? 30) * 60000),
+      actor: String(f.get('actor') ?? ''),
+      readyLabel: String(f.get('readyLabel') ?? ''),
+      gitCommit: f.get('gitCommit') === 'on',
+      autoWatch: f.get('autoWatch') === 'on',
+    },
   };
   try {
     const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    applyConfig({ statuses: saved.config.columns, labels: saved.config.labels, engine: saved.config.engine });
-    $('#settingsDialog').close();
+    state.tags = saved.config.tags ?? state.tags;
+    applyConfig({ workflow: state.workflowColumns, tags: state.tags, labels: saved.config.labels, engine: saved.config.engine });
+    await loadTagCatalog();
+    renderTagList();
     if (document.body.dataset.mode === 'board') await load();
     else if (state.current) await openIssue(state.current.id, { keepTab: true });
-    hint('设置已保存');
+    hint('执行配置已保存，engine 下次运行生效');
   } catch (err) {
     hint(`保存失败：${err.message}`, true);
   }
 }
+
+async function savePrompts(event) {
+  event.preventDefault();
+  const f = new FormData(event.target);
+  try {
+    const saved = await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ prompts: { execute: String(f.get('prompt_execute') ?? ''), review: String(f.get('prompt_review') ?? '') } }),
+    });
+    const p = $('#promptForm');
+    p.prompt_execute.value = saved.prompts?.execute ?? '';
+    p.prompt_review.value = saved.prompts?.review ?? '';
+    hint('提示词已保存；清空并保存会恢复工具自带模板');
+  } catch (err) {
+    hint(`保存失败：${err.message}`, true);
+  }
+}
+
+// —— 标签库 ——
+function renderTagList() {
+  const box = $('#tagList');
+  if (!box) return;
+  if (state.tagError) {
+    const msg = String(state.tagError.message ?? state.tagError);
+    const stale = /unknown api|HTTP 404|not found/i.test(msg);
+    box.innerHTML = `<div class="tag-error">
+      <b>${stale ? '看板服务端还是旧版本' : '标签库读不出来'}</b>
+      <p>${esc(msg)}</p>
+      ${stale ? '<p>新界面已经加载，但后台进程没换。重启一次看板：<code>node wf.mjs stop</code>，再 <code>node wf.mjs board --bg</code>。</p>' : '<p>重启看板后再试；如果还不行，看终端里的报错。</p>'}
+    </div>`;
+    return;
+  }
+  if (!state.tagCatalog.length) {
+    box.innerHTML = '<div class="empty">还没有标签。先添加一个，或在工单上打标签后回来登记。</div>';
+    return;
+  }
+  box.innerHTML = state.tagCatalog.map(tagRow).join('');
+}
+
+function tagRow(tag) {
+  if (state.editTag === tag.name) {
+    return `<div class="tag-row is-editing" data-tag="${esc(tag.name)}">
+      <input class="tag-edit-name" data-f="name" value="${esc(tag.name)}" maxlength="40" aria-label="标签名" />
+      <input class="tag-edit-color" data-f="color" type="color" value="${esc(tag.color || '#7fb0c9')}" aria-label="标签颜色" />
+      <input class="tag-edit-desc" data-f="desc" value="${esc(tag.desc)}" maxlength="200" placeholder="说明" aria-label="标签说明" />
+      <button type="button" class="primary tiny" data-act="save">保存</button>
+      <button type="button" class="ghost tiny" data-act="cancel">取消</button>
+    </div>`;
+  }
+  const badges = [
+    tag.system ? '<span class="tag-badge tag-system">系统</span>' : '',
+    tag.unregistered ? '<span class="tag-badge">未登记</span>' : '',
+    tag.archived ? '<span class="tag-badge tag-archived">已归档</span>' : '',
+  ].join('');
+  const actions = tag.system
+    ? '<span class="tag-protected">engine 派单开关</span>'
+    : `<button type="button" class="ghost tiny" data-act="edit">编辑</button>
+       <button type="button" class="ghost tiny" data-act="archive">${tag.archived ? '恢复' : '归档'}</button>
+       <button type="button" class="ghost tiny danger" data-act="delete">删除</button>`;
+  return `<div class="tag-row${tag.archived ? ' is-archived' : ''}" data-tag="${esc(tag.name)}">
+    <span class="tag-swatch"${tag.color ? ` style="--tag:${esc(tag.color)}"` : ''} aria-hidden="true"></span>
+    <div class="tag-main">
+      <div class="tag-name">${esc(tag.name)}${badges}</div>
+      <div class="tag-desc">${esc(tag.desc || '（没有说明）')}</div>
+    </div>
+    <div class="tag-count mono" title="使用这个标签的工单数">${tag.count} 张</div>
+    <div class="tag-actions">${actions}</div>
+  </div>`;
+}
+
+async function refreshTags(payload) {
+  if (payload?.tags) state.tagCatalog = payload.tags;
+  else state.tagCatalog = (await api('/api/tags')).tags ?? [];
+  // chip 颜色来自 state.tags；标签库操作后重新取一次元信息，顺便同步 readyLabel。
+  await api('/api/meta').then(applyConfig).catch(() => {});
+  renderTagList();
+  render();
+  if (state.current) await openIssue(state.current.id, { keepTab: true }).catch(() => {});
+}
+
+async function addTag(event) {
+  event.preventDefault();
+  const form = event.target;
+  const f = new FormData(form);
+  try {
+    const out = await api('/api/tags', {
+      method: 'POST',
+      body: JSON.stringify({ name: String(f.get('name') ?? ''), color: String(f.get('color') ?? ''), desc: String(f.get('desc') ?? '') }),
+    });
+    form.reset();
+    form.color.value = '#7fb0c9';
+    await refreshTags(out);
+    hint('标签已登记');
+  } catch (err) {
+    state.tagError = err;
+    renderTagList();
+    const stale = /unknown api|HTTP 404|not found/i.test(String(err.message ?? ''));
+    hint(
+      stale
+        ? '标签接口不可用：看板服务端还是旧版本。先 node wf.mjs stop，再 node wf.mjs board --bg'
+        : `添加失败：${err.message}`,
+      true,
+    );
+  }
+}
+
+$('#tagList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  const row = e.target.closest('[data-tag]');
+  if (!btn || !row) return;
+  const name = row.dataset.tag;
+  const tag = state.tagCatalog.find((t) => t.name === name);
+  if (!tag) return;
+  if (btn.dataset.act === 'edit') {
+    state.editTag = name;
+    renderTagList();
+    return;
+  }
+  if (btn.dataset.act === 'cancel') {
+    state.editTag = null;
+    renderTagList();
+    return;
+  }
+  if (btn.dataset.act === 'save') {
+    const nextName = row.querySelector('[data-f="name"]').value.trim();
+    const color = row.querySelector('[data-f="color"]').value;
+    const desc = row.querySelector('[data-f="desc"]').value;
+    if (nextName !== name && tag.count > 0 && !window.confirm(`改名会同步到 ${tag.count} 张工单，继续？`)) return;
+    try {
+      const out = await api(`/api/tags/${encodeURIComponent(name)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: nextName, color, desc }),
+      });
+      state.editTag = null;
+      await refreshTags(out);
+      hint(out.affected ? `标签已改名，同步了 ${out.affected} 张工单` : '标签已保存');
+    } catch (err) {
+      hint(`保存失败：${err.message}`, true);
+    }
+    return;
+  }
+  if (btn.dataset.act === 'archive') {
+    try {
+      const out = await api(`/api/tags/${encodeURIComponent(name)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ archived: !tag.archived }),
+      });
+      await refreshTags(out);
+      hint(tag.archived ? '标签已恢复' : '标签已归档：不再出现在选择提示里，已有工单保留');
+    } catch (err) {
+      hint(`操作失败：${err.message}`, true);
+    }
+    return;
+  }
+  if (btn.dataset.act === 'delete') {
+    const msg = tag.count
+      ? `删除「${name}」会从 ${tag.count} 张工单上摘掉这个标签，且不可撤销。继续？`
+      : `删除标签「${name}」？`;
+    if (!window.confirm(msg)) return;
+    try {
+      const out = await api(`/api/tags/${encodeURIComponent(name)}?purge=1`, { method: 'DELETE' });
+      await refreshTags(out);
+      hint('标签已删除');
+    } catch (err) {
+      hint(`删除失败：${err.message}`, true);
+    }
+  }
+});
+
+$('#settingsNav').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-sec]');
+  if (btn) showSettingsSection(btn.dataset.sec);
+});
+$('#engineForm').addEventListener('submit', saveEngine);
+$('#promptForm').addEventListener('submit', savePrompts);
+$('#tagAddForm').addEventListener('submit', addTag);
 
 // 点卡片 / 列表行 = 打开这张卡的独立地址；标题本身就是链接，中键 / Ctrl 点能开新标签页
 $('#board').addEventListener('click', (e) => {
@@ -1868,50 +2434,7 @@ $('#board').addEventListener('keydown', (e) => {
   location.assign(`/issue/${encodeURIComponent(el.dataset.id)}`);
 });
 
-// —— 拖卡片到别的列 = 改状态 ——
-let dragId = null;
-const clearDropMarks = () => {
-  for (const el of document.querySelectorAll('.card.is-dragging')) el.classList.remove('is-dragging');
-  for (const el of document.querySelectorAll('.col.is-drop-target')) el.classList.remove('is-drop-target');
-};
-$('#board').addEventListener('dragstart', (e) => {
-  const el = e.target.closest?.('.card');
-  if (!el) return;
-  dragId = el.dataset.id;
-  el.classList.add('is-dragging');
-  e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', dragId);
-});
-$('#board').addEventListener('dragend', () => {
-  dragId = null;
-  clearDropMarks();
-});
-$('#board').addEventListener('dragover', (e) => {
-  if (!dragId) return;
-  const col = e.target.closest?.('.col');
-  if (!col) return;
-  e.preventDefault(); // 不拦住就不允许松手
-  e.dataTransfer.dropEffect = 'move';
-  for (const other of document.querySelectorAll('.col.is-drop-target')) if (other !== col) other.classList.remove('is-drop-target');
-  col.classList.add('is-drop-target');
-});
-$('#board').addEventListener('drop', async (e) => {
-  if (!dragId) return;
-  const col = e.target.closest?.('.col');
-  e.preventDefault();
-  const id = dragId;
-  dragId = null;
-  clearDropMarks();
-  const status = col?.dataset.status;
-  const issue = state.issues.find((i) => i.id === id);
-  // 拖回原列、拖到不认识的列：当没发生
-  if (!col || !status || !issue || issue.status === status) return;
-  const from = statusLabel(issue.status);
-  issue.status = status; // 先在本地翻面，手一松就能看到它落到哪一列
-  render();
-  const ok = await patch({ status }, id);
-  hint(ok ? `「${issue.title}」从「${from}」移到「${statusLabel(status)}」` : '改状态失败', !ok);
-});
+// 看板不再支持拖拽改状态：工作流进度由 engine 写，人工只能关单/重开。
 // —— 搜索 / 筛选条 / 预设 ——
 
 $('#q').addEventListener('input', (e) => {
@@ -2187,7 +2710,13 @@ $('#showRaw').addEventListener('click', () => {
   );
   pre.hidden = false;
 });
-$('#panelStatus').addEventListener('change', (e) => patch({ status: e.target.value }));
+$('#panelClose').addEventListener('click', async () => {
+  const issue = state.current;
+  if (!issue) return;
+  const next = issue.status === 'closed' ? 'open' : 'closed';
+  const ok = await patch({ status: next });
+  if (ok) hint(next === 'closed' ? '工单已关闭（归档）' : '工单已重新打开；要派单再点「让 AI 干这个」');
+});
 $('#watch').addEventListener('click', toggleWatch);
 $('#panelDispatch').addEventListener('click', dispatchCurrent);
 $('#attachPick').addEventListener('click', () => $('#attachFile').click());
@@ -2230,7 +2759,7 @@ document.addEventListener('keydown', (e) => {
     $('#q').select();
   } else if (e.key === 'n' || e.key === 'N') {
     e.preventDefault();
-    $('#create').showModal();
+    openCreate();
   }
 });
 $('#issuePage').addEventListener('paste', (e) => {
@@ -2271,23 +2800,41 @@ $('#lightbox').addEventListener('click', (e) => {
   $('#lightbox').close();
 });
 $('#panelPriority').addEventListener('change', (e) => patch({ priority: Number(e.target.value) }));
-$('#panelLabelAdd').addEventListener('click', () => {
-  const labels = $('#panelLabel')
-    .value.split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (labels.length) patch({ addLabels: labels });
+$('#panelLabels').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-remove-label]');
+  if (btn) return removeLabel(btn.dataset.removeLabel);
 });
+
+$('#panelLabelAdd').addEventListener('click', () => state.combos.issue?.submitText());
 $('#panelCommentSend').addEventListener('click', sendComment);
 $('#panelComment').addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') sendComment();
 });
 
-$('#new').addEventListener('click', () => $('#create').showModal());
+/** 新建弹窗：每次打开都是一张白纸，别带着上次选的标签。 */
+function openCreate() {
+  createLabels = [];
+  renderCreateLabels();
+  $('#createLabel').value = '';
+  state.combos.create?.close();
+  $('#create').showModal();
+}
+
+$('#new').addEventListener('click', openCreate);
 $('#createCancel').addEventListener('click', () => $('#create').close());
+$('#createLabelAdd').addEventListener('click', () => state.combos.create?.submitText());
+$('#createLabels').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-remove-label]');
+  if (!btn) return;
+  createLabels = createLabels.filter((n) => n !== btn.dataset.removeLabel);
+  renderCreateLabels();
+  state.combos.create?.render();
+});
 $('#createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
+  // 点「创建」时输入框里还没回车的文字也算上，别默默丢掉
+  const labels = [...new Set([...createLabels, ...splitLabels($('#createLabel').value)])];
   try {
     const { issue } = await api('/api/issues', {
       method: 'POST',
@@ -2296,13 +2843,14 @@ $('#createForm').addEventListener('submit', async (e) => {
         description: f.get('description'),
         type: f.get('type'),
         priority: Number(f.get('priority')),
-        labels: String(f.get('labels') ?? '')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
+        labels,
       }),
     });
     e.target.reset();
+    createLabels = [];
+    renderCreateLabels();
+    $('#createLabel').value = '';
+    state.combos.create?.close();
     $('#create').close();
     await load();
     hint(`已创建 ${issue.id}`);
@@ -2348,8 +2896,7 @@ for (const dialog of document.querySelectorAll('dialog.dialog')) {
   });
 }
 
-$('#settingsCancel').addEventListener('click', () => $('#settingsDialog').close());
-$('#settingsForm').addEventListener('submit', saveSettings);
+// 设置各分区自己保存；关闭按钮由通用 dialog 逻辑处理。
 
 // —— 项目切换 ——
 function renderRecent(recent = state.project.recent) {
@@ -2377,6 +2924,7 @@ async function submitProject(event) {
     state.filter = emptyFilter();
     $('#q').value = '';
     await loadPrefs();
+    await loadTagCatalog();
     if (document.body.dataset.mode === 'issue') location.assign('/'); // 换了项目，当前这张卡不属于它了
     $('#projectDialog').close();
     await load();
@@ -2412,6 +2960,7 @@ async function enterBoard() {
     })
     .catch(() => api('/api/meta').then(applyConfig).catch(() => {}));
   await loadPrefs(); // 列/列宽/预设按「人 + 项目」来，换人换项目都是另一套
+  await loadTagCatalog(); // 标签提示（含未登记标签），失败不挡页面
 
   const issueId = issueIdFromPath();
   if (issueId) {
