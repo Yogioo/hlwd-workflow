@@ -514,3 +514,35 @@ test('附件：上传 → 列表 → 取回 → 删除', async () => {
     assert.equal((await fetch(`${base}/api/issues/hlwd-img1/attachments/nope${t}`)).status, 404);
   });
 });
+
+test('运行目录文件：只放白名单，越界、别的卡、不在名单里一律 404', async () => {
+  await withServer(async ({ base, dir }) => {
+    const cardId = 'hlwd-file';
+    const runId = `${cardId}-1700000000001`;
+    const runDir = path.join(dir, '.hlwd', 'runs', runId);
+    const at = (card, name) =>
+      `${base}/api/issues/${card}/runs/${runId}/file?name=${encodeURIComponent(name)}&token=${TOKEN}`;
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(
+      path.join(runDir, 'run.json'),
+      JSON.stringify({ runId, card: { id: cardId }, outcome: 'closed', attempts: [] }),
+    );
+    await fs.writeFile(path.join(runDir, 'gate-1.log'), '# 门禁\nnpm test 失败\n');
+    await fs.writeFile(path.join(runDir, 'prompt-exec-1.md'), '你是执行端');
+
+    const gate = await fetch(at(cardId, 'gate-1.log'));
+    assert.equal(gate.status, 200);
+    assert.match((await gate.json()).text, /npm test 失败/);
+
+    const prompt = await fetch(at(cardId, 'prompt-exec-1.md'));
+    assert.equal(prompt.status, 200);
+    assert.equal((await prompt.json()).text, '你是执行端');
+
+    // run.json 是内部记录，不在白名单里
+    assert.equal((await fetch(at(cardId, 'run.json'))).status, 404);
+    // 越界 / 别的卡的 run / 不存在的文件
+    assert.equal((await fetch(at(cardId, '../../secret'))).status, 404);
+    assert.equal((await fetch(at('other-card', 'gate-1.log'))).status, 404);
+    assert.equal((await fetch(at(cardId, 'gate-2.log'))).status, 404);
+  });
+});

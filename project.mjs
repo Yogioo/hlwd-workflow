@@ -11,9 +11,31 @@ export const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
-export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch'];
-const RUNNERS = ['pi', 'codex', 'agent'];
+export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch', 'stages'];
+export const RUNNERS = ['pi', 'codex', 'agent'];
 const SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
+/** 只有会起 agent 回合的阶段能单独配 runner/model/thinking；留空 = 继承 engine.* */
+export const STAGES = ['execute', 'review'];
+export const STAGE_KEYS = ['runner', 'model', 'thinking'];
+const STAGE_VALUE_MAX = 120;
+
+const emptyStages = () =>
+  Object.fromEntries(STAGES.map((stage) => [stage, Object.fromEntries(STAGE_KEYS.map((key) => [key, '']))]));
+
+/** 手改配置也收敛成完整形状：缺的阶段补空，多出来的丢掉（不把页面带崩）。 */
+function cleanStages(input) {
+  const out = emptyStages();
+  if (!input || typeof input !== 'object') return out;
+  for (const stage of STAGES) {
+    const raw = input[stage];
+    if (!raw || typeof raw !== 'object') continue;
+    for (const key of STAGE_KEYS) {
+      if (typeof raw[key] === 'string') out[stage][key] = raw[key].trim().slice(0, STAGE_VALUE_MAX);
+    }
+  }
+  return out;
+}
+
 export const MAX_TAGS = 200;
 const TAG_NAME_MAX = 40;
 const TAG_DESC_MAX = 200;
@@ -38,6 +60,7 @@ export const DEFAULT_CONFIG = {
     timeoutMs: 1800000,
     gitCommit: true,
     autoWatch: false,
+    stages: emptyStages(),
   },
 };
 
@@ -140,7 +163,8 @@ export async function readProjectConfig(projectDir) {
     },
     columns: Array.isArray(raw.columns) && raw.columns.length ? raw.columns.map(String) : [...DEFAULT_CONFIG.columns],
     tags: cleanTags(raw.tags),
-    engine: { ...DEFAULT_CONFIG.engine, ...(raw.engine ?? {}) },
+    // stages 单独收敛：浅合并会让缺字段的阶段变成 undefined
+    engine: { ...DEFAULT_CONFIG.engine, ...(raw.engine ?? {}), stages: cleanStages(raw.engine?.stages) },
   };
 }
 
@@ -185,6 +209,27 @@ export async function saveProjectConfig(projectDir, patch = {}) {
   if (engine.autoWatch !== undefined) next.engine.autoWatch = Boolean(engine.autoWatch);
   for (const key of ['model', 'thinking', 'actor', 'readyLabel']) {
     if (engine[key] !== undefined) next.engine[key] = String(engine[key]).trim();
+  }
+  // 阶段覆盖：只认 execute / review 两个阶段，留空表示继承 engine.*（不是“不设模型”）
+  if (engine.stages !== undefined) {
+    if (!engine.stages || typeof engine.stages !== 'object' || Array.isArray(engine.stages)) {
+      throw new Error('engine.stages 必须是对象');
+    }
+    for (const [stage, raw] of Object.entries(engine.stages)) {
+      if (!STAGES.includes(stage)) throw new Error(`未知阶段 ${stage}：只有 ${STAGES.join(' / ')} 可以单独配置`);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.stages.${stage} 必须是对象`);
+      for (const [key, value] of Object.entries(raw)) {
+        if (!STAGE_KEYS.includes(key)) throw new Error(`engine.stages.${stage} 不认识字段 ${key}`);
+        if (typeof value !== 'string') throw new Error(`engine.stages.${stage}.${key} 必须是字符串`);
+        if (value.trim().length > STAGE_VALUE_MAX) throw new Error(`engine.stages.${stage}.${key} 不能超过 ${STAGE_VALUE_MAX} 个字符`);
+      }
+      const merged = { ...next.engine.stages[stage] };
+      for (const key of STAGE_KEYS) if (raw[key] !== undefined) merged[key] = raw[key].trim();
+      if (merged.runner && !RUNNERS.includes(merged.runner)) {
+        throw new Error(`engine.stages.${stage}.runner 只能是 ${RUNNERS.join(' / ')}`);
+      }
+      next.engine.stages[stage] = merged;
+    }
   }
   if (!next.engine.readyLabel) throw new Error('可派标签不能为空：engine 靠它找就绪单');
 

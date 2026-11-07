@@ -1,6 +1,7 @@
 // 单页看板：看 + 建 + 关单/重开 + 评论，全部走 /api/*。
 // 工单只有 open/closed + 标签；看板列是 engine run 的工作流投影。
 import { esc, md } from './markdown.js';
+import { createGraph } from './graph.js';
 
 const AUTO_REFRESH_MS = 5000;
 const VIEW_KEY = 'hlwd.view';
@@ -71,7 +72,6 @@ const state = {
   timer: null,
 };
 
-const statusLabel = (s) => state.labels.statuses[s] ?? s;
 const prioLabel = (p) => state.labels.priorities[p] ?? `P${p}`;
 
 const LEGACY_WORKFLOW = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
@@ -93,14 +93,6 @@ const workflowBadge = (issue, { compact = false } = {}) => {
     <i aria-hidden="true"></i><b>${esc(wf.label)}</b>${wf.detail ? `<span class="wf-detail">${esc(wf.detail)}</span>` : ''}
   </span>`;
 };
-// 全链路里的原因：一行放不下就折起来，别把面板拉成长条
-const reasonCell = (text) => {
-  const s = String(text ?? '');
-  return s.length > 120
-    ? `${esc(s.slice(0, 120))}…<details class="trace-checks"><summary>完整原因</summary><div>${esc(s)}</div></details>`
-    : esc(s);
-};
-
 // ready-for-agent 对人没意义，直接说「可派给 AI」；其余标签带上颜色。
 const chip = (label) =>
   label === state.readyLabel
@@ -1041,10 +1033,9 @@ async function openIssue(id, { keepTab = false } = {}) {
   if (!keepTab) {
     $('#panelLabel').value = '';
     state.combos?.issue?.close();
-    state.trace = null;
-    $('#panelTrace').innerHTML = '';
-    $('#panelRaw').hidden = true;
-    $('#panelRaw').textContent = '';
+    state.graph.runId = null;
+    state.graph.runs = [];
+    state.graph.view?.close();
     showTab('issue');
   }
   watchIssue(id); // 评论 / 字段实时推送
@@ -1438,6 +1429,10 @@ function applyLiveIssue(issue, comments) {
   if (labelsA !== labelsB) changed.push('标签变了');
 
   state.current = issue;
+  // 流程图跟着实时走；但正在看历史某一趟时不覆盖
+  if (document.body.dataset.mode === 'issue' && !$('#viewGraph').hidden && !state.graph.runId) {
+    state.graph.view?.update(issue.graph ?? null);
+  }
   renderIssueMeta(issue);
   renderIssueFields(issue);
   if (issue.title !== prev.title) {
@@ -1643,92 +1638,101 @@ function pastedFiles(event) {
     .filter(Boolean);
 }
 
-async function loadTrace() {
-  if (!state.current || state.trace?.loading) return;
-  const id = state.current.id;
-  state.trace = { loading: true };
-  const [runs, history, journal] = await Promise.all([
-    api(`/api/issues/${encodeURIComponent(id)}/runs`).then((d) => d.runs).catch(() => []),
-    api(`/api/issues/${encodeURIComponent(id)}/history`).then((d) => d.history).catch(() => []),
-    api(`/api/issues/${encodeURIComponent(id)}/journal`).then((d) => d.journal).catch(() => []),
-  ]);
-  state.trace = { runs, history, journal, loading: false };
-  renderTrace({ runs, history });
+// —— 流程 tab：节点图 ——
+// 图是 run.json 的投影，服务端随卡片一起发过来；这里只负责挂载、切历史运行、跟 SSE 更新。
+state.graph = { view: null, runId: null, runs: [] };
+
+function ensureGraphView() {
+  state.graph.view ??= createGraph($('#viewGraph'), {
+    mode: 'run',
+    cardId: () => state.current?.id ?? null,
+    onOpenTurn: ({ runId, phaseKey }) => showTurnFromGraph({ runId, phaseKey }),
+    onOpenGate: () => openGate('gate'),
+  });
+  return state.graph.view;
 }
 
-// 时间统一按本地时区展示（run.json 存 UTC，bd history 带 +08:00，不统一会看得像两个事件）
+/** 运行下拉：默认最新那趟；选了历史就按 runId 取那一趟的图。 */
+function renderRunPicker(runs) {
+  const sel = $('#graphRunSelect');
+  const wrap = $('#graphRunWrap');
+  if (!sel || !wrap) return;
+  if (runs.length <= 1 && !state.graph.runId) {
+    wrap.hidden = true;
+    sel.innerHTML = '';
+    return;
+  }
+  wrap.hidden = false;
+  sel.innerHTML = runs
+    .map((r) => `<option value="${esc(r.runId)}">${esc(fmtTime(r.startedAt))} · ${esc(r.outcome ?? '')}</option>`)
+    .join('');
+  if (state.graph.runId) sel.value = state.graph.runId;
+}
+
+async function mountCardGraph() {
+  const id = state.current?.id;
+  if (!id) return;
+  const view = ensureGraphView();
+  if (!state.graph.runId) view.update(state.current.graph ?? null);
+  const runs = await api(`/api/issues/${encodeURIComponent(id)}/runs`)
+    .then((d) => d.runs ?? [])
+    .catch(() => []);
+  if (state.current?.id !== id) return;
+  state.graph.runs = runs;
+  renderRunPicker(runs);
+}
+
+async function selectGraphRun(runId) {
+  const id = state.current?.id;
+  if (!id) return;
+  state.graph.runId = String(runId || '') || null;
+  if (!state.graph.runId) {
+    state.graph.view?.update(state.current.graph ?? null);
+    return;
+  }
+  const payload = await api(`/api/issues/${encodeURIComponent(id)}?run=${encodeURIComponent(state.graph.runId)}`).catch(
+    () => null,
+  );
+  if (payload?.issue?.graph) state.graph.view?.update(payload.issue.graph);
+}
+
+// 时间统一按本地时区展示（run.json 存的是 UTC，直接渲染会和「几点跑的」差一截）
 const fmtTime = (at) => {
   const d = new Date(at ?? '');
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false }).slice(0, 16);
 };
 const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
 
-function showTab(name) {
+/** 只切面板，不做加载：图里点「打开会话」要先切过去再加载指定那一轮。 */
+function activateTab(name) {
   const isIssue = name === 'issue';
-  const isTrace = name === 'trace';
+  const isGraph = name === 'graph';
   const isSession = name === 'session';
   $('#tabIssue').classList.toggle('active', isIssue);
-  $('#tabTrace').classList.toggle('active', isTrace);
+  $('#tabGraph').classList.toggle('active', isGraph);
   $('#tabSession').classList.toggle('active', isSession);
   $('#viewIssue').hidden = !isIssue;
-  $('#viewTrace').hidden = !isTrace;
+  $('#viewGraph').hidden = !isGraph;
   $('#viewSession').hidden = !isSession;
-  if (isTrace) loadTrace();
-  if (isSession) openSession();
 }
 
-// 追溯面板：beads 的状态变更（bd history）+ engine 的 run.json 时间线
-function renderTrace({ runs, history }) {
-  const blocks = [];
-
-  if (history.length) {
-    blocks.push(`<div class="trace-block">
-      <div class="trace-title">工单开关（bd history）</div>
-      ${history
-        .map(
-          (h) =>
-            `<div class="trace-line"><span class="mono">${fmtTime(h.at)}</span> <b>${esc(statusLabel(h.status))}</b>${h.assignee ? `<span class="dot">·</span>${esc(h.assignee)}` : ''}</div>`,
-        )
-        .join('')}
-    </div>`);
-  }
-
-  if (!runs.length) {
-    blocks.push('<div class="trace-block"><div class="empty">还没有 engine 运行记录（.hlwd/runs）</div></div>');
-  }
-
-  for (const run of runs) {
-    const steps = [`<div class="trace-line"><span class="mono">${fmtTime(run.startedAt)}</span> 接单（${esc(run.actor ?? '')} / ${esc(run.runner ?? '')}）</div>`];
-    for (const a of run.attempts ?? []) {
-      const e = a.execute ?? {};
-      steps.push(`<div class="trace-line"><span class="mono">${fmtTime(e.startedAt)}</span> 执行 #${esc(a.attempt)}<span class="dot">·</span>${e.ok == null ? '<b class="live">进行中</b>' : `${fmtMs(e.ms)}<span class="dot">·</span>${e.ok ? 'ok' : '<b class="fail">失败</b>'}`}</div>`);
-      if (!e.ok && e.error) steps.push(`<div class="trace-sub">${esc(e.error)}</div>`);
-
-      const g = a.gate;
-      if (g) {
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(g.startedAt)}</span> 门禁 #${esc(a.attempt)}<span class="dot">·</span>${g.pass == null ? '<b class="live">进行中</b>' : `${fmtMs(g.ms)}<span class="dot">·</span><b class="${g.pass ? 'pass' : 'fail'}">${g.pass ? 'pass' : 'fail'}</b> ${reasonCell(g.reason)}`}</div>`);
-      }
-
-      const r = a.review;
-      if (r) {
-        steps.push(`<div class="trace-line"><span class="mono">${fmtTime(r.startedAt)}</span> 审查 #${esc(a.attempt)}<span class="dot">·</span>${r.pass == null ? '<b class="live">进行中</b>' : `${fmtMs(r.ms)}<span class="dot">·</span><b class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'pass' : 'fail'}</b> ${reasonCell(r.reason)}`}</div>`);
-        if (r.checks?.length) {
-          steps.push(`<details class="trace-checks"><summary>验证 ${r.checks.length} 条</summary>${r.checks.map((c) => `<div>${esc(c)}</div>`).join('')}</details>`);
-        }
-      }
-    }
-    if (run.commit) steps.push(`<div class="trace-line">提交 <span class="mono">${esc(run.commit)}</span></div>`);
-    steps.push(`<div class="trace-line">结局 <b>${esc(run.outcome)}</b>${run.reason ? `<span class="dot">·</span>${esc(run.reason)}` : ''}</div>`);
-
-    blocks.push(`<div class="trace-block">
-      <div class="trace-title mono">${esc(run.runId)}</div>
-      ${steps.join('')}
-      <div class="trace-foot">.hlwd/runs/${esc(run.runId)}/</div>
-    </div>`);
-  }
-
-  $('#panelTrace').innerHTML = blocks.join('');
+function showTab(name) {
+  activateTab(name);
+  if (name === 'graph') mountCardGraph();
+  if (name === 'session') openSession();
 }
+
+/** 从流程图点进某一轮会话：不自动挑最新，直接打开点的那一轮。 */
+async function showTurnFromGraph({ runId, phaseKey }) {
+  if (!state.current) return;
+  activateTab('session');
+  state.session.autoFollow = false;
+  if (!state.session.turns.length) await refreshTurns();
+  const turn = state.session.turns.find((t) => t.runId === runId && t.phaseKey === phaseKey);
+  if (turn) openTurn(turn);
+  else setSessionStatus('这一轮没有会话记录', true);
+}
+
 
 /** 面板第三个 tab：AI 到底在里面做了什么（工具调用 / 思考 / 文本）。 */
 const SESSION_PAGE = 300; // 一次最多拉多少条：一轮事件可能有几千条
@@ -2172,7 +2176,7 @@ function showSettingsSection(name) {
 }
 
 async function openSettings() {
-  const [{ config: cfg, prompts, gate }, tagResult] = await Promise.all([
+  const [{ config: cfg, prompts, gate, graph }, tagResult] = await Promise.all([
     api('/api/settings'),
     api('/api/tags')
       .then((payload) => ({ tags: payload.tags ?? [] }))
@@ -2198,12 +2202,33 @@ async function openSettings() {
   f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
   f.gitCommit.checked = e.gitCommit !== false;
   f.autoWatch.checked = e.autoWatch === true;
-  const p = $('#promptForm');
-  p.prompt_execute.value = prompts?.execute ?? '';
-  p.prompt_review.value = prompts?.review ?? '';
+  // 设置页的图：同一份拓扑，只是把「看回放」换成「改节点」
+  state.settingsGraph ??= createGraph($('#settingsGraph'), {
+    mode: 'template',
+    onOpenGate: () => openGate('gate'),
+    onSaveNode: saveGraphNode,
+  });
+  state.settingsGraph.setData({ graph: graph ?? null, prompts: prompts ?? {}, stages: cfg.engine?.stages ?? {} });
   renderTagList();
   showSettingsSection('tags');
   $('#settingsDialog').showModal();
+}
+
+/** 保存一个节点：提示词走 prompts，执行器/模型走 engine.stages，留空＝继承。 */
+async function saveGraphNode({ stage, prompt, runner, model, thinking }) {
+  const saved = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      prompts: prompt == null ? undefined : { [stage]: prompt },
+      engine: { stages: { [stage]: { runner, model, thinking } } },
+    }),
+  });
+  state.settingsGraph?.setData({
+    prompts: saved.prompts ?? {},
+    stages: saved.config?.engine?.stages ?? {},
+  });
+  if (state.current) state.current.engineStages = saved.config?.engine?.stages;
+  return saved;
 }
 
 async function saveEngine(event) {
@@ -2232,23 +2257,6 @@ async function saveEngine(event) {
     if (document.body.dataset.mode === 'board') await load();
     else if (state.current) await openIssue(state.current.id, { keepTab: true });
     hint('执行配置已保存，engine 下次运行生效');
-  } catch (err) {
-    hint(`保存失败：${err.message}`, true);
-  }
-}
-
-async function savePrompts(event) {
-  event.preventDefault();
-  const f = new FormData(event.target);
-  try {
-    const saved = await api('/api/settings', {
-      method: 'PUT',
-      body: JSON.stringify({ prompts: { execute: String(f.get('prompt_execute') ?? ''), review: String(f.get('prompt_review') ?? '') } }),
-    });
-    const p = $('#promptForm');
-    p.prompt_execute.value = saved.prompts?.execute ?? '';
-    p.prompt_review.value = saved.prompts?.review ?? '';
-    hint('提示词已保存；清空并保存会恢复工具自带模板');
   } catch (err) {
     hint(`保存失败：${err.message}`, true);
   }
@@ -2410,7 +2418,7 @@ $('#settingsNav').addEventListener('click', (e) => {
   if (btn) showSettingsSection(btn.dataset.sec);
 });
 $('#engineForm').addEventListener('submit', saveEngine);
-$('#promptForm').addEventListener('submit', savePrompts);
+
 $('#tagAddForm').addEventListener('submit', addTag);
 
 // 点卡片 / 列表行 = 打开这张卡的独立地址；标题本身就是链接，中键 / Ctrl 点能开新标签页
@@ -2683,7 +2691,8 @@ function moveColumn(fromId, toId, after) {
 $('#viewBoard').addEventListener('click', () => setView('board'));
 $('#viewList').addEventListener('click', () => setView('list'));
 $('#tabIssue').addEventListener('click', () => showTab('issue'));
-$('#tabTrace').addEventListener('click', () => showTab('trace'));
+$('#tabGraph').addEventListener('click', () => showTab('graph'));
+$('#graphRunSelect').addEventListener('change', (e) => selectGraphRun(e.target.value));
 $('#tabSession').addEventListener('click', () => showTab('session'));
 $('#sessionTurns').addEventListener('click', (e) => {
   const btn = e.target.closest('.turn-btn');
@@ -2697,19 +2706,7 @@ $('#sessionMore').addEventListener('click', () => {
   if (state.session.current && state.session.next != null) fetchTurn(state.session.current, state.session.next);
 });
 $('#sessionThink').addEventListener('change', applyThinkFilter);
-$('#showRaw').addEventListener('click', () => {
-  const pre = $('#panelRaw');
-  if (!pre.hidden) {
-    pre.hidden = true;
-    return;
-  }
-  pre.textContent = JSON.stringify(
-    { card: state.current, runs: state.trace?.runs ?? [], journal: state.trace?.journal ?? [] },
-    null,
-    2,
-  );
-  pre.hidden = false;
-});
+
 $('#panelClose').addEventListener('click', async () => {
   const issue = state.current;
   if (!issue) return;

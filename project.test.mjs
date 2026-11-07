@@ -106,6 +106,43 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
   });
 });
 
+test('engine.stages 可以单独配执行/审查，留空表示继承', async () => {
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+
+    const saved = await saveProjectConfig(dir, {
+      engine: { stages: { execute: { model: 'exec-model' }, review: { runner: 'codex', thinking: 'low' } } },
+    });
+    assert.deepEqual(saved.engine.stages.execute, { runner: '', model: 'exec-model', thinking: '' });
+    assert.deepEqual(saved.engine.stages.review, { runner: 'codex', model: '', thinking: 'low' });
+    assert.equal(saved.engine.model, '', '阶段配置不该改全局默认值');
+
+    // 再存一次只改一个阶段：另一个阶段的配置要留着
+    const again = await saveProjectConfig(dir, { engine: { stages: { execute: { model: 'other' } } } });
+    assert.equal(again.engine.stages.execute.model, 'other');
+    assert.equal(again.engine.stages.review.runner, 'codex');
+
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { claim: {} } } }), /未知阶段/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { model: 1 } } } }), /必须是字符串/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { model: 'x'.repeat(200) } } } }), /不能超过/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { runner: 'nope' } } } }), /runner 只能是/);
+  });
+});
+
+test('手改坏的 stages 读回来也收敛成完整形状', async () => {
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+    await fs.writeFile(
+      path.join(dir, '.hlwd', 'config.json'),
+      JSON.stringify({ engine: { stages: { execute: { model: '  m  ', extra: 1 }, nope: {} } } }),
+      'utf8',
+    );
+    const cfg = await readProjectConfig(dir);
+    assert.deepEqual(cfg.engine.stages.execute, { runner: '', model: 'm', thinking: '' });
+    assert.deepEqual(cfg.engine.stages.review, { runner: '', model: '', thinking: '' });
+  });
+});
+
 test('ensureProject 拒绝不存在的目录', async () => {
   await assert.rejects(() => ensureProject(path.join(os.tmpdir(), 'hlwd-不存在-目录-xyz')), /目录不存在/);
 });

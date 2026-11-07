@@ -14,7 +14,7 @@ import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
 import { gate as gateStage } from './flows/gate.mjs';
 import { review } from './flows/review.mjs';
-import { loadConfig, log, run } from './lib.mjs';
+import { engineOf, loadConfig, log, run, stageCfg } from './lib.mjs';
 import { clip, createManifest, finish } from './manifest.mjs';
 
 function parseArgs(argv) {
@@ -117,11 +117,14 @@ async function main() {
     manifest.attempts.push(record);
 
     const execStart = Date.now();
+    // 执行和审查可以各配 runner/model；留空的项继承全局 engine.*
+    const execCfg = stageCfg(cfg, 'execute');
     // 先把这一轮标成「正在跑」（ms/ok 还是 null）再开工：看板靠 run.json 才知道现在跑到哪一步；
     // engine 如果中途崩了，也能从 run.json 看出当时卡在哪一轮。
-    record.execute = { startedAt: new Date(execStart).toISOString(), ms: null, ok: null, error: null };
+    // engine 快照跟着这一轮落盘：配置以后会变，这张单用的是哪个模型不能变。
+    record.execute = { startedAt: new Date(execStart).toISOString(), ms: null, ok: null, error: null, engine: engineOf(execCfg) };
     await save();
-    const exec = await execute({ cfg, workdir, issue, comments, runDir, attempt, feedback });
+    const exec = await execute({ cfg: execCfg, workdir, issue, comments, runDir, attempt, feedback });
     record.execute = { ...record.execute, ms: Date.now() - execStart, ok: exec.ok, error: exec.error, prompt: rel(exec.promptFile), outDir: rel(exec.outDir) };
     await save();
     await journal('execute', { attempt, ok: exec.ok, ms: record.execute.ms, error: clip(exec.error), outDir: record.execute.outDir });
@@ -148,6 +151,7 @@ async function main() {
     }
 
     const reviewStart = Date.now();
+    const reviewCfg = stageCfg(cfg, 'review');
     record.review = {
       startedAt: new Date(reviewStart).toISOString(),
       ms: null,
@@ -155,9 +159,10 @@ async function main() {
       reason: null,
       checks: [],
       outDir: rel(path.join(runDir, `review-${attempt}`)),
+      engine: engineOf(reviewCfg),
     };
     await save();
-    const verdict = await review({ cfg, workdir, issue, runDir, attempt });
+    const verdict = await review({ cfg: reviewCfg, workdir, issue, runDir, attempt });
     record.review = {
       ...record.review,
       ms: Date.now() - reviewStart,

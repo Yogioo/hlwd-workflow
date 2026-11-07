@@ -2,7 +2,7 @@
 // 只读，不写；真相源仍然是 beads。
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { journalFile, runsDir } from '../project.mjs';
+import { runsDir } from '../project.mjs';
 
 const SAFE = /^[A-Za-z0-9._-]+$/;
 
@@ -91,24 +91,20 @@ export async function getRun(runId) {
   }
 }
 
-/** 该卡片在 journal 里的事件（原始行，给「全链路」用）。 */
-export async function journalFor(cardId, limit = 200) {
-  if (!SAFE.test(cardId)) return [];
-  let text = '';
-  try {
-    text = await fs.readFile(journalFile(projectDir), 'utf8');
-  } catch {
-    return [];
-  }
-  const events = [];
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line);
-      if (event.card === cardId) events.push(event);
-    } catch {
-      // 半行/损坏行跳过
-    }
-  }
-  return events.slice(-limit);
+// 页面能读的运行目录文件：渲染后的提示词、门禁日志、审查结论。
+// 白名单写死——这个接口不是「读工程任意文件」的口子。
+const RUN_FILE = /^(prompt-(?:exec|review)-\d+\.md|gate-\d+\.log|verdict-\d+\.json)$/;
+const RUN_FILE_MAX = 2 * 1024 * 1024;
+
+/** 读运行目录里的一个文件；不认识的名字、越界路径、超大文件一律 null。 */
+export async function readRunFile(runId, name) {
+  const file = String(name ?? '');
+  if (!SAFE.test(runId) || !RUN_FILE.test(file)) return null;
+  const dir = path.resolve(runsDir(projectDir), runId);
+  const full = path.resolve(dir, file);
+  if (!full.startsWith(dir + path.sep)) return null;
+  const stat = await fs.stat(full).catch(() => null);
+  if (!stat?.isFile() || stat.size > RUN_FILE_MAX) return null;
+  const text = await fs.readFile(full, 'utf8').catch(() => null);
+  return text == null ? null : { name: file, size: stat.size, text };
 }

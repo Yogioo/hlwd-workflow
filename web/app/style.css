@@ -1889,80 +1889,455 @@ body[data-mode='issue'] {
   align-self: flex-end;
 }
 
-/* 全链路 */
-.trace {
+/* 流程：节点图。卡片页看回放，设置页改节点；拓扑固定，所以布局写死在 graph.js 里。 */
+.graph-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.graph-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.graph-hint {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.graph-pill {
+  padding: 1px 8px;
+  border: 1px solid var(--line-hi);
+  border-radius: 999px;
+  color: var(--dim);
+}
+.graph-pill b {
+  color: var(--bone);
+  font-weight: 500;
+}
+.graph-pill.live {
+  border-color: color-mix(in srgb, var(--run) 42%, transparent);
+  color: #f3d491;
+}
+.graph-pill.warn {
+  border-color: color-mix(in srgb, var(--review) 42%, transparent);
+  color: #d3b9ef;
+}
+.graph-pill.bad {
+  border-color: color-mix(in srgb, var(--oops) 48%, transparent);
+  color: #f0a19a;
+}
+.graph-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.graph-run select {
+  max-width: 220px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-hi);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--bone);
+  font: 11.5px var(--mono);
+}
+.graph-body {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.graph-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 300px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  overflow: hidden;
+}
+.graph-edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.ge {
+  fill: none;
+  stroke: var(--line-hi);
+  stroke-width: 1.4;
+  opacity: 0.75;
+}
+.ge-retry,
+.ge-fail {
+  stroke-dasharray: 3 4;
+}
+.ge.t-done {
+  stroke: color-mix(in srgb, var(--done) 50%, var(--line-hi));
+  opacity: 1;
+}
+.ge.t-live {
+  stroke: var(--run);
+  opacity: 1;
+  animation: graph-dash 1.2s linear infinite;
+}
+.ge.t-warn {
+  stroke: color-mix(in srgb, var(--review) 55%, var(--line-hi));
+  opacity: 1;
+}
+.ge.t-bad {
+  stroke: color-mix(in srgb, var(--oops) 55%, var(--line-hi));
+  opacity: 1;
+}
+.ge-tag {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ge-tag.t-done {
+  color: var(--dim);
+}
+.ge-tag.t-warn {
+  color: #d3b9ef;
+}
+.ge-tag.t-bad {
+  color: #f0a19a;
+}
+.gnode {
+  position: absolute;
+  transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 1px;
+  width: 92px;
+  padding: 7px 8px;
+  border: 1px solid var(--line-hi);
+  border-radius: 8px;
+  background: var(--desk);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
 }
-.trace-block {
+.gnode.k-ai {
+  border-radius: 14px;
+  background: var(--card);
+}
+.gnode.k-end {
+  width: auto;
+  min-width: 72px;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.gnode:hover {
+  background: var(--card-hi);
+}
+.gnode.sel {
+  outline: 1px solid var(--bone);
+  outline-offset: 2px;
+}
+.gnode-name {
+  color: var(--bone);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.gnode-sub {
+  max-width: 88px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gnode-count {
+  position: absolute;
+  top: -7px;
+  right: -6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--line-hi);
+  color: var(--bone);
+  font-size: 10px;
+  font-style: normal;
+}
+.gnode.t-idle {
+  opacity: 0.5;
+}
+.gnode.t-ok {
+  border-color: color-mix(in srgb, var(--done) 45%, transparent);
+}
+.gnode.t-ok .gnode-name {
+  color: #8fd8bc;
+}
+.gnode.t-live {
+  border-color: var(--run);
+  background: color-mix(in srgb, var(--run) 10%, var(--desk));
+  animation: graph-pulse 1.8s ease-in-out infinite;
+}
+.gnode.t-live .gnode-name {
+  color: #f3d491;
+}
+.gnode.t-warn {
+  border-color: color-mix(in srgb, var(--review) 45%, transparent);
+}
+.gnode.t-warn .gnode-name {
+  color: #d3b9ef;
+}
+.gnode.t-bad {
+  border-color: color-mix(in srgb, var(--oops) 50%, transparent);
+}
+.gnode.t-bad .gnode-name {
+  color: #f0a19a;
+}
+.graph-drawer {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 340px;
+  max-height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--desk);
+}
+.graph-drawer[hidden] {
+  display: none;
+}
+.graph-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.graph-drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.graph-drawer-x {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.graph-drawer-x:hover {
+  color: var(--bone);
+}
+.graph-drawer-body {
+  overflow: auto;
+  padding: 10px 12px;
+}
+.graph-drawer-body h4 {
+  margin: 0 0 8px;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.graph-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.graph-kv dt {
+  color: var(--faint);
+}
+.graph-kv dd {
+  margin: 0;
+  color: var(--bone);
+  word-break: break-word;
+}
+.graph-reason {
+  max-height: 180px;
+  margin: 0 0 8px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-left: 2px solid var(--line-hi);
+  background: var(--card);
+  color: var(--dim);
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+}
+.graph-file {
+  max-height: 320px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--dim);
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.graph-checks {
+  margin-top: 8px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.graph-checks summary {
+  color: var(--faint);
+  cursor: pointer;
+}
+.graph-checks summary:hover {
+  color: var(--bone);
+}
+.graph-checks div {
+  margin-top: 3px;
+  padding: 2px 0 2px 9px;
+  border-left: 1px solid var(--line);
+}
+.graph-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.graph-actions button {
+  font-size: 12px;
+}
+.graph-saved {
+  color: var(--done);
+  font-size: 11.5px;
+}
+.graph-saved.bad {
+  color: var(--oops);
+}
+.graph-note {
+  margin: 6px 0 8px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.graph-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.graph-field textarea,
+.graph-field input,
+.graph-field select {
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid var(--line-hi);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--bone);
+  font: 12px/1.5 var(--mono);
+}
+.graph-field textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+.graph-grid {
+  display: grid;
+  gap: 8px;
+}
+.graph-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--line-hi);
+  border-radius: 999px;
+  color: var(--dim);
+  font-size: 10.5px;
+}
+.graph-chip.t-ok {
+  color: #8fd8bc;
+}
+.graph-chip.t-live {
+  color: #f3d491;
+}
+.graph-chip.t-warn {
+  color: #d3b9ef;
+}
+.graph-chip.t-bad {
+  color: #f0a19a;
+}
+.graph-list {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+.gl-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--card);
-  padding: 10px 12px;
-}
-.trace-title {
-  color: var(--faint);
-  font-size: 11px;
-  margin-bottom: 7px;
-}
-.trace-line {
-  padding: 2px 0;
+  color: var(--dim);
+  font: inherit;
   font-size: 12.5px;
-  word-break: break-word;
-}
-.trace-line .mono {
-  color: var(--faint);
-  margin-right: 6px;
-}
-.trace-sub {
-  color: var(--faint);
-  font-size: 12px;
-  padding: 2px 0 2px 8px;
-  border-left: 1px solid var(--line-hi);
-  margin: 2px 0 2px 4px;
-}
-.trace-foot {
-  color: var(--faint);
-  font-size: 11px;
-  margin-top: 7px;
-}
-.trace-checks {
-  color: var(--dim);
-  font-size: 12px;
-  margin: 4px 0 4px 8px;
-}
-.trace-checks summary {
+  text-align: left;
   cursor: pointer;
-  color: var(--faint);
 }
-.trace-checks summary:hover {
+.gl-row b {
   color: var(--bone);
+  font-weight: 500;
 }
-.trace-checks div {
-  padding: 2px 0 2px 9px;
-  border-left: 1px solid var(--line);
-  margin-top: 3px;
+.gl-row.t-live {
+  border-color: color-mix(in srgb, var(--run) 45%, transparent);
 }
-.pass {
-  color: var(--done);
+.gl-row.t-warn {
+  border-color: color-mix(in srgb, var(--review) 45%, transparent);
 }
-.fail {
-  color: var(--oops);
+.gl-row.t-bad {
+  border-color: color-mix(in srgb, var(--oops) 50%, transparent);
 }
-.raw {
-  white-space: pre-wrap;
-  word-break: break-all;
-  background: #0a1014;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  max-height: 55vh;
-  overflow: auto;
-  font-size: 11px;
-  color: var(--dim);
-  line-height: 1.6;
+.graph-block .graph-canvas {
+  height: 320px;
 }
+@keyframes graph-dash {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+@keyframes graph-pulse {
+  50% {
+    border-color: color-mix(in srgb, var(--run) 35%, transparent);
+  }
+}
+@media (max-width: 820px) {
+  .graph-body {
+    flex-direction: column;
+  }
+  .graph-canvas {
+    display: none;
+  }
+  .graph-list {
+    display: flex;
+  }
+  .graph-drawer {
+    width: 100%;
+    max-height: none;
+  }
+}
+
 
 /* ---------- markdown ---------- */
 

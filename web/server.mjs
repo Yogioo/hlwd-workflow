@@ -27,7 +27,7 @@ import {
 import * as beads from './beads.mjs';
 import { prefsFor, savePrefs } from './prefs.mjs';
 import { createTag, deleteTag, listTags, updateTag } from './tags.mjs';
-import { WORKFLOW_COLUMNS, workflowOf } from './workflow.mjs';
+import { WORKFLOW_COLUMNS, alive, graphOf, workflowOf } from './workflow.mjs';
 import {
   AuthError,
   SESSION_COOKIE,
@@ -43,7 +43,7 @@ import {
   renameUser,
   verify,
 } from './auth.mjs';
-import { getRun, journalFor, latestRun, latestRuns, listRuns, setProjectDir } from './runs.mjs';
+import { getRun, latestRun, latestRuns, listRuns, readRunFile, setProjectDir } from './runs.mjs';
 import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
@@ -206,10 +206,22 @@ async function projectPayload() {
 }
 
 // —— 工作流进度：从最新 run 派生，不写回 beads ——
+// 列表只带 workflow（列用）；单卡再带 graph（节点图用），别给看板塞冗余。
 const withWorkflow = (issue, run) => ({ ...issue, workflow: workflowOf(issue, run) });
+const withCard = (issue, run) => ({ ...withWorkflow(issue, run), graph: graphOf(issue, run) });
 const runSig = (run) =>
   run
-    ? [run.runId, run.outcome, run.endedAt, run.attempts?.length, run.attempts?.at(-1)?.execute?.ok, run.attempts?.at(-1)?.gate?.pass, run.attempts?.at(-1)?.review?.pass].join('|')
+    ? [
+        run.runId,
+        run.outcome,
+        run.endedAt,
+        run.attempts?.length,
+        run.attempts?.at(-1)?.execute?.ok,
+        run.attempts?.at(-1)?.gate?.pass,
+        run.attempts?.at(-1)?.review?.pass,
+        // 进程没了也要推一次，否则页面会一直停在“执行中”等手动刷新
+        run.outcome === 'running' ? (alive(run.pid) ? 'live' : 'dead') : '',
+      ].join('|')
     : '';
 
 // —— 门禁：只负责把用户送到那个文件（不读内容、不编辑，改脚本是编辑器的事） ——
@@ -525,7 +537,7 @@ async function broadcastCard(cardId) {
   try {
     const [stamp, run, payload] = await Promise.all([beads.issueStamp(cardId), latestRun(cardId), beads.getIssue(cardId)]);
     entry.stamp = `${stamp}|${runSig(run)}`;
-    pushCard(cardId, { ...payload, issue: withWorkflow(payload.issue, run) });
+    pushCard(cardId, { ...payload, issue: withCard(payload.issue, run) });
   } catch {
     // 工单被删了之类：这一轮就算了
   }
@@ -547,7 +559,7 @@ function startCardPoll(cardId) {
       if (seen === entry.stamp) return;
       entry.stamp = seen;
       const { issue, comments } = await beads.getIssue(cardId);
-      pushCard(cardId, { issue: withWorkflow(issue, run), comments });
+      pushCard(cardId, { issue: withCard(issue, run), comments });
     } catch {
       // 临时读不到就算了，下一轮再说
     }
@@ -588,7 +600,7 @@ async function streamCard(req, res, cardId) {
   try {
     const [{ issue, comments }, run] = await Promise.all([beads.getIssue(cardId), latestRun(cardId)]);
     entry.stamp = `${issue.updated}|${issue.commentCount}|${runSig(run)}`;
-    send('issue', { issue: withWorkflow(issue, run), comments });
+    send('issue', { issue: withCard(issue, run), comments });
   } catch (err) {
     send('gone', { error: err.message });
   }
@@ -713,6 +725,8 @@ async function route(req, res, url) {
         config: await readProjectConfig(p.dir),
         prompts: await readPrompts(p.dir),
         gate: await gatePayload(p.dir),
+        // 设置页画的就是这张图，只是没有 run：全 idle 的模板形状
+        graph: graphOf(null, null),
       });
     }
     if (req.method === 'PUT') {
@@ -872,7 +886,19 @@ async function route(req, res, url) {
     return turn ? json(res, 200, turn) : json(res, 404, { error: '这一轮没有会话记录' });
   }
 
-  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/history|\/journal|\/attachments)?$/);
+  // 运行目录里的单个文件（渲染后的提示词 / 门禁日志 / verdict）：只读，白名单在 runs.mjs 里。
+  const runFile = pathname.match(/^\/api\/issues\/([^/]+)\/runs\/([^/]+)\/file$/);
+  if (runFile) {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    const cardId = decodeURIComponent(runFile[1]);
+    const runId = decodeURIComponent(runFile[2]);
+    const run = await getRun(runId);
+    if (!run || run.card?.id !== cardId) return json(res, 404, { error: '运行记录不存在' });
+    const hit = await readRunFile(runId, searchParams.get('name'));
+    return hit ? json(res, 200, hit) : json(res, 404, { error: '没有这个文件' });
+  }
+
+  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/attachments)?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     if (m[2] === '/attachments') {
@@ -904,11 +930,14 @@ async function route(req, res, url) {
       return json(res, 200, { comments });
     }
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
-    if (m[2] === '/journal') return json(res, 200, { journal: await journalFor(id) });
-    if (m[2] === '/history') return json(res, 200, { history: await beads.listStatusHistory(id) });
     if (req.method === 'GET') {
+      // ?run=<runId> 看历史某一趟：图跟着那一趟，不是最新那趟
+      const wanted = searchParams.get('run');
+      let run = wanted ? await getRun(wanted) : null;
+      if (run && run.card?.id !== id) run = null; // 别的卡的 run 不认
+      if (!run) run = await latestRun(id);
       const payload = await beads.getIssue(id);
-      return json(res, 200, { ...payload, issue: withWorkflow(payload.issue, await latestRun(id)) });
+      return json(res, 200, { ...payload, issue: withCard(payload.issue, run) });
     }
     if (req.method === 'PATCH') {
       const body = await readBody(req);
@@ -935,7 +964,7 @@ async function route(req, res, url) {
           .catch(() => {}); // 留不下痕迹也不影响改单本身
       }
       if (body.status || body.priority !== undefined || body.addLabels || body.removeLabels) broadcastCard(id);
-      return json(res, 200, { issue: withWorkflow(issue, await latestRun(id)) });
+      return json(res, 200, { issue: withCard(issue, await latestRun(id)) });
     }
     return json(res, 405, { error: 'method not allowed' });
   }

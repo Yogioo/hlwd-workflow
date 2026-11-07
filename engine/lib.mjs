@@ -55,6 +55,7 @@ const DEFAULTS = {
   readyLabel: 'ready-for-agent',
   timeoutMs: 1800000,
   gitCommit: true,
+  stages: {},
 };
 
 /** 配置在项目的 .hlwd/config.json（看板里的「设置」写的就是它），engine 只读。 */
@@ -62,6 +63,23 @@ export async function loadConfig(projectDir = process.cwd()) {
   const cfg = await readProjectConfig(projectDir).catch(() => ({ engine: {} }));
   return { ...DEFAULTS, ...(cfg.engine ?? {}) };
 }
+
+/**
+ * 某个阶段（execute / review）实际生效的配置。
+ * 阶段上留空的项继承全局 engine.* —— 空字符串不是“不设模型”，是“没说，用默认”。
+ */
+export function stageCfg(cfg, stage) {
+  const override = cfg?.stages?.[stage] ?? {};
+  const out = { ...cfg };
+  for (const key of ['runner', 'model', 'thinking']) {
+    const value = String(override[key] ?? '').trim();
+    if (value) out[key] = value;
+  }
+  return out;
+}
+
+/** 进 run.json 的“当时到底用了什么”：配置会变，记录不会。 */
+export const engineOf = (cfg) => ({ runner: cfg.runner, model: cfg.model, thinking: cfg.thinking });
 
 export function log(message) {
   console.log(`[${new Date().toISOString().slice(11, 19)}] ${message}`);

@@ -159,6 +159,10 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 - `attempts[].execute/gate/review` 里 `ms`/`ok`/`pass` 为 `null` 表示**此刻正在跑这一步**：
   engine 在每步开工前先落一次 `run.json`，看板据此知道「现在卡在哪一阶段」，
   进程中途崩了也留得下现场。
+- `attempts[].execute.engine` / `attempts[].review.engine` 是**当时生效的 runner/model/thinking 快照**：
+  配置以后会改，这张单当时用的哪个模型不能跟着变。
+- 页面只通过 `GET /api/issues/<id>/runs/<runId>/file?name=` 读这些产物；白名单只有
+  `prompt-{exec,review}-<n>.md`、`gate-<n>.log`、`verdict-<n>.json`，越界或名单外的名字一律 404。
 - `events.jsonl` 是 runner 原始事件流（工具调用 / 思考 / 文本，含 `*_partial` 增量），
   由 `web/sessions.mjs` 归一成消息流后交给看板「会话」页；看板不解析 runner 的格式细节。
   跑完的用 `GET /api/issues/:id/turns/:runId/:phase` 分页翻，正在跑的开
@@ -171,7 +175,7 @@ GET /api/issues/<id>/events      # SSE：连上先给一份快照，之后字段
 GET /issue/<id>                  # 工单独立页面（返回同一个单页，id 由前端从 URL 读）
 ```
 
-- 一个卡片一条流，推送的是**整张卡**（issue + comments + 最新的 workflow 进度，都很小），前端按 id 覆盖渲染。
+- 一个卡片一条流，推送的是**整张卡**（issue + comments + 最新的 workflow 进度与节点图，都很小），前端按 id 覆盖渲染。
 - 触发：① 我们自己的写路径（评论 / 关单重开 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
   比对 `updated_at + comment_count + run 签名`，把 engine 或别的进程直接改 bd / run.json 的变化也接进来。
   轮询是**每卡一份**，不随观看人数增长；没人看就自己停。
@@ -182,11 +186,13 @@ GET /issue/<id>                  # 工单独立页面（返回同一个单页，
 
 ```
 config.json: tags[]（name/color/desc/archived）/ labels.priorities / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
+              engine.stages.{execute,review}.{runner,model,thinking}   # 只有这两个阶段能单独配；留空 = 继承 engine.*
 # 旧版的 labels.statuses / columns 仍可读，只为兼容；设置面板不再写它们。
 prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}} / {{VERDICT}}
 ```
 
 - 写方是 `web`（看板「设置」→ `PUT /api/settings`，标签走 `/api/tags`）；读方是 `engine`（每次运行开始时读）。
+- 阶段配置只在**下一次运行**生效：engine 启动时读一次，已在跑的单不受影响（它的快照已经落在 run.json 里）。
 - 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`；在设置里清空提示词并保存 = 把默认模板写回项目文件（不是留空）。
 - 标签改名会级联到历史工单（先加新、再去旧）；删除默认要求确认，`?purge=1` 才从工单上摘掉。
 
@@ -205,9 +211,10 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 - engine 内部仍用 `status=in_progress` 当接单锁（务实版，界面不展示），完成时置 `closed`；失败时按需要回 `open` 或留 `in_progress`。`review` 自定义状态不再由 engine 使用。
 - `ready-for-agent` 用 label 表达，与状态机正交：它回答「能不能派给 AI」。接单候选是 `open + ready`，看板不会把已有活跃 run 的卡再派一次。
 - 进度不是新状态库：`run.json` 是运行记录，删掉只丢追溯；工作流阶段从 `attempts[].execute/gate/review` 的未完成步骤推导。
-- 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 全链路。人工关单/重开补一条工单开关评论。
+- 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工关单/重开补一条工单开关评论。
 - **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
 - **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
+- **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改节点内部信息，不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
 
 ## 6. 目录
 
@@ -220,13 +227,14 @@ package.json       # 只有 scripts，没有依赖
 web/               # 页面 + beads 适配层
   prefs.mjs        # 用户偏好：列表列 / 列宽 / 排序 / 筛选预设（~/.hlwd/prefs/<用户>.json）
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
-  workflow.mjs     # 固定工作流阶段：从最新 run.json 推导「AI 进度」
+  workflow.mjs     # 固定工作流阶段：从最新 run.json 推导「AI 进度」与只读节点图
   tags.mjs         # 标签库：目录 + 使用数 + 改名级联 / 归档 / 删除
   runs.mjs         # 只读端口：把 <项目>/.hlwd/runs 与 journal 给看板
   sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
   server.mjs       # HTTP JSON 接口 + 静态页，零依赖（node:http）
-  app/             # 单页看板：index.html / app.js / markdown.js / style.css，无构建
-                   #   看板 / （/issue/<id>）工单页：工单 / 全链路 / 会话 三个 tab
+  app/             # 单页看板：index.html / app.js / graph.js / markdown.js / style.css，无构建
+                   #   graph.js：节点图渲染器（卡片页看回放、设置页改节点），拓扑由服务端发
+                   #   看板 / （/issue/<id>）工单页：工单 / 流程 / 会话 三个 tab
                    #   工单页是独立地址，可直接分享；评论与字段靠 SSE 实时更新
 engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）

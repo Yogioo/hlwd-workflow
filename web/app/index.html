@@ -98,7 +98,7 @@
           <p><b>待接</b> 可以派给 AI。开「自动流水线」或跑 <code>node wf.mjs work</code>。</p>
           <p><b>执行中</b> AI 已接单，正在执行 / 过门禁。卡片上的徽章会显示具体到哪一步。</p>
           <p><b>审查中</b> 执行完成，正在跑审查回合。</p>
-          <p><b>已完成</b> 已提交并关闭，点开卡片看全链路。</p>
+          <p><b>已完成</b> 已提交并关闭，点开卡片的「流程」看这一趟怎么走的。</p>
           <p><b>标签</b> 是工单唯一的自定义分类；状态由 engine 的工作流管理，不再作为工单字段配置。</p>
           <p><b>看板 / 列表</b> 右上角切换：看板按工作流分列；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
           <p><b>筛选</b> 顶栏下面的「筛选」按字段组合过滤，结果同时作用于看板和列表；常看的条件「存为预设」，点一下切回来。列与列宽是列表自己的事，存在你名下（<code>~/.hlwd/prefs/</code>），换项目各是各的。</p>
@@ -114,7 +114,7 @@
           <span id="panelId" class="mono issue-id"></span>
           <div class="seg issue-tabs" role="tablist">
             <button id="tabIssue" class="seg-btn active" type="button">工单</button>
-            <button id="tabTrace" class="seg-btn" type="button">全链路</button>
+            <button id="tabGraph" class="seg-btn" type="button" title="这一趟流程怎么走的">流程</button>
             <button id="tabSession" class="seg-btn" type="button" title="AI 在里面的工具调用与思考">会话</button>
           </div>
         </div>
@@ -141,12 +141,19 @@
               </div>
             </div>
 
-            <div id="viewTrace" hidden>
-              <div id="panelTrace" class="trace"></div>
-              <div class="row">
-                <button id="showRaw" type="button">原始记录（给程序看）</button>
+            <div id="viewGraph" hidden>
+              <div class="graph-top">
+                <div class="graph-meta"></div>
+                <label class="graph-run" id="graphRunWrap">
+                  <span>运行</span>
+                  <select id="graphRunSelect"></select>
+                </label>
               </div>
-              <pre id="panelRaw" class="raw mono" hidden></pre>
+              <div class="graph-body">
+                <div class="graph-canvas"></div>
+                <aside class="graph-drawer" hidden></aside>
+              </div>
+              <div class="graph-list"></div>
             </div>
 
             <div id="viewSession" hidden>
@@ -271,9 +278,9 @@
           </div>
           <nav id="settingsNav" class="settings-nav" aria-label="设置分区">
             <button type="button" data-sec="tags" class="active">标签库</button>
+            <button type="button" data-sec="graph">流程</button>
             <button type="button" data-sec="engine">AI 执行</button>
             <button type="button" data-sec="gate">门禁</button>
-            <button type="button" data-sec="prompts">提示词</button>
           </nav>
           <p class="settings-side-note">工作流状态由 engine 固定管理：待接 → 执行 → 门禁 → 审查 → 完成。它不再作为工单字段配置。</p>
         </aside>
@@ -314,8 +321,8 @@
                     <option value="danger-full-access">danger-full-access（全权限）</option>
                   </select>
                 </label>
-                <label>模型（空=默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
-                <label>思考强度（空=默认）<input name="thinking" placeholder="如 high" /></label>
+                <label>默认模型（空=执行器默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
+                <label>默认思考强度（空=执行器默认）<input name="thinking" placeholder="如 high" /></label>
                 <label>最多轮数<input name="attempts" type="number" min="1" max="5" /></label>
                 <label>单轮超时（分钟）<input name="timeoutMin" type="number" min="1" max="240" /></label>
                 <label>AI 账号名<input name="actor" placeholder="ai" /></label>
@@ -344,24 +351,19 @@
             </div>
           </section>
 
-          <section class="settings-panel" data-panel="prompts" hidden>
+          <section class="settings-panel" data-panel="graph" hidden>
             <div class="settings-head">
-              <h3>提示词</h3>
-              <p class="dialog-note">存在项目的 <code>.hlwd/prompts/</code>；清空并保存 = 恢复工具自带模板。占位符用 <code>{{ID}}</code> / <code>{{TITLE}}</code> / <code>{{BODY}}</code> / <code>{{HISTORY}}</code> / <code>{{FEEDBACK}}</code> / <code>{{VERDICT}}</code>。</p>
+              <h3>流程</h3>
+              <p class="dialog-note">点节点改它自己的提示词与模型；<b>留空＝继承</b>「AI 执行」里的默认值。拓扑固定（接单 → 执行 → 门禁 → 审查 → 收尾），不能连线——改流程要改 engine。提示词存在项目的 <code>.hlwd/prompts/</code>，清空并保存 = 恢复工具自带模板。</p>
             </div>
-            <form id="promptForm">
-              <div class="settings-grid one">
-                <label>执行提示词 execute.md
-                  <textarea name="prompt_execute" rows="12" spellcheck="false"></textarea>
-                </label>
-                <label>审查提示词 review.md
-                  <textarea name="prompt_review" rows="12" spellcheck="false"></textarea>
-                </label>
+            <div id="settingsGraph" class="graph-block">
+              <div class="graph-top"><div class="graph-meta"></div></div>
+              <div class="graph-body">
+                <div class="graph-canvas"></div>
+                <aside class="graph-drawer" hidden></aside>
               </div>
-              <menu>
-                <button type="submit" class="primary">保存提示词</button>
-              </menu>
-            </form>
+              <div class="graph-list"></div>
+            </div>
           </section>
         </div>
       </div>
