@@ -337,7 +337,9 @@ button:hover {
   border-color: var(--line-hi);
 }
 button:active {
-  transform: translateY(1px);
+  /* 用独立的 translate 而不是 transform：transform 会和元素自己的定位/居中互相覆盖
+     （节点图按下时跳半个身位就是被这里顶掉了 translate(-50%, -50%)）。 */
+  translate: 0 1px;
 }
 button.primary {
   background: var(--bone);
@@ -952,7 +954,7 @@ body[data-view="list"] .board {
   color: var(--bone);
 }
 .sort-btn:active {
-  transform: none;
+  translate: none;
 }
 th.c-comments .sort-btn,
 th.c-id .sort-btn {
@@ -1183,7 +1185,7 @@ td.c-status {
   color: var(--bone);
 }
 .preset-btn:active {
-  transform: none;
+  translate: none;
 }
 .preset-x {
   padding: 3px 7px 3px 2px;
@@ -1957,6 +1959,9 @@ body[data-mode='issue'] {
   position: relative;
   width: 100%;
   height: 300px;
+  /* 图是只读拓扑：拖动不该有「选中文字 / 拖走元素」的反馈，唯一的动作是点 */
+  user-select: none;
+  -webkit-user-select: none;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--card);
@@ -2019,6 +2024,8 @@ body[data-mode='issue'] {
 .gnode {
   position: absolute;
   transform: translate(-50%, -50%);
+  -webkit-user-drag: none;
+  touch-action: manipulation;
   display: flex;
   flex-direction: column;
   align-items: center;

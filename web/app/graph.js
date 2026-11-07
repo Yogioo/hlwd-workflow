@@ -108,7 +108,7 @@ export function createGraph(root, options = {}) {
   const nodeHtml = (node) => {
     const [x, y] = POS[node.id] ?? [50, 30];
     const count = node.count > 1 ? `<i class="gnode-count">×${node.count}</i>` : '';
-    return `<button type="button" class="gnode k-${node.kind} t-${toneOf(node)}${selected === node.id ? ' sel' : ''}"
+    return `<button type="button" draggable="false" class="gnode k-${node.kind} t-${toneOf(node)}${selected === node.id ? ' sel' : ''}"
       data-node="${esc(node.id)}" style="left:${x}%;top:${y}%" title="${esc(node.detail || node.label)}">
       <span class="gnode-name">${esc(node.label)}</span>
       <span class="gnode-sub">${esc(nodeSub(node, opts.mode))}</span>${count}
@@ -127,7 +127,9 @@ export function createGraph(root, options = {}) {
 
   const metaHtml = () => {
     if (!graph) return '';
-    if (opts.mode === 'template') return `<span class="graph-hint">点节点改它自己的提示词与模型；留空＝继承「AI 执行」里的默认值。拓扑固定，不能连线。</span>`;
+    if (opts.mode === 'template') {
+      return `<span class="graph-hint">点节点查看并编辑它自己的提示词与模型（再点一次收起）；留空＝继承「AI 执行」里的默认值。拓扑固定在代码里，不能拖动，也不能连线。</span>`;
+    }
     const bits = [];
     if (graph.outcome) bits.push(`<span class="graph-pill">结局 <b>${esc(graph.outcome)}</b></span>`);
     if (graph.attempt) bits.push(`<span class="graph-pill">第 <b>${graph.attempt}</b> 轮</span>`);
@@ -332,6 +334,11 @@ export function createGraph(root, options = {}) {
   const onRootClick = (event) => {
     const nodeEl = event.target.closest('[data-node]');
     if (nodeEl) {
+      // 再点一次同一个节点就收起来：节点的语义是「选中查看」，不是画布上可摆弄的对象
+      if (nodeEl.dataset.node === selected) {
+        close();
+        return;
+      }
       const node = graph?.nodes.find((n) => n.id === nodeEl.dataset.node);
       if (node) open(node);
       return;
@@ -352,6 +359,8 @@ export function createGraph(root, options = {}) {
   };
 
   root.addEventListener('click', onRootClick);
+  // 双保险：万一浏览器把按钮当可拖元素，直接掐掉
+  root.addEventListener('dragstart', (e) => e.preventDefault());
   drawer.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') close();
   });
