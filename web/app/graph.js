@@ -241,7 +241,7 @@ export function createGraph(root, options = {}) {
     return `<section>
       <h4>${esc(node.label)}</h4>
       <label class="graph-field">系统提示词 <span class="graph-note">（${stage}.md，清空＝恢复工具自带模板）</span>
-        <textarea data-field="prompt" rows="10" spellcheck="false">${esc(prompts[stage] ?? '')}</textarea>
+        <textarea data-field="prompt" rows="6" spellcheck="false">${esc(prompts[stage] ?? '')}</textarea>
       </label>
       <div class="graph-grid">
         <label class="graph-field">执行器<select data-field="runner">${options}</select></label>
@@ -249,7 +249,6 @@ export function createGraph(root, options = {}) {
         <label class="graph-field">思考强度<input data-field="thinking" value="${esc(cur.thinking ?? '')}" placeholder="留空＝继承默认" /></label>
       </div>
       <p class="graph-note">保存后<strong>下一次运行</strong>生效；已经在跑的单不受影响。</p>
-      <div class="graph-actions"><button type="button" class="primary" data-action="save">保存这个节点</button><span class="graph-saved" hidden>已保存</span></div>
     </section>`;
   };
 
@@ -258,11 +257,19 @@ export function createGraph(root, options = {}) {
     drawer.hidden = false;
     const chip =
       opts.mode === 'template' ? '' : `<span class="graph-chip t-${node.tone ?? 'idle'}">${TONE_TEXT[node.tone ?? 'idle'] ?? ''}</span>`;
+    // 保存按钮固定在页脚：正文再长也不会把它顶出可视区
+    const foot =
+      opts.mode === 'template'
+        ? `<div class="graph-drawer-foot">
+             <button type="button" class="primary" data-action="save">保存这个节点</button>
+             <span class="graph-saved" hidden>已保存</span>
+           </div>`
+        : '';
     drawer.innerHTML = `<header class="graph-drawer-head">
         <div class="graph-drawer-title"><b>${esc(node.label)}</b>${chip}</div>
         <button type="button" class="graph-drawer-x" data-action="close" aria-label="关闭">×</button>
       </header>
-      <div class="graph-drawer-body">${opts.mode === 'template' ? templateBody(node) : runBody(node)}</div>`;
+      <div class="graph-drawer-body">${opts.mode === 'template' ? templateBody(node) : runBody(node)}</div>${foot}`;
     render();
   };
 
@@ -327,6 +334,11 @@ export function createGraph(root, options = {}) {
     if (nodeEl) {
       const node = graph?.nodes.find((n) => n.id === nodeEl.dataset.node);
       if (node) open(node);
+      return;
+    }
+    // 点画布空白处 = 收起抽屉（不用去找那个小 ×）
+    if (event.target.closest('.graph-canvas') && !drawer.hidden) {
+      close();
       return;
     }
     const action = event.target.closest('[data-action]');
