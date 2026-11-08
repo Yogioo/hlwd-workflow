@@ -5,12 +5,13 @@
 //   node engine/run.mjs --project <dir> # 指定项目目录（默认当前目录）
 //   node engine/run.mjs --id hlwd-abc   # 指定工单（已被接单时用）
 //   node engine/run.mjs --attempts 1 --allow-dirty
+//   node engine/run.mjs --fresh         # 忽略「上次发布失败」，从头跑执行+审查
 import path from 'node:path';
 import { ensureProject } from '../project.mjs';
 import * as beads from '../web/beads.mjs';
-import { setProjectDir } from '../web/runs.mjs';
-import { complete, handback } from './flows/complete.mjs';
-import { claim, claimNext, listCandidates } from './flows/claim.mjs';
+import { latestRun, setProjectDir } from '../web/runs.mjs';
+import { complete, handback, resumablePublish } from './flows/complete.mjs';
+import { claim, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
 import { gate as gateStage } from './flows/gate.mjs';
 import { review } from './flows/review.mjs';
@@ -19,7 +20,7 @@ import { engineOf, loadConfig, log, run, stageCfg } from './lib.mjs';
 import { clip, createManifest, finish } from './manifest.mjs';
 
 function parseArgs(argv) {
-  const args = { dry: false, id: null, attempts: null, allowDirty: false, project: null };
+  const args = { dry: false, id: null, attempts: null, allowDirty: false, project: null, fresh: false };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     const flag = token.split('=')[0];
@@ -29,6 +30,10 @@ function parseArgs(argv) {
     }
     if (flag === '--allow-dirty') {
       args.allowDirty = true;
+      continue;
+    }
+    if (flag === '--fresh') {
+      args.fresh = true;
       continue;
     }
     if (['--project', '--id', '--attempts'].includes(flag)) {
@@ -92,18 +97,26 @@ async function main() {
 
   await assertClean(workdir, args.allowDirty);
 
-  let claimed;
+  // 先挑出这张单，再决定是「从头跑」还是「只重试发布」：
+  // 上一轮审查已经通过、只是收尾没做完（推送/PR 失败）时，重跑 AI 是浪费。
+  let target = null;
   if (args.id) {
     const current = await beads.getIssue(args.id);
     log(`指定工单 ${current.issue.id}（${current.issue.status}）`);
-    claimed = current.issue.status === 'open' ? await claim({ issue: current.issue, cfg }) : current;
+    target = { issue: current.issue, comments: current.comments, needsClaim: current.issue.status === 'open' };
   } else {
-    claimed = await claimNext({ cfg });
+    const [next] = await listCandidates({ cfg });
+    if (next) target = { issue: next, comments: null, needsClaim: true };
   }
-  if (!claimed) {
+  if (!target) {
     log(`没有就绪工单（open + ${cfg.readyLabel}）`);
     return 0;
   }
+
+  const resume = args.fresh ? null : resumablePublish(await latestRun(target.issue.id));
+  const claimed = target.needsClaim
+    ? await claim({ issue: target.issue, cfg, note: resume ? 'AI 接单，重试发布（不重跑执行与审查）。' : undefined })
+    : await beads.getIssue(target.issue.id);
 
   const { issue } = claimed;
   const comments = claimed.comments;
@@ -113,6 +126,7 @@ async function main() {
 
   // 收尾要建 PR = 每张单一条分支：接单后、执行前就把工作区切过去。
   // 分支从 origin/<base>（优先）或本地 <base> 切，避免把本地没推的提交卷进 PR。
+  // 重试发布也走这里：分支已存在就切回去，执行/审查的成果都还在。
   const completeCfg = cfg.nodes?.complete ?? {};
   let cardGit = null;
   if (completeCfg.pr) {
@@ -125,6 +139,35 @@ async function main() {
       const reason = `收尾要建 PR，但准备分支失败：${err.message}`;
       await handback({ workdir, issue, runDir, reason, status: 'open', head: 'AI 已接单，但分支准备失败' });
       await finish(manifest, save, journal, { outcome: 'rolled_back', reason });
+      return 1;
+    }
+  }
+
+  // 只重试发布：不跑 AI，直接接着上次的现场把提交 / 推送 / PR 做完。
+  if (resume) {
+    manifest.mode = 'publish';
+    manifest.resumedFrom = resume.runId;
+    manifest.attempts = resume.attempts; // 上一轮的执行与审查记录原样带过来，看板才画得出完整流程
+    if (cardGit) manifest.git = cardGit;
+    await save();
+    await journal('publish-retry', { from: resume.runId, commit: resume.commit ?? null });
+    log(`重试发布（上次 ${resume.runId ?? '未知 run'}${resume.commit ? `，提交 ${resume.commit}` : ''}）`);
+    try {
+      const result = await complete({ cfg, workdir, issue, runDir, checks: [], git: cardGit, prior: resume });
+      manifest.push = result.push;
+      manifest.pr = result.pr;
+      await finish(manifest, save, journal, { outcome: 'closed', commit: result.commit });
+      return 0;
+    } catch (err) {
+      const reason = `收尾失败：${err.message}`;
+      if (err.git?.push) manifest.push = err.git.push;
+      if (err.git?.pr) manifest.pr = err.git.pr;
+      await handback({ workdir, issue, runDir, reason, status: 'in_progress', head: 'AI 已完成，但发布仍然失败' });
+      await finish(manifest, save, journal, {
+        outcome: 'publish_failed',
+        reason,
+        commit: err.git?.commit ?? resume.commit ?? null,
+      });
       return 1;
     }
   }
@@ -205,8 +248,10 @@ async function main() {
         const reason = `收尾失败：${err.message}`;
         if (err.git?.push) manifest.push = err.git.push;
         if (err.git?.pr) manifest.pr = err.git.pr;
+        if (err.git?.failedAt) manifest.git = { ...(cardGit ?? {}), failedAt: err.git.failedAt };
         await handback({ workdir, issue, runDir, reason, status: 'in_progress', head: 'AI 已完成，但发布失败' });
-        await finish(manifest, save, journal, { outcome: 'rolled_back', reason, commit: err.git?.commit ?? null });
+        // publish_failed 是「代码已经通过审查，只是没交付出去」：下次派单只重跑收尾。
+        await finish(manifest, save, journal, { outcome: 'publish_failed', reason, commit: err.git?.commit ?? null });
         return 1;
       }
     }

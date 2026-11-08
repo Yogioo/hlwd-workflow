@@ -1479,6 +1479,13 @@ function renderDispatch(issue) {
   }
   // 上一轮没跑完（需要人 / 已中断）：给一个明确的重派入口，而不是「取消派单」。
   if (wf.column === 'active' && !wf.active) {
+    // 只是发布没做完：重派只重跑收尾，不会再叫 AI 干一遍活
+    if (wf.retry === 'publish') {
+      btn.textContent = '重试发布';
+      btn.className = 'primary';
+      hintEl.textContent = '只重跑收尾（提交 / 推送 / PR），不会重新调用 AI；修好 gh 登录或远端权限再点';
+      return;
+    }
     btn.textContent = '重新派给 AI';
     btn.className = 'primary';
     hintEl.textContent = '会把工单改回待接并保留可派标签；下一轮会重新接单';
@@ -1523,7 +1530,15 @@ async function dispatchCurrent() {
     });
     state.current = saved;
     renderDispatch(saved);
-    hint(reopening ? `已重新打开并标 ${state.readyLabel}` : ready ? '已取消派单' : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`);
+    hint(
+      reopening && wf.retry === 'publish'
+        ? '已改回待接：下一轮只重试收尾（提交 / 推送 / PR），不会再调 AI'
+        : reopening
+          ? `已重新打开并标 ${state.readyLabel}`
+          : ready
+            ? '已取消派单'
+            : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`,
+    );
     // 后台对齐：不堵按钮（bd 列表 + 评论要一两秒）
     const sync = document.body.dataset.mode === 'board' ? load() : Promise.resolve();
     Promise.all([sync, openIssue(saved.id, { keepTab: true })]).catch(() => {});

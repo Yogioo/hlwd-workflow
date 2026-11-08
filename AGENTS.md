@@ -151,6 +151,7 @@ pushBranch(workdir, {remote, branch}) -> {ok, error}
 findOpenPr(workdir, branch) -> url|null        # 重跑不重复建 PR
 createPr(workdir, {branch, base, title, body}) -> {ok, url, error}
 returnToBase(workdir, {base, remote}) -> {ok, error}
+resumablePublish(run) -> {runId, commit, git, attempts} | null   # run.json 里 outcome=publish_failed 才算
 ```
 
 - 顺序固定：**提交 → 推送 → 建 PR → 关单**；前一步失败后面不做，**任何一步失败都不关单**（工单停在 in_progress，评论写原因）。
@@ -160,6 +161,9 @@ returnToBase(workdir, {base, remote}) -> {ok, error}
 - `gh` 是可选外部依赖：没装 / 没登录时明确报错，不静默跳过。PR 已存在（同 head 的 open PR）就复用链接。
 - `run.json` 记 `git{branch,base}`、`push{ok,remote,branch,error}`、`pr{ok,url}`：看板据此显示分支、推送结果和 PR 链接；失败时 error 挂在 `err.git` 上带到 run.json。
 - 提交用 `git add -A`，`.hlwd/`、`.beads/` 里被版本库跟踪的部分也会进这张单的提交（和以前一样）。
+- **发布失败不是「要重做」**：收尾失败时 `outcome=publish_failed`（工单留在 in_progress）。这时重派 **只重跑收尾**，不调用 AI——
+  执行与审查的记录原样带进新的 run（`mode=publish`、`resumedFrom=<旧 runId>`）。上次的提交没丢，重试时没有新改动就沿用它的 sha 继续推送。
+  看板上的按钮会变成「重试发布」。`node wf.mjs work --fresh` 可以强制忽略这个捷径、从头再跑一遍。
 
 **验收归 engine。** 是否通过由 §5 状态机 + 门禁结论 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
@@ -229,7 +233,8 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 ```
 待接 ──claim──> 执行中 ──gate/review──> 审查中 ──pass──> 已完成
                     │
-                    └──失败/中断──> 待接（带「上次失败 / 已中断」徽章）
+                    ├──失败/中断──> 待接（带「上次失败 / 已中断」徽章）
+                    └──代码过审但没交付──> 发布失败（重派只重试收尾）
 ```
 
 - `open` / `closed` 只表示工单是否归档；人工在看板上只能「关闭 / 重新打开」，不再拖列改状态。
@@ -295,7 +300,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 
 - 不给 `--project` 就用上次打开的项目；首次打开会自动建 `.hlwd/` 与 `.beads/`。
 - 看板默认要登录（部署在没人守的机器上时，同事从内网访问各自注册）：第一个访问的人看到的是「注册」，第一个账号是管理员；单机自用想省这一步就 `WF_AUTH=off`。
-- `work` 的参数原样透传：`--dry` / `--id <卡片>` / `--attempts N` / `--allow-dirty`。
+- `work` 的参数原样透传：`--dry` / `--id <卡片>` / `--attempts N` / `--allow-dirty` / `--fresh`（忽略「发布失败只重试收尾」的捷径）。
 - 脚本 / 冒烟测试用一次性项目时，加 `WF_NO_REMEMBER=1`：这次调用不改「上次打开的项目」（否则下次 `node wf.mjs` 会指向临时目录）。
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环。
 - 退出码：`0` 完成或没有就绪单；`1` 执行失败 / 审查不通过；`2` 工作区不干净或参数错。

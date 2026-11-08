@@ -9,7 +9,7 @@
     "start": "node wf.mjs board --bg",
     "start:lan": "node wf.mjs board --bg --lan",
     "engine": "node wf.mjs work",
-    "test": "node --test engine/lib.test.mjs engine/git.test.mjs engine/manifest.test.mjs engine/gate.test.mjs engine/watch.test.mjs engine/vendor.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs web/server.test.mjs web/sessions.test.mjs web/auth.test.mjs web/workflow.test.mjs engine/flows/complete.test.mjs project.test.mjs",
+    "test": "node --test engine/lib.test.mjs engine/git.test.mjs engine/run.test.mjs engine/manifest.test.mjs engine/gate.test.mjs engine/watch.test.mjs engine/vendor.test.mjs web/app/markdown.test.mjs web/app/markup.test.mjs web/server.test.mjs web/sessions.test.mjs web/auth.test.mjs web/workflow.test.mjs engine/flows/complete.test.mjs project.test.mjs",
     "stop": "node wf.mjs stop",
     "watch": "node wf.mjs watch --bg"
   },

@@ -30,39 +30,61 @@ function prBody({ issue, workdir, runDir, commit, base, branch }) {
   ].join('\n');
 }
 
-export async function complete({ cfg, workdir, issue, runDir, checks = [], git: card = null }) {
+/**
+ * 一次运行是不是「发布没做完」，值不值得只重跑收尾。
+ * 只有审查已经通过、代码也交付过（或提交过）的运行才算——执行/审查失败的必须重跑 AI。
+ */
+export function resumablePublish(run) {
+  if (!run || run.outcome !== 'publish_failed') return null;
+  return {
+    runId: run.runId ?? null,
+    commit: run.commit ?? null,
+    git: run.git ?? null,
+    push: run.push ?? null,
+    pr: run.pr ?? null,
+    attempts: Array.isArray(run.attempts) ? run.attempts : [],
+  };
+}
+
+/**
+ * 收尾。prior 是上一次发布失败时留下的现场（commit / 分支）：
+ * 重试时这次通常没有新改动，但上一次的提交还在分支上，照样该推该建 PR。
+ */
+export async function complete({ cfg, workdir, issue, runDir, checks = [], git: card = null, prior = null }) {
   const opts = cfg.nodes?.complete ?? {};
-  const result = { commit: null, push: null, pr: null };
-  const fail = (message) => {
+  const result = { commit: null, push: null, pr: null, failedAt: null };
+  const fail = (message, failedAt) => {
     const error = new Error(message);
-    error.git = result; // 让 run.mjs 把「做到哪一步」写进 run.json
+    error.git = { ...result, failedAt }; // 让 run.mjs 把「做到哪一步」写进 run.json
     throw error;
   };
 
   const repo = await isGitRepo(workdir);
-  if ((opts.push || opts.pr) && !repo) fail('推送 / 创建 PR 需要 git 仓库，但当前项目不是');
+  if ((opts.push || opts.pr) && !repo) fail('推送 / 创建 PR 需要 git 仓库，但当前项目不是', 'repo');
   if (opts.commit && !repo) log('不是 git 仓库，跳过提交');
 
+  const inherited = prior?.commit ?? null;
   if (opts.commit && repo) {
     const made = await commitAll(workdir, {
       // trailer 是反查入口：git log --grep='^Card: <id>'
       subject: `${issue.id}: ${issue.title}`,
       body: `Card: ${issue.id}\nRun: ${rel(workdir, runDir)}`,
     });
-    if (made.error) fail(made.error);
-    result.commit = made.commit;
+    if (made.error) fail(made.error, 'commit');
+    // 重试发布时这次通常没有新改动：上一次的提交还在分支上，照样算交付内容。
+    result.commit = made.commit ?? inherited;
     if (made.commit) log(`已提交 ${made.commit}`);
-    else log('无代码改动，跳过提交');
+    else log(inherited ? `无新改动，沿用上一次的提交 ${inherited}` : '无代码改动，跳过提交');
   }
 
   const published = Boolean(result.commit) && repo;
   if (opts.push && published) {
     const branch = card?.branch || (await currentBranch(workdir));
     const remote = card?.remote || opts.remote || 'origin';
-    if (!branch) fail('推送失败：当前不在任何分支上');
+    if (!branch) fail('推送失败：当前不在任何分支上', 'push');
     const pushed = await pushBranch(workdir, { remote, branch });
     result.push = { ok: pushed.ok, remote, branch, error: pushed.ok ? '' : pushed.error };
-    if (!pushed.ok) fail(pushed.error);
+    if (!pushed.ok) fail(pushed.error, 'push');
     log(`已推送 ${remote}/${branch}`);
   }
 
@@ -81,7 +103,7 @@ export async function complete({ cfg, workdir, issue, runDir, checks = [], git: 
         title: `${issue.id}: ${issue.title}`,
         body: prBody({ issue, workdir, runDir, commit: result.commit, base, branch }),
       });
-      if (!pr.ok) fail(pr.error);
+      if (!pr.ok) fail(pr.error, 'pr');
       result.pr = { ok: true, url: pr.url };
       log(`已创建 PR ${pr.url}`);
     }

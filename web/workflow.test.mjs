@@ -115,6 +115,19 @@ test('收尾失败：从收尾指向退回待接', () => {
   assert.equal(edge(g, 'complete', 'rolled_back').tone, 'done');
 });
 
+test('发布失败：收尾标 warn，流程停在「需要人处理」，但重派只重试收尾', () => {
+  const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
+  const g = graphOf(
+    card(),
+    run({ attempts, outcome: 'publish_failed', reason: '收尾失败：推送失败：rejected' }),
+  );
+  assert.equal(node(g, 'complete').tone, 'warn');
+  assert.equal(node(g, 'complete').reason, '收尾失败：推送失败：rejected');
+  assert.equal(node(g, 'needs_human').tone, 'warn');
+  assert.equal(edge(g, 'complete', 'needs_human').tone, 'done');
+  assert.equal(g.outcome, 'publish_failed');
+});
+
 test('进程没了：最后一个节点标成已中断，不再算 live', () => {
   const g = graphOf(card(), run({ attempts: [{ attempt: 1, execute: { ok: null } }], pid: 2147483647 }));
   assert.equal(g.interrupted, true);

@@ -11,13 +11,14 @@ export const WORKFLOW_COLUMNS = [
 
 export const WORKFLOW_ORDER = Object.fromEntries(WORKFLOW_COLUMNS.map((c, i) => [c.id, i]));
 
-const phase = (column, label, tone, { detail = '', active = false, run = null, attempt = null } = {}) => ({
+const phase = (column, label, tone, { detail = '', active = false, run = null, attempt = null, retry = null } = {}) => ({
   column,
   phase: label,
   label,
   tone,
   detail,
   active,
+  retry,
   runId: run?.runId ?? null,
   startedAt: run?.startedAt ?? null,
   endedAt: run?.endedAt ?? null,
@@ -97,6 +98,17 @@ export function workflowOf(issue, run) {
     return phase('active', '已接单', 'live', { detail: round, active: true, run, attempt: n });
   }
 
+  // 代码已经通过审查，只是提交/推送/PR 没做完：重派只该重跑收尾，不该再叫 AI 干一遍。
+  if (run.outcome === 'publish_failed') {
+    const column = issue.status === 'open' ? 'queued' : 'active';
+    return phase(column, '发布失败', 'bad', {
+      detail: `${round} · 重派只重试收尾`,
+      retry: 'publish',
+      run,
+      attempt: n,
+    });
+  }
+
   if (run.outcome === 'needs_human') {
     // 人工把工单改回 open = 明确重派；此时别再显示「需要人处理」，否则看起来没生效。
     if (issue.status === 'open') {
@@ -143,10 +155,18 @@ export const TOPOLOGY = {
     { from: 'review', to: 'execute', label: '审查未过', kind: 'retry' },
     { from: 'gate', to: 'needs_human', label: '轮次用尽', kind: 'fail' },
     { from: 'review', to: 'needs_human', label: '轮次用尽', kind: 'fail' },
+    // 代码已经过了审查，只是没交付出去：停在需要人处理，修好环境后重派只重试收尾
+    { from: 'complete', to: 'needs_human', label: '发布失败', kind: 'fail' },
   ],
 };
 
-const TERMINAL_BY_OUTCOME = { closed: 'closed', needs_human: 'needs_human', rolled_back: 'rolled_back' };
+const TERMINAL_BY_OUTCOME = {
+  closed: 'closed',
+  needs_human: 'needs_human',
+  rolled_back: 'rolled_back',
+  // 发布失败：代码已过审查，人只要修好推送/PR 的环境再重试收尾
+  publish_failed: 'needs_human',
+};
 const TERMINAL_TONE = { closed: 'ok', needs_human: 'warn', rolled_back: 'bad' };
 
 const clip = (text, max = 60) => {
@@ -248,6 +268,16 @@ export function graphOf(issue, run) {
       node.checks = Array.isArray(rec?.review?.checks) ? rec.review.checks : [];
     } else {
       node.tone = 'ok';
+    }
+  }
+
+  // 发布失败要把「收尾」标成 warn，并原样带上原因：这一步做了、但没做成
+  if (run.outcome === 'publish_failed') {
+    const done = byId.get('complete');
+    if (done) {
+      done.tone = 'warn';
+      done.detail = '发布失败';
+      done.reason = String(run.reason ?? '');
     }
   }
 

@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 
 import { ensureProject } from '../../project.mjs';
 import * as beads from '../../web/beads.mjs';
-import { complete } from './complete.mjs';
+import { complete, resumablePublish } from './complete.mjs';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -107,6 +107,71 @@ test('收尾：推送失败就不关单，错误里带着已经做到的那一�
     const issue = await issueOf(created.id);
     assert.equal(issue.status, 'open', '发布失败不能关单');
   });
+});
+
+test('重试发布：这次没有新改动，也照样把上次的提交推出去', async () => {
+  await withProject(async ({ dir, remote, branch, runDir }) => {
+    const created = await beads.createIssue({ title: '重试发布', description: '', labels: ['ready-for-agent'] });
+    await fs.writeFile(path.join(dir, 'work.txt'), 'ai 改的东西\n', 'utf8');
+
+    // 第一次：远端写错，推送失败；错误里要带着已经提交的 commit
+    let firstErr = null;
+    await complete({
+      cfg: { nodes: { complete: { commit: true, push: true, pr: false, remote: 'nope', base: branch } } },
+      workdir: dir,
+      issue: created,
+      runDir,
+      git: { branch, base: branch, remote: 'nope' },
+    }).catch((err) => {
+      firstErr = err;
+    });
+    assert.ok(firstErr, '推送失败要抛错');
+    assert.equal(firstErr.git.failedAt, 'push');
+    assert.equal(firstErr.git.push.ok, false);
+    assert.equal((await issueOf(created.id)).status, 'open');
+
+    // 第二次：修好远端再派单。工作区没有新改动，但上一次的提交还在分支上。
+    await syncTree(dir);
+    const prior = resumablePublish({
+      outcome: 'publish_failed',
+      runId: 'r1',
+      commit: firstErr.git.commit,
+      git: { branch, base: branch, remote: 'origin' },
+    });
+    const result = await complete({
+      cfg: { nodes: { complete: { commit: true, push: true, pr: false, remote: 'origin', base: branch } } },
+      workdir: dir,
+      issue: created,
+      runDir,
+      git: { branch, base: branch, remote: 'origin' },
+      prior,
+    });
+
+    assert.equal(result.commit, firstErr.git.commit, '沿用上一次的提交，不重新提交');
+    assert.equal(result.push.ok, true);
+    assert.equal((await issueOf(created.id)).status, 'closed');
+    assert.equal(await git(remote, ['rev-parse', '--short', branch]), firstErr.git.commit);
+  });
+});
+
+test('resumablePublish 只认「发布失败」，别的情况不跳过 AI', () => {
+  assert.equal(resumablePublish(null), null);
+  assert.equal(resumablePublish({ outcome: 'closed' }), null);
+  assert.equal(resumablePublish({ outcome: 'rolled_back' }), null);
+  assert.equal(resumablePublish({ outcome: 'needs_human' }), null);
+
+  const got = resumablePublish({
+    outcome: 'publish_failed',
+    runId: 'r9',
+    commit: 'abc1234',
+    git: { branch: 'card/x', base: 'main' },
+    push: { ok: false },
+    attempts: [{ attempt: 1 }],
+  });
+  assert.equal(got.runId, 'r9');
+  assert.equal(got.commit, 'abc1234');
+  assert.equal(got.git.branch, 'card/x');
+  assert.deepEqual(got.attempts, [{ attempt: 1 }]);
 });
 
 test('收尾：没有代码改动时不提交也不推送，仍然关单', async () => {

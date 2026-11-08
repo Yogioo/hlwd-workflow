@@ -18,9 +18,9 @@ export async function listCandidates({ cfg }) {
   return out;
 }
 
-export async function claim({ issue, cfg }) {
+export async function claim({ issue, cfg, note = 'AI 接单，开始执行。' }) {
   await beads.updateIssue(issue.id, { status: 'in_progress', assignee: cfg.actor });
-  await beads.commentIssue(issue.id, 'AI 接单，开始执行。');
+  await beads.commentIssue(issue.id, note);
   log(`接单 ${issue.id} — ${issue.title}`);
   return beads.getIssue(issue.id);
 }
