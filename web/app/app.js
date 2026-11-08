@@ -50,6 +50,10 @@ const state = {
   tagCatalog: [],
   tagError: null,
   editTag: null,
+  // AI 预设是项目配置：预设列表 + 两个 AI 节点各挂哪份
+  presets: [],
+  nodes: {},
+  editPreset: null,
   readyLabel: 'ready-for-agent',
   current: null,
   trace: null,
@@ -2192,10 +2196,10 @@ async function openSettings() {
   $('#gatePath').title = gate?.exists ? '门禁脚本路径' : '门禁脚本还不存在（重新打开项目会自动创建）';
   const f = $('#engineForm');
   const e = cfg.engine ?? {};
-  f.runner.value = e.runner ?? 'pi';
+  state.presets = e.presets ?? [];
+  state.nodes = e.nodes ?? {};
+  state.editPreset = null;
   f.sandbox.value = e.sandbox ?? 'workspace-write';
-  f.model.value = e.model ?? '';
-  f.thinking.value = e.thinking ?? '';
   f.attempts.value = e.attempts ?? 2;
   f.timeoutMin.value = Math.max(1, Math.round((e.timeoutMs ?? 1800000) / 60000));
   f.actor.value = e.actor ?? 'ai';
@@ -2207,27 +2211,33 @@ async function openSettings() {
     mode: 'template',
     onOpenGate: () => openGate('gate'),
     onSaveNode: saveGraphNode,
+    onEditPreset: openPresetFromNode,
   });
-  state.settingsGraph.setData({ graph: graph ?? null, prompts: prompts ?? {}, stages: cfg.engine?.stages ?? {} });
+  state.settingsGraph.setData({
+    graph: graph ?? null,
+    prompts: prompts ?? {},
+    presets: state.presets,
+    nodes: state.nodes,
+  });
   renderTagList();
+  renderPresetList();
   showSettingsSection('tags');
   $('#settingsDialog').showModal();
 }
 
-/** 保存一个节点：提示词走 prompts，执行器/模型走 engine.stages，留空＝继承。 */
-async function saveGraphNode({ stage, prompt, runner, model, thinking }) {
+/** 保存一个节点：提示词只属于它自己，AI 配置只通过所选预设生效。 */
+async function saveGraphNode({ stage, prompt, preset }) {
   const saved = await api('/api/settings', {
     method: 'PUT',
     body: JSON.stringify({
       prompts: prompt == null ? undefined : { [stage]: prompt },
-      engine: { stages: { [stage]: { runner, model, thinking } } },
+      engine: { nodes: { [stage]: { preset } } },
     }),
   });
-  state.settingsGraph?.setData({
-    prompts: saved.prompts ?? {},
-    stages: saved.config?.engine?.stages ?? {},
-  });
-  if (state.current) state.current.engineStages = saved.config?.engine?.stages;
+  state.presets = saved.config?.engine?.presets ?? state.presets;
+  state.nodes = saved.config?.engine?.nodes ?? state.nodes;
+  state.settingsGraph?.setData({ prompts: saved.prompts ?? {}, presets: state.presets, nodes: state.nodes });
+  renderPresetList();
   return saved;
 }
 
@@ -2236,10 +2246,7 @@ async function saveEngine(event) {
   const f = new FormData(event.target);
   const payload = {
     engine: {
-      runner: f.get('runner'),
       sandbox: f.get('sandbox'),
-      model: String(f.get('model') ?? ''),
-      thinking: String(f.get('thinking') ?? ''),
       attempts: Number(f.get('attempts')),
       timeoutMs: Math.round(Number(f.get('timeoutMin') ?? 30) * 60000),
       actor: String(f.get('actor') ?? ''),
@@ -2256,11 +2263,189 @@ async function saveEngine(event) {
     renderTagList();
     if (document.body.dataset.mode === 'board') await load();
     else if (state.current) await openIssue(state.current.id, { keepTab: true });
-    hint('执行配置已保存，engine 下次运行生效');
+    hint('运行配置已保存，engine 下次运行生效');
   } catch (err) {
     hint(`保存失败：${err.message}`, true);
   }
 }
+
+// —— AI 预设 ——
+// 预设是 AI 配置的唯一来源：执行和审查两个节点各挂一份，留空的概念不存在。
+const PRESET_RUNNERS = [
+  ['pi', 'pi'],
+  ['codex', 'codex'],
+  ['agent', 'cursor agent'],
+];
+
+const presetRunnerLabel = (runner) => PRESET_RUNNERS.find(([value]) => value === runner)?.[1] ?? runner;
+const presetStages = (id) => [
+  ...(state.nodes?.execute?.preset === id ? ['执行'] : []),
+  ...(state.nodes?.review?.preset === id ? ['审查'] : []),
+];
+
+function presetMeta(preset) {
+  return [presetRunnerLabel(preset.runner), preset.model || '执行器默认模型', preset.thinking || '默认思考'].join(' · ');
+}
+
+function renderPresetList() {
+  const box = $('#presetList');
+  if (!box) return;
+  if (!state.presets.length) {
+    box.innerHTML = '<div class="empty">还没有预设。至少留一份，engine 才跑得起来。</div>';
+    return;
+  }
+  box.innerHTML = state.presets.map(presetRow).join('');
+}
+
+function presetRow(preset) {
+  if (state.editPreset === preset.id) {
+    const options = PRESET_RUNNERS.map(
+      ([value, label]) => `<option value="${value}"${(preset.runner ?? 'pi') === value ? ' selected' : ''}>${label}</option>`,
+    ).join('');
+    return `<div class="ai-preset-row is-editing" data-preset="${esc(preset.id)}">
+      <input data-f="name" value="${esc(preset.name)}" maxlength="40" aria-label="预设名称" />
+      <select data-f="runner" aria-label="执行器">${options}</select>
+      <input data-f="model" value="${esc(preset.model)}" maxlength="120" placeholder="模型" aria-label="模型" />
+      <input data-f="thinking" value="${esc(preset.thinking)}" maxlength="120" placeholder="思考强度" aria-label="思考强度" />
+      <button type="button" class="primary tiny" data-act="save">保存</button>
+      <button type="button" class="ghost tiny" data-act="cancel">取消</button>
+    </div>`;
+  }
+  const used = presetStages(preset.id);
+  const badges = used.map((stage) => `<span class="tag-badge">${stage}在用</span>`).join('');
+  const deleteTitle = used.length ? ` title="${used.join('、')}正在用，先给节点换一个"` : '';
+  return `<div class="ai-preset-row" data-preset="${esc(preset.id)}">
+    <div class="ai-preset-main">
+      <div class="ai-preset-name">${esc(preset.name)}${badges}</div>
+      <div class="ai-preset-meta">${esc(presetMeta(preset))}</div>
+    </div>
+    <div class="ai-preset-actions">
+      <button type="button" class="ghost tiny" data-act="edit">编辑</button>
+      <button type="button" class="ghost tiny" data-act="copy">复制</button>
+      <button type="button" class="ghost tiny" data-act="delete"${used.length ? ' disabled' : ''}${deleteTitle}>删除</button>
+    </div>
+  </div>`;
+}
+
+/** 保存整份预设表：页面一次写全量，服务端校验重名与被引用（被节点用着的删不掉）。 */
+async function savePresetList(list) {
+  const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ engine: { presets: list } }) });
+  state.presets = saved.config?.engine?.presets ?? list;
+  state.nodes = saved.config?.engine?.nodes ?? state.nodes;
+  renderPresetList();
+  state.settingsGraph?.setData({ presets: state.presets, nodes: state.nodes });
+}
+
+function uniquePresetName(raw) {
+  const names = new Set(state.presets.map((preset) => preset.name));
+  const base = raw.slice(0, 37);
+  if (!names.has(base)) return base;
+  for (let n = 2; n < 100; n += 1) {
+    const name = `${base} ${n}`;
+    if (name.length <= 40 && !names.has(name)) return name;
+  }
+  return `${base.slice(0, 33)}-${Date.now().toString(36).slice(-4)}`;
+}
+
+async function addAiPreset(event) {
+  event.preventDefault();
+  const form = event.target;
+  const f = new FormData(form);
+  const name = String(f.get('name') ?? '').trim();
+  try {
+    await savePresetList([
+      ...state.presets,
+      { name, runner: String(f.get('runner') ?? 'pi'), model: String(f.get('model') ?? ''), thinking: String(f.get('thinking') ?? '') },
+    ]);
+    form.reset();
+    hint(`预设「${name}」已添加`);
+  } catch (err) {
+    hint(`添加失败：${err.message}`, true);
+  }
+}
+
+/** 从节点抽屉跳过来：带 id 就直接编辑那份，不带就把光标放进「添加」。 */
+function openPresetFromNode(id) {
+  // 切分区前收起抽屉：回来时重新点节点，拿到的就是最新的预设列表
+  state.settingsGraph?.close();
+  showSettingsSection('presets');
+  const form = $('#presetAddForm');
+  if (!id) {
+    form?.scrollIntoView({ block: 'nearest' });
+    form?.elements.name?.focus();
+    return;
+  }
+  state.editPreset = id;
+  renderPresetList();
+  const row = document.querySelector(`.ai-preset-row[data-preset="${id}"]`);
+  row?.scrollIntoView({ block: 'nearest' });
+  row?.querySelector('[data-f="name"]')?.focus();
+}
+
+$('#presetList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  const row = e.target.closest('[data-preset]');
+  if (!btn || !row) return;
+  const id = row.dataset.preset;
+  const preset = state.presets.find((p) => p.id === id);
+  if (!preset) return;
+  if (btn.dataset.act === 'edit') {
+    state.editPreset = id;
+    renderPresetList();
+    return;
+  }
+  if (btn.dataset.act === 'cancel') {
+    state.editPreset = null;
+    renderPresetList();
+    return;
+  }
+  if (btn.dataset.act === 'save') {
+    const next = {
+      ...preset,
+      name: row.querySelector('[data-f="name"]').value.trim(),
+      runner: row.querySelector('[data-f="runner"]').value,
+      model: row.querySelector('[data-f="model"]').value.trim(),
+      thinking: row.querySelector('[data-f="thinking"]').value.trim(),
+    };
+    try {
+      await savePresetList(state.presets.map((p) => (p.id === id ? next : p)));
+      state.editPreset = null;
+      renderPresetList();
+      hint(`预设「${next.name}」已保存`);
+    } catch (err) {
+      hint(`保存失败：${err.message}`, true);
+    }
+    return;
+  }
+  if (btn.dataset.act === 'copy') {
+    try {
+      await savePresetList([
+        ...state.presets,
+        { name: uniquePresetName(`${preset.name} 副本`), runner: preset.runner, model: preset.model, thinking: preset.thinking },
+      ]);
+      hint('已复制一份预设');
+    } catch (err) {
+      hint(`复制失败：${err.message}`, true);
+    }
+    return;
+  }
+  if (btn.dataset.act === 'delete') {
+    const used = presetStages(id);
+    if (used.length) {
+      hint(`${used.join('、')}正在用这份预设，先给节点换一个`, true);
+      return;
+    }
+    if (!window.confirm(`删除预设「${preset.name}」？`)) return;
+    try {
+      await savePresetList(state.presets.filter((p) => p.id !== id));
+      hint('预设已删除');
+    } catch (err) {
+      hint(`删除失败：${err.message}`, true);
+    }
+  }
+});
+
+$('#presetAddForm').addEventListener('submit', addAiPreset);
 
 // —— 标签库 ——
 function renderTagList() {

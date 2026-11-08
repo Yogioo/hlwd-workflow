@@ -51,6 +51,10 @@ test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词
     const config = JSON.parse(await fs.readFile(path.join(dir, '.hlwd', 'config.json'), 'utf8'));
     assert.deepEqual(config.columns, DEFAULT_CONFIG.columns);
     assert.equal(config.engine.readyLabel, 'ready-for-agent');
+    // 开箱就有一份预设，两个 AI 节点都挂着它：新项目不会因为「没配模型」跑不起来
+    assert.equal(config.engine.presets.length, 1);
+    assert.equal(config.engine.presets[0].id, 'default');
+    assert.deepEqual(config.engine.nodes, { execute: { preset: 'default' }, review: { preset: 'default' } });
 
     for (const name of ['execute', 'review']) {
       const text = await fs.readFile(path.join(dir, '.hlwd', 'prompts', `${name}.md`), 'utf8');
@@ -106,40 +110,120 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
   });
 });
 
-test('engine.stages 可以单独配执行/审查，留空表示继承', async () => {
+test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
   await withTempProject(async (dir) => {
     await ensureProject(dir);
 
     const saved = await saveProjectConfig(dir, {
-      engine: { stages: { execute: { model: 'exec-model' }, review: { runner: 'codex', thinking: 'low' } } },
+      engine: {
+        presets: [
+          { id: 'exec', name: '执行 · sonnet', runner: 'pi', model: 'exec-model', thinking: 'high' },
+          { id: 'rev', name: '审查 · opus', runner: 'codex', model: 'review-model', thinking: 'low' },
+        ],
+        nodes: { execute: { preset: 'exec' }, review: { preset: 'rev' } },
+      },
     });
-    assert.deepEqual(saved.engine.stages.execute, { runner: '', model: 'exec-model', thinking: '' });
-    assert.deepEqual(saved.engine.stages.review, { runner: 'codex', model: '', thinking: 'low' });
-    assert.equal(saved.engine.model, '', '阶段配置不该改全局默认值');
+    assert.deepEqual(saved.engine.presets.map((p) => p.id), ['exec', 'rev']);
+    assert.deepEqual(saved.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
+    assert.equal(saved.engine.stages, undefined, '旧字段不再写回，读出来也不该有');
 
-    // 再存一次只改一个阶段：另一个阶段的配置要留着
-    const again = await saveProjectConfig(dir, { engine: { stages: { execute: { model: 'other' } } } });
-    assert.equal(again.engine.stages.execute.model, 'other');
-    assert.equal(again.engine.stages.review.runner, 'codex');
+    // 只改预设（比如换模型）：节点挂着不动
+    const again = await saveProjectConfig(dir, {
+      engine: {
+        presets: [
+          { id: 'exec', name: '执行', runner: 'pi', model: 'other', thinking: '' },
+          { id: 'rev', name: '审查', runner: 'codex', model: '', thinking: '' },
+        ],
+      },
+    });
+    assert.equal(again.engine.presets[0].model, 'other');
+    assert.deepEqual(again.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
 
-    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { claim: {} } } }), /未知阶段/);
-    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { model: 1 } } } }), /必须是字符串/);
-    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { model: 'x'.repeat(200) } } } }), /不能超过/);
-    await assert.rejects(() => saveProjectConfig(dir, { engine: { stages: { execute: { runner: 'nope' } } } }), /runner 只能是/);
+    // 新预设可以不带 id：服务端发一个 p-N，页面靠返回值刷新
+    const withNew = await saveProjectConfig(dir, {
+      engine: { presets: [...again.engine.presets, { name: '新预设', runner: 'pi' }] },
+    });
+    assert.match(withNew.engine.presets.at(-1).id, /^p-\d+$/);
+    assert.equal(withNew.engine.presets.at(-1).name, '新预设');
+
+    // 校验：宁可不保存，也不落坏配置
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { presets: [] } }), /至少/);
+    await assert.rejects(
+      () =>
+        saveProjectConfig(dir, {
+          engine: {
+            presets: [
+              { id: 'a', name: 'x', runner: 'pi' },
+              { id: 'a', name: 'y', runner: 'pi' },
+            ],
+          },
+        }),
+      /id 重复/,
+    );
+    await assert.rejects(
+      () =>
+        saveProjectConfig(dir, {
+          engine: {
+            presets: [
+              { id: 'a', name: 'x', runner: 'pi' },
+              { id: 'b', name: 'x', runner: 'pi' },
+            ],
+          },
+        }),
+      /重名/,
+    );
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { presets: [{ id: 'a', name: 'x', runner: 'nope' }] } }),
+      /执行器只能是/,
+    );
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { execute: { preset: 'missing' } } } }), /不存在/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { claim: { preset: 'exec' } } } }), /未知阶段/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { execute: { preset: 'exec', model: 'x' } } } }), /不认识字段/);
+    // 还挂在节点上的预设删不掉：先换节点，再删
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { presets: [{ id: 'rev', name: '审查', runner: 'codex', model: '', thinking: '' }] } }),
+      /正被执行节点使用/,
+    );
   });
 });
 
-test('手改坏的 stages 读回来也收敛成完整形状', async () => {
+test('旧配置（engine.stages / 全局模型）读的时候折成预设', async () => {
   await withTempProject(async (dir) => {
     await ensureProject(dir);
     await fs.writeFile(
       path.join(dir, '.hlwd', 'config.json'),
-      JSON.stringify({ engine: { stages: { execute: { model: '  m  ', extra: 1 }, nope: {} } } }),
+      JSON.stringify({
+        engine: { runner: 'pi', model: 'global-model', thinking: 'high', stages: { execute: { model: 'exec-model' } } },
+      }),
       'utf8',
     );
     const cfg = await readProjectConfig(dir);
-    assert.deepEqual(cfg.engine.stages.execute, { runner: '', model: 'm', thinking: '' });
-    assert.deepEqual(cfg.engine.stages.review, { runner: '', model: '', thinking: '' });
+    assert.equal(cfg.engine.stages, undefined, '旧字段不再对外暴露');
+    const byId = Object.fromEntries(cfg.engine.presets.map((p) => [p.id, p]));
+    assert.equal(byId.default.model, 'global-model');
+    assert.equal(byId.default.thinking, 'high');
+    assert.equal(byId['stage-execute'].model, 'exec-model');
+    assert.equal(byId['stage-execute'].runner, 'pi');
+    assert.deepEqual(cfg.engine.nodes, { execute: { preset: 'stage-execute' }, review: { preset: 'default' } });
+  });
+});
+
+test('手改坏的 presets / nodes 读回来也收敛成能跑的形状', async () => {
+  await withTempProject(async (dir) => {
+    await ensureProject(dir);
+    await fs.writeFile(
+      path.join(dir, '.hlwd', 'config.json'),
+      JSON.stringify({
+        engine: {
+          presets: [{ id: 'Bad Id', name: 'x' }, { id: 'ok', name: '', runner: 'nope' }, { id: 'ok', name: 'dup' }],
+          nodes: { execute: { preset: 'gone' }, review: { preset: 'ok' } },
+        },
+      }),
+      'utf8',
+    );
+    const cfg = await readProjectConfig(dir);
+    assert.deepEqual(cfg.engine.presets, [{ id: 'ok', name: 'ok', runner: 'pi', model: '', thinking: '' }]);
+    assert.deepEqual(cfg.engine.nodes, { execute: { preset: 'ok' }, review: { preset: 'ok' } });
   });
 });
 

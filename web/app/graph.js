@@ -18,12 +18,6 @@ const POS = {
 };
 
 const TONE_TEXT = { ok: '完成', live: '进行中', warn: '需注意', bad: '失败', idle: '未开始' };
-const RUNNERS = [
-  ['', '继承默认'],
-  ['pi', 'pi'],
-  ['codex', 'codex'],
-  ['agent', 'cursor agent'],
-];
 
 const esc = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -58,7 +52,7 @@ function edgeGeom(edge) {
 
 const nodeSub = (node, mode) => {
   if (mode === 'template') {
-    if (node.kind === 'ai') return node.stage && node.stageOn ? '已单独配置' : '继承默认';
+    if (node.kind === 'ai') return node.presetName ? `预设 · ${node.presetName}` : '未选预设';
     return node.kind === 'end' ? '终态' : '不调用模型';
   }
   if (node.count > 1) return `第 ${node.attempt} 轮`;
@@ -75,15 +69,24 @@ export function createGraph(root, options = {}) {
   const meta = root.querySelector('.graph-meta');
   let graph = null;
   let prompts = {};
-  let stages = {};
+  let presets = [];
+  let nodes = {};
   let selected = null;
 
-  /** 节点上「已单独配置」的标记：设置页用，来自 config.engine.stages。 */
-  const markStages = () => {
+  /** 节点挂的预设：找不到就像引擎一样回落到第一份（正常配置不会走到这里）。 */
+  const presetIdOf = (stage) => {
+    const id = String(nodes?.[stage]?.preset ?? '').trim();
+    return presets.some((preset) => preset.id === id) ? id : presets[0]?.id ?? '';
+  };
+  const presetOf = (stage) => presets.find((preset) => preset.id === presetIdOf(stage)) ?? null;
+
+  /** 节点上的预设标记：设置页用，来自 config.engine.nodes / presets。 */
+  const markPresets = () => {
     if (!graph) return;
     for (const node of graph.nodes) {
-      const cfg = node.stage ? stages[node.stage] ?? {} : {};
-      node.stageOn = Boolean(String(cfg.runner ?? '').trim() || String(cfg.model ?? '').trim() || String(cfg.thinking ?? '').trim());
+      const preset = node.stage ? presetOf(node.stage) : null;
+      node.presetId = preset?.id ?? '';
+      node.presetName = preset?.name ?? '';
     }
   };
 
@@ -128,7 +131,7 @@ export function createGraph(root, options = {}) {
   const metaHtml = () => {
     if (!graph) return '';
     if (opts.mode === 'template') {
-      return `<span class="graph-hint">点节点查看并编辑它自己的提示词与模型（再点一次收起）；留空＝继承「AI 执行」里的默认值。拓扑固定在代码里，不能拖动，也不能连线。</span>`;
+      return `<span class="graph-hint">点节点查看并编辑它自己的提示词和 AI 预设（再点一次收起）。拓扑固定在代码里，不能拖动，也不能连线。</span>`;
     }
     const bits = [];
     if (graph.outcome) bits.push(`<span class="graph-pill">结局 <b>${esc(graph.outcome)}</b></span>`);
@@ -146,7 +149,7 @@ export function createGraph(root, options = {}) {
       if (meta) meta.innerHTML = '';
       return;
     }
-    markStages();
+    markPresets();
     if (canvas) {
       canvas.innerHTML =
         `<svg class="graph-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">` +
@@ -228,27 +231,31 @@ export function createGraph(root, options = {}) {
   const templateBody = (node) => {
     if (node.kind === 'end') return `<section><h4>终态</h4><p class="graph-note">这是流程的出口，没有可配置的东西。</p></section>`;
     if (node.id === 'claim') {
-      return `<section><h4>接单</h4><p class="graph-note">规则写死在 engine 里：<code>open</code> + 可派标签，且这张卡没有活跃的 run。可派标签去「AI 执行」里改。</p></section>`;
+      return `<section><h4>接单</h4><p class="graph-note">规则写死在 engine 里：<code>open</code> + 可派标签，且这张卡没有活跃的 run。可派标签去「运行」里改。</p></section>`;
     }
     if (node.id === 'gate') {
       return `<section><h4>门禁</h4><p class="graph-note">门禁是项目里的一个 JS 文件（进版本库），页面不编辑它。</p>
         <div class="graph-actions"><button type="button" class="ghost" data-action="gate">打开脚本</button></div></section>`;
     }
     if (node.id === 'complete') {
-      return `<section><h4>收尾</h4><p class="graph-note">提交与关单。开关在「AI 执行」的「通过后自动提交」，这里不重复配。</p></section>`;
+      return `<section><h4>收尾</h4><p class="graph-note">提交与关单。开关在「运行」的「通过后自动提交」，这里不重复配。</p></section>`;
     }
     const stage = node.stage;
-    const cur = stages[stage] ?? {};
-    const options = RUNNERS.map(([v, label]) => `<option value="${v}"${(cur.runner ?? '') === v ? ' selected' : ''}>${label}</option>`).join('');
+    const cur = presetOf(stage);
+    const options = presets
+      .map((preset) => `<option value="${esc(preset.id)}"${preset.id === cur?.id ? ' selected' : ''}>${esc(preset.name)}</option>`)
+      .join('');
     return `<section>
       <h4>${esc(node.label)}</h4>
       <label class="graph-field">系统提示词 <span class="graph-note">（${stage}.md，清空＝恢复工具自带模板）</span>
         <textarea data-field="prompt" rows="6" spellcheck="false">${esc(prompts[stage] ?? '')}</textarea>
       </label>
-      <div class="graph-grid">
-        <label class="graph-field">执行器<select data-field="runner">${options}</select></label>
-        <label class="graph-field">模型<input data-field="model" value="${esc(cur.model ?? '')}" placeholder="留空＝继承默认" /></label>
-        <label class="graph-field">思考强度<input data-field="thinking" value="${esc(cur.thinking ?? '')}" placeholder="留空＝继承默认" /></label>
+      <label class="graph-field">AI 预设 <span class="graph-note">（执行器 / 模型 / 思考强度）</span>
+        <select data-field="preset">${options}</select>
+      </label>
+      <div class="graph-actions">
+        <button type="button" class="ghost" data-action="edit-preset">编辑这个预设</button>
+        <button type="button" class="ghost" data-action="new-preset">新建预设</button>
       </div>
       <p class="graph-note">保存后<strong>下一次运行</strong>生效；已经在跑的单不受影响。</p>
     </section>`;
@@ -304,15 +311,13 @@ export function createGraph(root, options = {}) {
     const payload = {
       stage: node.stage,
       prompt: stageSel.value,
-      runner: drawer.querySelector('[data-field="runner"]')?.value ?? '',
-      model: drawer.querySelector('[data-field="model"]')?.value ?? '',
-      thinking: drawer.querySelector('[data-field="thinking"]')?.value ?? '',
+      preset: drawer.querySelector('[data-field="preset"]')?.value ?? '',
     };
     btn.disabled = true;
     try {
       await opts.onSaveNode?.(payload);
       prompts = { ...prompts, [payload.stage]: payload.prompt };
-      stages = { ...stages, [payload.stage]: { runner: payload.runner, model: payload.model, thinking: payload.thinking } };
+      nodes = { ...nodes, [payload.stage]: { preset: payload.preset } };
       const ok = drawer.querySelector('.graph-saved');
       if (ok) {
         ok.hidden = false;
@@ -355,6 +360,8 @@ export function createGraph(root, options = {}) {
     else if (kind === 'file') loadFile(action.dataset.name, drawer.querySelector('.graph-file'));
     else if (kind === 'turn') opts.onOpenTurn?.({ runId: graph.runId, phaseKey: `${action.dataset.phase}-${action.dataset.attempt}` });
     else if (kind === 'gate') opts.onOpenGate?.();
+    else if (kind === 'edit-preset') opts.onEditPreset?.(presetIdOf(graph?.nodes.find((n) => n.id === selected)?.stage));
+    else if (kind === 'new-preset') opts.onEditPreset?.('');
     else if (kind === 'save') save(action);
   };
 
@@ -371,10 +378,11 @@ export function createGraph(root, options = {}) {
       if (selected && !graph?.nodes.some((n) => n.id === selected)) close(false);
       render();
     },
-    setData({ graph: g, prompts: p, stages: s }) {
+    setData({ graph: g, prompts: p, presets: ps, nodes: ns }) {
       if (g) graph = g;
       if (p) prompts = p;
-      if (s) stages = s;
+      if (ps) presets = ps;
+      if (ns) nodes = ns;
       render();
     },
     close,

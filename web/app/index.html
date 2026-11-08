@@ -279,7 +279,8 @@
           <nav id="settingsNav" class="settings-nav" aria-label="设置分区">
             <button type="button" data-sec="tags" class="active">标签库</button>
             <button type="button" data-sec="graph">流程</button>
-            <button type="button" data-sec="engine">AI 执行</button>
+            <button type="button" data-sec="presets">AI 预设</button>
+            <button type="button" data-sec="engine">运行</button>
             <button type="button" data-sec="gate">门禁</button>
           </nav>
           <p class="settings-side-note">工作流状态由 engine 固定管理：待接 → 执行 → 门禁 → 审查 → 完成。它不再作为工单字段配置。</p>
@@ -300,20 +301,32 @@
             <div id="tagList" class="tag-list"><div class="empty">读取标签中…</div></div>
           </section>
 
+          <section class="settings-panel" data-panel="presets" hidden>
+            <div class="settings-head">
+              <h3>AI 预设</h3>
+              <p class="dialog-note">一份预设就是一组「执行器 + 模型 + 思考强度」。引擎只在流程节点上读它：执行和审查各选一份，互不影响。改预设对<b>下一次运行</b>生效；正在跑的工单用的是它开始时的快照。</p>
+            </div>
+            <form id="presetAddForm" class="ai-preset-add">
+              <input name="name" placeholder="预设名称，如 执行 · sonnet" required maxlength="40" />
+              <select name="runner" aria-label="执行器">
+                <option value="pi">pi</option>
+                <option value="codex">codex</option>
+                <option value="agent">cursor agent</option>
+              </select>
+              <input name="model" placeholder="模型（空＝执行器默认）" maxlength="120" />
+              <input name="thinking" placeholder="思考强度（空＝默认）" maxlength="120" />
+              <button type="submit" class="primary">添加</button>
+            </form>
+            <div id="presetList" class="ai-preset-list"><div class="empty">读取预设中…</div></div>
+          </section>
+
           <section class="settings-panel" data-panel="engine" hidden>
             <div class="settings-head">
-              <h3>AI 执行</h3>
-              <p class="dialog-note">保存后看板立即生效，engine 下次执行也用它。优先级仍是 bd 原生 P0–P4，固定名称。可派标签建议去「标签库」改名（会级联历史工单）；这里直接改只影响以后接单。</p>
+              <h3>运行</h3>
+              <p class="dialog-note">整条流水线的运行参数。AI 用哪个执行器/模型由「AI 预设」决定，去「流程」里给执行、审查两个节点各选一份。可派标签建议去「标签库」改名（会级联历史工单）；这里直接改只影响以后接单。</p>
             </div>
             <form id="engineForm">
               <div class="settings-grid">
-                <label>执行器
-                  <select name="runner">
-                    <option value="pi">pi</option>
-                    <option value="codex">codex</option>
-                    <option value="agent">cursor agent</option>
-                  </select>
-                </label>
                 <label>沙箱
                   <select name="sandbox">
                     <option value="workspace-write">workspace-write（可改文件）</option>
@@ -321,8 +334,6 @@
                     <option value="danger-full-access">danger-full-access（全权限）</option>
                   </select>
                 </label>
-                <label>默认模型（空=执行器默认）<input name="model" placeholder="如 claude-sonnet-4.6" /></label>
-                <label>默认思考强度（空=执行器默认）<input name="thinking" placeholder="如 high" /></label>
                 <label>最多轮数<input name="attempts" type="number" min="1" max="5" /></label>
                 <label>单轮超时（分钟）<input name="timeoutMin" type="number" min="1" max="240" /></label>
                 <label>AI 账号名<input name="actor" placeholder="ai" /></label>
@@ -331,7 +342,7 @@
                 <label class="chk-row"><input name="autoWatch" type="checkbox" /> 看板启动时自动开「自动流水线」</label>
               </div>
               <menu>
-                <button type="submit" class="primary">保存执行配置</button>
+                <button type="submit" class="primary">保存运行配置</button>
               </menu>
             </form>
           </section>
@@ -354,7 +365,7 @@
           <section class="settings-panel" data-panel="graph" hidden>
             <div class="settings-head">
               <h3>流程</h3>
-              <p class="dialog-note">点节点改它自己的提示词与模型；<b>留空＝继承</b>「AI 执行」里的默认值。拓扑固定（接单 → 执行 → 门禁 → 审查 → 收尾），不能连线——改流程要改 engine。提示词存在项目的 <code>.hlwd/prompts/</code>，清空并保存 = 恢复工具自带模板。</p>
+              <p class="dialog-note">点节点改它自己的提示词，并选一份 <b>AI 预设</b>（执行器 + 模型 + 思考强度）。执行和审查各选一份，互不影响。拓扑固定（接单 → 执行 → 门禁 → 审查 → 收尾），不能连线——改流程要改 engine。提示词存在项目的 <code>.hlwd/prompts/</code>，清空并保存 = 恢复工具自带模板。</p>
             </div>
             <div id="settingsGraph" class="graph-block">
               <div class="graph-top"><div class="graph-meta"></div></div>

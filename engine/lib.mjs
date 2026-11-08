@@ -55,7 +55,8 @@ const DEFAULTS = {
   readyLabel: 'ready-for-agent',
   timeoutMs: 1800000,
   gitCommit: true,
-  stages: {},
+  presets: [],
+  nodes: {},
 };
 
 /** 配置在项目的 .hlwd/config.json（看板里的「设置」写的就是它），engine 只读。 */
@@ -65,17 +66,29 @@ export async function loadConfig(projectDir = process.cwd()) {
 }
 
 /**
- * 某个阶段（execute / review）实际生效的配置。
- * 阶段上留空的项继承全局 engine.* —— 空字符串不是“不设模型”，是“没说，用默认”。
+ * 某个阶段（execute / review）挂的预设：找不到就回落到第一份。
+ * 正常路径上 readProjectConfig 已经保证节点指向存在的预设，这里兜的是手改坏配置。
+ */
+export function presetOf(cfg, stage) {
+  const list = Array.isArray(cfg?.presets) ? cfg.presets : [];
+  const id = String(cfg?.nodes?.[stage]?.preset ?? '').trim();
+  return list.find((preset) => preset.id === id) ?? list[0] ?? null;
+}
+
+/**
+ * 某个阶段实际生效的配置：预设决定用哪个 runner/model/thinking，
+ * 其余字段（sandbox / attempts / 超时 / actor …）跟整条流水线走。
+ * 预设里空的 model/thinking 是“执行器默认”，不继承别的值。
  */
 export function stageCfg(cfg, stage) {
-  const override = cfg?.stages?.[stage] ?? {};
-  const out = { ...cfg };
-  for (const key of ['runner', 'model', 'thinking']) {
-    const value = String(override[key] ?? '').trim();
-    if (value) out[key] = value;
-  }
-  return out;
+  const preset = presetOf(cfg, stage);
+  if (!preset) return { ...cfg };
+  return {
+    ...cfg,
+    runner: preset.runner || cfg.runner,
+    model: preset.model ?? '',
+    thinking: preset.thinking ?? '',
+  };
 }
 
 /** 进 run.json 的“当时到底用了什么”：配置会变，记录不会。 */

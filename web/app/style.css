@@ -2848,6 +2848,67 @@ body[data-mode='issue'] {
   height: 32px;
   padding: 2px;
 }
+
+/* AI 预设：一行一份，编辑时就地展开 */
+.settings-panel form.ai-preset-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) 130px minmax(0, 1fr) minmax(0, 0.8fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+}
+.settings-panel form.ai-preset-add input,
+.settings-panel form.ai-preset-add select {
+  width: 100%;
+  min-width: 0;
+}
+.ai-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0 24px;
+}
+.ai-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+.ai-preset-row.is-editing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px minmax(0, 1fr) minmax(0, 0.8fr) auto auto;
+  gap: 8px;
+}
+.ai-preset-row.is-editing input,
+.ai-preset-row.is-editing select {
+  min-width: 0;
+}
+.ai-preset-main {
+  flex: 1;
+  min-width: 0;
+}
+.ai-preset-name {
+  overflow: hidden;
+  color: var(--bone);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-preset-meta {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-preset-actions {
+  display: flex;
+  flex: none;
+  gap: 3px;
+}
 .recent {
   display: flex;
   flex-direction: column;
@@ -3105,6 +3166,21 @@ body[data-mode='issue'] {
     grid-template-columns: minmax(0, 1fr) 44px;
   }
   .tag-edit-desc {
+    grid-column: 1 / -1;
+  }
+  .settings-panel form.ai-preset-add {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .settings-panel form.ai-preset-add input[name="name"] {
+    grid-column: 1 / -1;
+  }
+  .ai-preset-row {
+    flex-wrap: wrap;
+  }
+  .ai-preset-row.is-editing {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .ai-preset-row.is-editing input[data-f="name"] {
     grid-column: 1 / -1;
   }
   .search {

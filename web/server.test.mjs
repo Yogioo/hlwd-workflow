@@ -546,3 +546,50 @@ test('运行目录文件：只放白名单，越界、别的卡、不在名单�
     assert.equal((await fetch(at(cardId, 'gate-2.log'))).status, 404);
   });
 });
+
+test('设置：AI 预设与节点引用一起保存，挂在节点上的预设删不掉', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const boot = await fetch(`${base}/api/settings${t}`);
+    assert.equal(boot.status, 200);
+    const settings = await boot.json();
+    assert.deepEqual(settings.config.engine.presets.map((p) => p.id), ['default']);
+    assert.deepEqual(settings.config.engine.nodes, { execute: { preset: 'default' }, review: { preset: 'default' } });
+
+    const put = async (body) => {
+      const res = await fetch(`${base}/api/settings${t}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    const presets = [
+      { id: 'exec', name: '执行', runner: 'pi', model: 'exec-model', thinking: 'high' },
+      { id: 'rev', name: '审查', runner: 'codex', model: 'review-model', thinking: 'low' },
+    ];
+    const saved = await put({
+      engine: { presets, nodes: { execute: { preset: 'exec' }, review: { preset: 'rev' } } },
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.body.config.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
+
+    // 只改预设，节点挂着不动
+    const tweak = await put({ engine: { presets: [presets[0], { ...presets[1], model: 'other' }] } });
+    assert.equal(tweak.status, 200);
+    assert.equal(tweak.body.config.engine.presets[1].model, 'other');
+    assert.equal(tweak.body.config.engine.nodes.review.preset, 'rev');
+
+    // 还挂在节点上的预设删不掉；节点也不能留空或指向不存在的预设
+    const del = await put({ engine: { presets: [presets[1]] } });
+    assert.equal(del.status, 400);
+    assert.match(del.body.error, /正被执行节点使用/);
+
+    assert.equal((await put({ engine: { nodes: { execute: { preset: '' } } } })).status, 400);
+    const missing = await put({ engine: { nodes: { execute: { preset: 'nope' } } } });
+    assert.equal(missing.status, 400);
+    assert.match(missing.body.error, /不存在/);
+  });
+});
+

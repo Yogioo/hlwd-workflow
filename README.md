@@ -327,7 +327,7 @@ node wf.mjs watch --bg      # 常驻：每 5 秒看一眼有没有就绪单（--
 | 全链路 | 接单 → 执行 → 门禁 → 审查 → 提交，带耗时、原因、原始 JSON |
 | 分享 | 复制地址栏就是分享：不需要截图、不需要让人自己找，也不怕他找错卡 |
 | 会话 | AI 在里面到底干了什么：工具调用（命令/参数/输出/耗时）、思考、正文。跑完的可回看，正在跑的实时跟随 |
-| 设置 | 状态/优先级中文名、AI 执行参数、提示词、门禁、自动流水线 |
+| 设置 | 状态/优先级中文名、AI 预设（执行 / 审查各挂一份）、提示词、门禁、自动流水线 |
 
 列、列宽、排序、预设都存在 `~/.hlwd/prefs/<用户名>.json`（`WF_AUTH=off` 时是 `_local.json`）里**你 + 这个项目**那一段：换项目各是各的，换台机器不带过去。新项目第一次打开会继承你最近一次调好的列与排序，但不会继承预设。
 
@@ -339,7 +339,7 @@ node wf.mjs watch --bg      # 常驻：每 5 秒看一眼有没有就绪单（--
 - 正在跑的那一轮会自动跟住：思考/工具/文字一条条长出来，跑完自动接上下一轮（执行完了接审查）
 - 数据来自 `<项目>/.hlwd/runs/<卡>/<exec|review>-<n>/events.jsonl`；看板只读它，不改 beads
 - 单轮可能有 1MB+，所以翻历史是分页的（「加载更多」），跟着看的走 SSE 增量
-| 设置 | 状态/优先级中文名、AI 执行参数、提示词、门禁、自动流水线 |
+| 设置 | 状态/优先级中文名、AI 预设（执行 / 审查各挂一份）、提示词、门禁、自动流水线 |
 
 **图片与附件**
 
@@ -391,7 +391,7 @@ node wf.mjs board --lan --token 口令
 
 ```
 工具（本仓库）                      你的项目
-  wf.mjs                             .hlwd/config.json     状态名 / AI 配置 / 自动流水线开关
+  wf.mjs                             .hlwd/config.json     AI 预设 / 运行参数 / 自动流水线开关
   project.mjs                        .hlwd/prompts/*.md    项目定制的提示词
   web/  engine/                      .hlwd/gate.mjs        门禁脚本（默认 always true）
   vendor/agent-tools/                （工具侧：自带的 agent-tools 副本）
@@ -412,8 +412,8 @@ node wf.mjs board --lan --token 口令
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `runner` | `pi` | `pi` / `codex` / `agent`（Cursor） |
-| `model` / `thinking` | 空 | 透传给 runner，空 = 用 runner 默认 |
+| `presets` | 一份「默认」 | AI 预设：`{id, name, runner, model, thinking}`。执行 / 审查各挂一份，改预设对下一次运行生效 |
+| `nodes` | 两个节点都挂「默认」 | `{execute:{preset}, review:{preset}}`：节点只引用预设，没有「留空＝继承」 |
 | `sandbox` | `workspace-write` | `read-only` / `workspace-write` / `danger-full-access` |
 | `attempts` | `2` | 执行→门禁→审查 最多几轮（1–5） |
 | `timeoutMs` | `1800000` | 单次 AI 回合超时 |

@@ -117,7 +117,7 @@ async function main() {
     manifest.attempts.push(record);
 
     const execStart = Date.now();
-    // 执行和审查可以各配 runner/model；留空的项继承全局 engine.*
+    // 执行和审查各挂一个 AI 预设（设置 → 流程里选）；预设决定 runner/model/thinking
     const execCfg = stageCfg(cfg, 'execute');
     // 先把这一轮标成「正在跑」（ms/ok 还是 null）再开工：看板靠 run.json 才知道现在跑到哪一步；
     // engine 如果中途崩了，也能从 run.json 看出当时卡在哪一轮。

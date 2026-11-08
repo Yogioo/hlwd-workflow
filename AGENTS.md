@@ -186,13 +186,17 @@ GET /issue/<id>                  # 工单独立页面（返回同一个单页，
 
 ```
 config.json: tags[]（name/color/desc/archived）/ labels.priorities / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
-              engine.stages.{execute,review}.{runner,model,thinking}   # 只有这两个阶段能单独配；留空 = 继承 engine.*
+              engine.presets[] = {id, name, runner, model, thinking}   # AI 配置的唯一来源；sandbox/attempts/超时/actor 是运行参数，不进预设
+              engine.nodes.{execute,review}.preset                    # 节点只引用一份预设，永远有值：没有「留空＝继承」
 # 旧版的 labels.statuses / columns 仍可读，只为兼容；设置面板不再写它们。
+# 旧版的 engine.stages / engine.{runner,model,thinking} 只在**读取时**折成预设（stages 各成一份，全局三个字段成「默认」），保存后不再写回。
 prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}} / {{VERDICT}}
 ```
 
 - 写方是 `web`（看板「设置」→ `PUT /api/settings`，标签走 `/api/tags`）；读方是 `engine`（每次运行开始时读）。
-- 阶段配置只在**下一次运行**生效：engine 启动时读一次，已在跑的单不受影响（它的快照已经落在 run.json 里）。
+- 预设只在**下一次运行**生效：engine 启动时读一次，已在跑的单不受影响（它的快照已经落在 run.json 里）。
+- 预设与节点是**同一份契约**：预设至少留一份、名字唯一、runner 只能是 pi / codex / agent；节点必须指向存在的预设，还被节点用着的预设删不掉。
+  页面写入严格校验（宁可不保存）；手改坏配置时读取会收敛（坏预设丢掉、节点引用回落到第一份），engine 不至于跑不起来。
 - 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`；在设置里清空提示词并保存 = 把默认模板写回项目文件（不是留空）。
 - 标签改名会级联到历史工单（先加新、再去旧）；删除默认要求确认，`?purge=1` 才从工单上摘掉。
 
@@ -214,7 +218,7 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工关单/重开补一条工单开关评论。
 - **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
 - **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
-- **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改节点内部信息，不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
+- **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改它自己的提示词和所选 AI 预设，不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
 
 ## 6. 目录
 

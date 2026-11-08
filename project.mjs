@@ -11,27 +11,138 @@ export const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
-export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch', 'stages'];
+export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch', 'presets', 'nodes'];
 export const RUNNERS = ['pi', 'codex', 'agent'];
 const SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
-/** 只有会起 agent 回合的阶段能单独配 runner/model/thinking；留空 = 继承 engine.* */
+/** 只有会起 agent 回合的阶段能选预设；节点 id 就是 engine 的阶段名。 */
 export const STAGES = ['execute', 'review'];
-export const STAGE_KEYS = ['runner', 'model', 'thinking'];
-const STAGE_VALUE_MAX = 120;
+export const STAGE_LABEL = { execute: '执行', review: '审查' };
+/** 预设里决定「用谁跑」的三个字段；sandbox / attempts / 超时是整条流水线的参数，不进预设。 */
+export const PRESET_KEYS = ['runner', 'model', 'thinking'];
+export const MAX_PRESETS = 20;
+const PRESET_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const PRESET_NAME_MAX = 40;
+const PRESET_VALUE_MAX = 120;
+const DEFAULT_PRESET = { id: 'default', name: '默认', runner: 'pi', model: '', thinking: '' };
+const defaultNodes = () => Object.fromEntries(STAGES.map((stage) => [stage, { preset: DEFAULT_PRESET.id }]));
 
-const emptyStages = () =>
-  Object.fromEntries(STAGES.map((stage) => [stage, Object.fromEntries(STAGE_KEYS.map((key) => [key, '']))]));
+const str = (value) => (value == null ? '' : String(value).trim());
 
-/** 手改配置也收敛成完整形状：缺的阶段补空，多出来的丢掉（不把页面带崩）。 */
-function cleanStages(input) {
-  const out = emptyStages();
-  if (!input || typeof input !== 'object') return out;
+/** 手改配置也收敛成能用的预设：坏的条目丢掉；一份都不剩时由调用方补默认。 */
+function cleanPresets(input) {
+  if (!Array.isArray(input)) return [];
+  const ids = new Set();
+  const out = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const id = str(raw.id);
+    if (!PRESET_ID.test(id) || ids.has(id)) continue;
+    ids.add(id);
+    out.push({
+      id,
+      name: (str(raw.name) || id).slice(0, PRESET_NAME_MAX),
+      runner: RUNNERS.includes(raw.runner) ? raw.runner : 'pi',
+      model: str(raw.model).slice(0, PRESET_VALUE_MAX),
+      thinking: str(raw.thinking).slice(0, PRESET_VALUE_MAX),
+    });
+    if (out.length >= MAX_PRESETS) break;
+  }
+  return out;
+}
+
+/** 节点只能指向存在的预设；坏引用回落到给定兜底（再不行就用第一份预设）。 */
+function cleanNodes(input, presets, fallback = {}) {
+  const first = presets[0]?.id ?? '';
+  const out = {};
   for (const stage of STAGES) {
-    const raw = input[stage];
-    if (!raw || typeof raw !== 'object') continue;
-    for (const key of STAGE_KEYS) {
-      if (typeof raw[key] === 'string') out[stage][key] = raw[key].trim().slice(0, STAGE_VALUE_MAX);
+    const raw = input && typeof input === 'object' && !Array.isArray(input) ? input[stage] : null;
+    const id = str(raw?.preset);
+    out[stage] = { preset: presets.some((p) => p.id === id) ? id : (fallback[stage] ?? first) };
+  }
+  return out;
+}
+
+/**
+ * 旧配置折成预设：engine.stages.{execute,review} 各成一份预设，engine.runner/model/thinking
+ * 成为「默认」预设。只在读的时候折算，下次保存才落新形状——读不写盘。
+ */
+function migrateLegacy(raw = {}) {
+  const base = {
+    ...DEFAULT_PRESET,
+    runner: RUNNERS.includes(raw.runner) ? raw.runner : DEFAULT_PRESET.runner,
+    model: str(raw.model).slice(0, PRESET_VALUE_MAX),
+    thinking: str(raw.thinking).slice(0, PRESET_VALUE_MAX),
+  };
+  const presets = [base];
+  const fallback = {};
+  for (const stage of STAGES) {
+    const legacy = raw.stages?.[stage] ?? {};
+    const override = {};
+    for (const key of PRESET_KEYS) {
+      const value = str(legacy[key]).slice(0, PRESET_VALUE_MAX);
+      if (value) override[key] = value;
     }
+    if (override.runner && !RUNNERS.includes(override.runner)) delete override.runner;
+    const id = `stage-${stage}`;
+    if (Object.keys(override).length) {
+      presets.push({ ...base, ...override, id, name: STAGE_LABEL[stage] });
+      fallback[stage] = id;
+    } else {
+      fallback[stage] = base.id;
+    }
+  }
+  return { presets, fallback };
+}
+
+/** 配置里的 engine 收敛成完整形状：预设一定至少有一份，节点一定指向存在的预设。 */
+function readEngine(rawInput) {
+  const raw = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput : {};
+  const engine = { ...DEFAULT_CONFIG.engine, ...raw };
+  // 旧字段不对外暴露：stages 已经折成预设，presets/nodes 下面统一重建。
+  delete engine.stages;
+  delete engine.presets;
+  delete engine.nodes;
+  // 旧的全局 runner/model/thinking 只在没有预设时被 migrateLegacy 用到，顺手收敛一下
+  engine.runner = RUNNERS.includes(engine.runner) ? engine.runner : DEFAULT_PRESET.runner;
+  engine.model = str(engine.model);
+  engine.thinking = str(engine.thinking);
+  const explicit = cleanPresets(raw.presets);
+  if (explicit.length) return { ...engine, presets: explicit, nodes: cleanNodes(raw.nodes, explicit) };
+  const { presets, fallback } = migrateLegacy(raw);
+  return { ...engine, presets, nodes: cleanNodes(raw.nodes, presets, fallback) };
+}
+
+/** 严格校验：页面写进来的预设宁可不保存，也不落一份坏配置。 */
+function validatePresets(input) {
+  if (!Array.isArray(input)) throw new Error('engine.presets 必须是数组');
+  if (!input.length) throw new Error('至少要保留一个 AI 预设');
+  if (input.length > MAX_PRESETS) throw new Error(`预设最多 ${MAX_PRESETS} 个`);
+  const out = [];
+  const ids = new Set();
+  const names = new Set();
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('每个预设都必须是对象');
+    let id = str(raw.id);
+    if (!id) {
+      let n = out.length + 1;
+      while (ids.has(`p-${n}`)) n += 1;
+      id = `p-${n}`;
+    }
+    if (!PRESET_ID.test(id)) throw new Error(`预设 id 只能是 1–32 位小写字母、数字或 -：${id}`);
+    if (ids.has(id)) throw new Error(`预设 id 重复：${id}`);
+    const name = str(raw.name);
+    if (!name) throw new Error('预设名称不能为空');
+    if (name.length > PRESET_NAME_MAX) throw new Error(`预设名称不能超过 ${PRESET_NAME_MAX} 个字符`);
+    if (names.has(name)) throw new Error(`预设「${name}」重名`);
+    const runner = str(raw.runner);
+    if (!RUNNERS.includes(runner)) throw new Error(`预设「${name}」的执行器只能是 ${RUNNERS.join(' / ')}`);
+    const model = str(raw.model);
+    const thinking = str(raw.thinking);
+    if (model.length > PRESET_VALUE_MAX) throw new Error(`预设「${name}」的模型名不能超过 ${PRESET_VALUE_MAX} 个字符`);
+    if (thinking.length > PRESET_VALUE_MAX) throw new Error(`预设「${name}」的思考强度不能超过 ${PRESET_VALUE_MAX} 个字符`);
+    ids.add(id);
+    names.add(name);
+    out.push({ id, name, runner, model, thinking });
   }
   return out;
 }
@@ -60,7 +171,9 @@ export const DEFAULT_CONFIG = {
     timeoutMs: 1800000,
     gitCommit: true,
     autoWatch: false,
-    stages: emptyStages(),
+    // AI 配置的唯一来源：预设 + 节点挂载。runner/model/thinking 是旧字段，留着只为兼容读取。
+    presets: [{ ...DEFAULT_PRESET }],
+    nodes: defaultNodes(),
   },
 };
 
@@ -163,8 +276,8 @@ export async function readProjectConfig(projectDir) {
     },
     columns: Array.isArray(raw.columns) && raw.columns.length ? raw.columns.map(String) : [...DEFAULT_CONFIG.columns],
     tags: cleanTags(raw.tags),
-    // stages 单独收敛：浅合并会让缺字段的阶段变成 undefined
-    engine: { ...DEFAULT_CONFIG.engine, ...(raw.engine ?? {}), stages: cleanStages(raw.engine?.stages) },
+    // engine 单独收敛：预设至少一份、节点一定指向存在的预设（旧 stages 在这里折成预设）
+    engine: readEngine(raw.engine),
   };
 }
 
@@ -210,27 +323,35 @@ export async function saveProjectConfig(projectDir, patch = {}) {
   for (const key of ['model', 'thinking', 'actor', 'readyLabel']) {
     if (engine[key] !== undefined) next.engine[key] = String(engine[key]).trim();
   }
-  // 阶段覆盖：只认 execute / review 两个阶段，留空表示继承 engine.*（不是“不设模型”）
-  if (engine.stages !== undefined) {
-    if (!engine.stages || typeof engine.stages !== 'object' || Array.isArray(engine.stages)) {
-      throw new Error('engine.stages 必须是对象');
+  // AI 预设：整表替换（页面一次存全量），严格校验；节点随后挂载到预设上。
+  if (engine.presets !== undefined) next.engine.presets = validatePresets(engine.presets);
+  if (engine.nodes !== undefined) {
+    if (!engine.nodes || typeof engine.nodes !== 'object' || Array.isArray(engine.nodes)) {
+      throw new Error('engine.nodes 必须是对象');
     }
-    for (const [stage, raw] of Object.entries(engine.stages)) {
-      if (!STAGES.includes(stage)) throw new Error(`未知阶段 ${stage}：只有 ${STAGES.join(' / ')} 可以单独配置`);
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.stages.${stage} 必须是对象`);
-      for (const [key, value] of Object.entries(raw)) {
-        if (!STAGE_KEYS.includes(key)) throw new Error(`engine.stages.${stage} 不认识字段 ${key}`);
-        if (typeof value !== 'string') throw new Error(`engine.stages.${stage}.${key} 必须是字符串`);
-        if (value.trim().length > STAGE_VALUE_MAX) throw new Error(`engine.stages.${stage}.${key} 不能超过 ${STAGE_VALUE_MAX} 个字符`);
+    for (const [stage, raw] of Object.entries(engine.nodes)) {
+      if (!STAGES.includes(stage)) throw new Error(`未知阶段 ${stage}：只有 ${STAGES.join(' / ')} 可以配预设`);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.nodes.${stage} 必须是对象`);
+      for (const key of Object.keys(raw)) {
+        if (key !== 'preset') throw new Error(`engine.nodes.${stage} 不认识字段 ${key}`);
       }
-      const merged = { ...next.engine.stages[stage] };
-      for (const key of STAGE_KEYS) if (raw[key] !== undefined) merged[key] = raw[key].trim();
-      if (merged.runner && !RUNNERS.includes(merged.runner)) {
-        throw new Error(`engine.stages.${stage}.runner 只能是 ${RUNNERS.join(' / ')}`);
-      }
-      next.engine.stages[stage] = merged;
+      if (typeof raw.preset !== 'string') throw new Error(`engine.nodes.${stage}.preset 必须是字符串`);
+      next.engine.nodes[stage] = { preset: raw.preset.trim() };
     }
   }
+  for (const stage of STAGES) {
+    const id = next.engine.nodes[stage]?.preset ?? '';
+    if (!id) throw new Error(`${STAGE_LABEL[stage]}节点必须选一个预设`);
+    if (next.engine.presets.some((preset) => preset.id === id)) continue;
+    const used = STAGES.filter((name) => next.engine.nodes[name]?.preset === id).map((name) => `${STAGE_LABEL[name]}节点`);
+    // 原来就有这份预设 = 用户想删但它还挂着；从来没有 = 节点引用写错了。
+    if (current.engine.presets.some((preset) => preset.id === id)) {
+      throw new Error(`预设「${id}」正被${used.join('、')}使用，先给它换一个再删`);
+    }
+    throw new Error(`预设「${id}」不存在：${used.join('、')}选错了`);
+  }
+  // 旧字段不再写回：stages 已折成预设，presets/nodes 才是配置。
+  delete next.engine.stages;
   if (!next.engine.readyLabel) throw new Error('可派标签不能为空：engine 靠它找就绪单');
 
   if (patch.tags !== undefined) {
