@@ -11,7 +11,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureProject, readProjectConfig, readState, rememberProject } from './project.mjs';
+import { ensureProject, readProjectConfig, readState, rememberProject as rememberProjectRaw } from './project.mjs';
+
+/** 脚本 / 冒烟测试里用一次性项目时，别把「上次打开的项目」改掉：WF_NO_REMEMBER=1 关掉记忆。 */
+const rememberProject = (dir) => (process.env.WF_NO_REMEMBER === '1' ? Promise.resolve(null) : rememberProjectRaw(dir));
 import * as beads from './web/beads.mjs';
 import { latestRuns, listRuns, setProjectDir } from './web/runs.mjs';
 import { WORKFLOW_COLUMNS, workflowOf } from './web/workflow.mjs';
