@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TOPOLOGY, graphOf } from './workflow.mjs';
+import { TOPOLOGY, graphOf, workflowOf } from './workflow.mjs';
 
 const card = (extra = {}) => ({ id: 'hlwd-1', status: 'in_progress', ...extra });
 const run = ({ attempts = [], outcome = 'running', ...extra } = {}) => ({
@@ -126,6 +126,17 @@ test('发布失败：收尾标 warn，流程停在「需要人处理」，但重
   assert.equal(node(g, 'needs_human').tone, 'warn');
   assert.equal(edge(g, 'complete', 'needs_human').tone, 'done');
   assert.equal(g.outcome, 'publish_failed');
+});
+
+test('发布失败：卡片进度是「发布失败」，且标记这次重派只重试收尾', () => {
+  const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
+  const wf = workflowOf(card(), run({ attempts, outcome: 'publish_failed' }));
+  assert.equal(wf.label, '发布失败');
+  assert.equal(wf.retry, 'publish');
+  assert.equal(wf.active, false, '不算还在跑，看板才会给重派入口');
+
+  // 普通失败不能被当成发布重试
+  assert.equal(workflowOf(card(), run({ attempts, outcome: 'rolled_back' })).retry, null);
 });
 
 test('进程没了：最后一个节点标成已中断，不再算 live', () => {
