@@ -14,6 +14,7 @@ import { claim, claimNext, listCandidates } from './flows/claim.mjs';
 import { execute } from './flows/execute.mjs';
 import { gate as gateStage } from './flows/gate.mjs';
 import { review } from './flows/review.mjs';
+import { prepareCardBranch } from './git.mjs';
 import { engineOf, loadConfig, log, run, stageCfg } from './lib.mjs';
 import { clip, createManifest, finish } from './manifest.mjs';
 
@@ -110,6 +111,24 @@ async function main() {
   log(`运行目录 ${path.relative(workdir, runDir)}`);
   await journal('start', { mode: args.id ? 'explicit' : 'queue', attempts });
 
+  // 收尾要建 PR = 每张单一条分支：接单后、执行前就把工作区切过去。
+  // 分支从 origin/<base>（优先）或本地 <base> 切，避免把本地没推的提交卷进 PR。
+  const completeCfg = cfg.nodes?.complete ?? {};
+  let cardGit = null;
+  if (completeCfg.pr) {
+    try {
+      cardGit = await prepareCardBranch({ workdir, issueId: issue.id, complete: completeCfg });
+      manifest.git = cardGit;
+      await save();
+      log(`分支 ${cardGit.branch}（基于 ${cardGit.start}${cardGit.reused ? '，复用已有分支' : ''}）`);
+    } catch (err) {
+      const reason = `收尾要建 PR，但准备分支失败：${err.message}`;
+      await handback({ workdir, issue, runDir, reason, status: 'open', head: 'AI 已接单，但分支准备失败' });
+      await finish(manifest, save, journal, { outcome: 'rolled_back', reason });
+      return 1;
+    }
+  }
+
   const rel = (p) => path.relative(workdir, p).replaceAll('\\', '/');
   let feedback = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -175,14 +194,19 @@ async function main() {
 
     if (verdict.pass) {
       try {
-        const commit = await complete({ cfg, workdir, issue, runDir, checks: verdict.checks });
-        await finish(manifest, save, journal, { outcome: 'closed', commit });
+        const result = await complete({ cfg, workdir, issue, runDir, checks: verdict.checks, git: cardGit });
+        manifest.push = result.push;
+        manifest.pr = result.pr;
+        await finish(manifest, save, journal, { outcome: 'closed', commit: result.commit });
         return 0;
       } catch (err) {
-        // 收尾失败也要留下痕迹，别让单卡在 in_progress 里没人知道为什么
+        // 收尾失败也要留下痕迹，别让单卡在 in_progress 里没人知道为什么；
+        // 已经做到哪一步（提交 / 推送）由 complete 挂在 error.git 上。
         const reason = `收尾失败：${err.message}`;
-        await handback({ workdir, issue, runDir, reason, status: 'in_progress' });
-        await finish(manifest, save, journal, { outcome: 'rolled_back', reason });
+        if (err.git?.push) manifest.push = err.git.push;
+        if (err.git?.pr) manifest.pr = err.git.pr;
+        await handback({ workdir, issue, runDir, reason, status: 'in_progress', head: 'AI 已完成，但发布失败' });
+        await finish(manifest, save, journal, { outcome: 'rolled_back', reason, commit: err.git?.commit ?? null });
         return 1;
       }
     }

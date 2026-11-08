@@ -57,7 +57,7 @@ test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词
     assert.deepEqual(config.engine.nodes, {
       execute: { preset: 'default' },
       review: { preset: 'default' },
-      complete: { commit: true },
+      complete: { commit: true, push: false, pr: false, remote: 'origin', base: 'main' },
     });
 
     for (const name of ['execute', 'review']) {
@@ -133,7 +133,7 @@ test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
     assert.deepEqual(saved.engine.nodes, {
       execute: { preset: 'exec' },
       review: { preset: 'rev' },
-      complete: { commit: true },
+      complete: { commit: true, push: false, pr: false, remote: 'origin', base: 'main' },
     });
     assert.equal(saved.engine.stages, undefined, '旧字段不再写回，读出来也不该有');
 
@@ -150,13 +150,43 @@ test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
     assert.deepEqual(again.engine.nodes, {
       execute: { preset: 'exec' },
       review: { preset: 'rev' },
-      complete: { commit: true },
+      complete: { commit: true, push: false, pr: false, remote: 'origin', base: 'main' },
     });
 
-    // 收尾节点：通过后是否提交，下一次运行生效
+    // 收尾节点：提交 → 推送 → PR 是一串有顺序的动作，改动下一次运行生效
     const noCommit = await saveProjectConfig(dir, { engine: { nodes: { complete: { commit: false } } } });
     assert.equal(noCommit.engine.nodes.complete.commit, false);
+    assert.equal(noCommit.engine.nodes.complete.push, false, '关掉提交，推送必须跟着关');
     assert.equal(noCommit.engine.presets[0].id, 'exec', '改收尾节点不该动预设');
+
+    const publishing = await saveProjectConfig(dir, {
+      engine: { nodes: { complete: { commit: true, push: true, pr: true, remote: 'upstream', base: 'develop' } } },
+    });
+    assert.deepEqual(publishing.engine.nodes.complete, {
+      commit: true,
+      push: true,
+      pr: true,
+      remote: 'upstream',
+      base: 'develop',
+    });
+
+    // 依赖关系：不能跳过前一步开后一步
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { commit: false, push: true } } } }),
+      /推送需要先提交/,
+    );
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { push: false, pr: true } } } }),
+      /创建 PR 需要推送/,
+    );
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { remote: '--upload-pack=rm -rf' } } } }),
+      /远端 remote/,
+    );
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { base: '' } } } }),
+      /基准分支 base/,
+    );
 
     // 新预设可以不带 id：服务端发一个 p-N，页面靠返回值刷新
     const withNew = await saveProjectConfig(dir, {
@@ -241,7 +271,7 @@ test('旧配置（engine.stages / 全局模型）读的时候折成预设', asyn
     assert.deepEqual(cfg.engine.nodes, {
       execute: { preset: 'stage-execute' },
       review: { preset: 'default' },
-      complete: { commit: false },
+      complete: { commit: false, push: false, pr: false, remote: 'origin', base: 'main' },
     });
   });
 });
@@ -254,7 +284,12 @@ test('手改坏的 presets / nodes 读回来也收敛成能跑的形状', async 
       JSON.stringify({
         engine: {
           presets: [{ id: 'Bad Id', name: 'x' }, { id: 'ok', name: '', runner: 'nope' }, { id: 'ok', name: 'dup' }],
-          nodes: { execute: { preset: 'gone' }, review: { preset: 'ok' } },
+          // 手改出的矛盾组合：不提交却推送、没推送却建 PR，读的时候要折回去
+          nodes: {
+            execute: { preset: 'gone' },
+            review: { preset: 'ok' },
+            complete: { commit: false, push: true, pr: true, remote: '-bad', base: '' },
+          },
         },
       }),
       'utf8',
@@ -264,7 +299,8 @@ test('手改坏的 presets / nodes 读回来也收敛成能跑的形状', async 
     assert.deepEqual(cfg.engine.nodes, {
       execute: { preset: 'ok' },
       review: { preset: 'ok' },
-      complete: { commit: true },
+      // 不提交 → 推送/PR 都折回 false；坏的 remote/base 回落到默认
+      complete: { commit: false, push: false, pr: false, remote: 'origin', base: 'main' },
     });
   });
 });

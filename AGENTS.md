@@ -142,6 +142,25 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 - 门禁不是审查：它只回答「机器能查的过没过」，代码质量、无关改动、假实现仍归 review。
 - 看板「设置」只显示它的路径 + 「打开脚本 / 打开所在目录 / 复制路径」（`POST /api/gate/open`，`HLWD_EDITOR` 可指定编辑器）——页面不编辑脚本，脚本进版本库、用编辑器改。
 
+**Publish**（`engine/git.mjs`，只在 engine 内部用；web 不读它）
+
+```
+prepareCardBranch({workdir, issueId, complete}) -> {branch, base, remote, start, reused}
+commitAll(workdir, {subject, body}) -> {commit|null, error?}
+pushBranch(workdir, {remote, branch}) -> {ok, error}
+findOpenPr(workdir, branch) -> url|null        # 重跑不重复建 PR
+createPr(workdir, {branch, base, title, body}) -> {ok, url, error}
+returnToBase(workdir, {base, remote}) -> {ok, error}
+```
+
+- 顺序固定：**提交 → 推送 → 建 PR → 关单**；前一步失败后面不做，**任何一步失败都不关单**（工单停在 in_progress，评论写原因）。
+- `pr` 打开时每张单一条 `card/<id>` 分支：**接单后、执行前**从 `origin/<base>`（没有就用本地 `<base>`）切出来；分支已存在就复用，重派不会重建。
+- 分支从远端基准切、不从本地当前分支切：否则本地没推的提交会被卷进 PR。
+- 发布成功后切回 `<base>`；失败就留在 `card/<id>` 上，方便看现场（脏工作区也会自然挡住下一张单）。
+- `gh` 是可选外部依赖：没装 / 没登录时明确报错，不静默跳过。PR 已存在（同 head 的 open PR）就复用链接。
+- `run.json` 记 `git{branch,base}`、`push{ok,remote,branch,error}`、`pr{ok,url}`：看板据此显示分支、推送结果和 PR 链接；失败时 error 挂在 `err.git` 上带到 run.json。
+- 提交用 `git add -A`，`.hlwd/`、`.beads/` 里被版本库跟踪的部分也会进这张单的提交（和以前一样）。
+
 **验收归 engine。** 是否通过由 §5 状态机 + 门禁结论 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
 **RunTrace**（`web` 只读）
@@ -188,7 +207,7 @@ GET /issue/<id>                  # 工单独立页面（返回同一个单页，
 config.json: tags[]（name/color/desc/archived）/ labels.priorities / engine.*（含 autoWatch：看板启动时是否自动开自动流水线，默认 false）
               engine.presets[] = {id, name, runner, model, thinking}   # AI 配置的唯一来源；sandbox/attempts/超时/actor 是运行参数，不进预设
               engine.nodes.{execute,review}.preset                    # 节点只引用一份预设，永远有值：没有「留空＝继承」
-              engine.nodes.complete.commit                            # 收尾节点自己的开关：审查通过后是否 git 提交
+              engine.nodes.complete = {commit, push, pr, remote, base}   # 收尾节点：提交 → 推送 → 建 PR 的开关（有顺序，后一步依赖前一步）
 # 旧版的 labels.statuses / columns 仍可读，只为兼容；设置面板不再写它们。
 # 旧版的 engine.stages / engine.{runner,model,thinking} 只在**读取时**折成预设（stages 各成一份，全局三个字段成「默认」）；
 # 旧版的 engine.gitCommit 折成 nodes.complete.commit。保存后这些旧字段都不再写回。
@@ -196,7 +215,8 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 ```
 
 - 写方是 `web`（看板「设置」→ `PUT /api/settings`，标签走 `/api/tags`）；读方是 `engine`（每次运行开始时读）。
-- 预设与节点配置（含收尾的 commit）只在**下一次运行**生效：engine 启动时读一次，已在跑的单不受影响（它的快照已经落在 run.json 里）。
+- 预设与节点配置（含收尾的 commit / push / pr）只在**下一次运行**生效：engine 启动时读一次，已在跑的单不受影响（它的快照已经落在 run.json 里）。
+- 收尾的开关是**一串有序动作**，不是三个并列项：`pr` 要求 `push`，`push` 要求 `commit`；页面按顺序禁用，服务端也拒绝矛盾组合（手改出来的矛盾在读取时折回）。
 - 预设与节点是**同一份契约**：预设至少留一份、名字唯一、runner 只能是 pi / codex / agent；节点必须指向存在的预设，还被节点用着的预设删不掉。
   页面写入严格校验（宁可不保存）；手改坏配置时读取会收敛（坏预设丢掉、节点引用回落到第一份），engine 不至于跑不起来。
 - 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`；在设置里清空提示词并保存 = 把默认模板写回项目文件（不是留空）。
@@ -220,7 +240,7 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工关单/重开补一条工单开关评论。
 - **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
 - **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
-- **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改它自己的配置（AI 节点的提示词与预设、收尾节点的提交开关），不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
+- **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改它自己的配置（AI 节点的提示词与预设、收尾节点的提交/推送/PR 与基准分支），不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
 
 ## 6. 目录
 
@@ -245,6 +265,7 @@ web/               # 页面 + beads 适配层
 engine/            # 流程编排
   run.mjs          # 入口：接一张单走完流程，一次只跑一张（--project 指定项目）
   lib.mjs          # 跑命令 / 渲染提示词 / 调 agent-run / 跑门禁
+  git.mjs          # 分支 / 提交 / 推送 / PR（gh）的唯一实现；只返回结果，不写 beads
   gate-run.mjs     # 门禁执行器：单独进程跑项目的 .hlwd/gate.mjs
   watch.mjs        # 自动流水线：有就绪单就起一张，没有就等；心跳给看板看
   manifest.mjs     # 写 run.json 与 journal.ndjson

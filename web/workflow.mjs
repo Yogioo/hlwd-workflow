@@ -284,6 +284,10 @@ export function graphOf(issue, run) {
     runId: run.runId ?? null,
     reason: run.reason ?? null,
     commit: run.commit ?? null,
+    // 收尾发布到哪了：分支、推送、PR（没有就是 null，不猜）
+    git: run.git ?? null,
+    push: run.push ?? null,
+    pr: run.pr ?? null,
     startedAt: run.startedAt ?? null,
     endedAt: run.endedAt ?? null,
   };

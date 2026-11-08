@@ -2225,10 +2225,22 @@ async function openSettings() {
 }
 
 /** 保存一个节点：AI 节点存提示词 + 所选预设；收尾节点只存「通过后是否提交」。 */
-async function saveGraphNode({ nodeId, stage, prompt, preset, commit }) {
+async function saveGraphNode({ nodeId, stage, prompt, preset, commit, push, pr, remote, base }) {
   const body =
     nodeId === 'complete'
-      ? { engine: { nodes: { complete: { commit: Boolean(commit) } } } }
+      ? {
+          engine: {
+            nodes: {
+              complete: {
+                commit: Boolean(commit),
+                push: Boolean(push),
+                pr: Boolean(pr),
+                remote: String(remote ?? ''),
+                base: String(base ?? ''),
+              },
+            },
+          },
+        }
       : { prompts: { [stage]: prompt }, engine: { nodes: { [stage]: { preset } } } };
   const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
   state.presets = saved.config?.engine?.presets ?? state.presets;

@@ -26,9 +26,11 @@ const PRESET_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PRESET_NAME_MAX = 40;
 const PRESET_VALUE_MAX = 120;
 const DEFAULT_PRESET = { id: 'default', name: '默认', runner: 'pi', model: '', thinking: '' };
+/** 收尾节点：提交 → 推送 → 建 PR，后面每一步都依赖前一步。 */
+const COMPLETE_DEFAULTS = { commit: true, push: false, pr: false, remote: 'origin', base: 'main' };
 const defaultNodes = () => ({
   ...Object.fromEntries(STAGES.map((stage) => [stage, { preset: DEFAULT_PRESET.id }])),
-  complete: { commit: true },
+  complete: { ...COMPLETE_DEFAULTS },
 });
 
 const str = (value) => (value == null ? '' : String(value).trim());
@@ -55,10 +57,18 @@ function cleanPresets(input) {
   return out;
 }
 
+/** 分支/远端名只接受 git 认得的普通字符，避免拼出奇怪参数。 */
+function cleanRef(value, fallback) {
+  const text = str(value);
+  if (!text || text.startsWith('-') || !/^[A-Za-z0-9._/-]+$/.test(text)) return fallback;
+  return text.slice(0, 120);
+}
+
 /**
  * 节点配置收敛成能跑的形状：
  *   AI 节点只能指向存在的预设（坏引用回落到兜底，再不行用第一份）；
- *   收尾节点只认 commit 布尔值，缺了就继承旧的 engine.gitCommit（默认 true）。
+ *   收尾节点：commit 缺了就继承旧的 engine.gitCommit；push/pr 必须依次依赖，
+ *   手改出「不提交却推送」这种矛盾组合时按依赖关系折回去。
  */
 function cleanNodes(input, presets, fallback = {}, legacyCommit = true) {
   const first = presets[0]?.id ?? '';
@@ -68,8 +78,16 @@ function cleanNodes(input, presets, fallback = {}, legacyCommit = true) {
     const id = str(nodes[stage]?.preset);
     out[stage] = { preset: presets.some((p) => p.id === id) ? id : (fallback[stage] ?? first) };
   }
-  const commit = typeof nodes.complete?.commit === 'boolean' ? nodes.complete.commit : legacyCommit !== false;
-  out.complete = { commit };
+  const complete = nodes.complete && typeof nodes.complete === 'object' && !Array.isArray(nodes.complete) ? nodes.complete : {};
+  const commit = typeof complete.commit === 'boolean' ? complete.commit : legacyCommit !== false;
+  const push = commit && (complete.push === true || complete.pr === true);
+  out.complete = {
+    commit,
+    push,
+    pr: push && complete.pr === true,
+    remote: cleanRef(complete.remote, COMPLETE_DEFAULTS.remote),
+    base: cleanRef(complete.base, COMPLETE_DEFAULTS.base),
+  };
   return out;
 }
 
@@ -126,6 +144,17 @@ function readEngine(rawInput) {
   }
   const { presets, fallback } = migrateLegacy(raw);
   return { ...engine, presets, nodes: cleanNodes(raw.nodes, presets, fallback, legacyCommit) };
+}
+
+/** 分支 / 远端名：允许 git 常用的字符，拒绝空值与以 - 开头的参数注入。 */
+function validateRef(label, value) {
+  const text = str(value);
+  if (!text) throw new Error(`${label} 不能为空`);
+  if (text.length > 120) throw new Error(`${label} 不能超过 120 个字符`);
+  if (text.startsWith('-') || !/^[A-Za-z0-9._/-]+$/.test(text)) {
+    throw new Error(`${label} 只能用字母、数字、. _ / -，且不能以 - 开头`);
+  }
+  return text;
 }
 
 /** 严格校验：页面写进来的预设宁可不保存，也不落一份坏配置。 */
@@ -350,11 +379,19 @@ export async function saveProjectConfig(projectDir, patch = {}) {
       if (!NODES.includes(nodeId)) throw new Error(`未知节点 ${nodeId}：只有 ${NODES.join(' / ')} 可以配置`);
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.nodes.${nodeId} 必须是对象`);
       if (nodeId === 'complete') {
+        const allowed = ['commit', 'push', 'pr', 'remote', 'base'];
         for (const key of Object.keys(raw)) {
-          if (key !== 'commit') throw new Error(`engine.nodes.complete 不认识字段 ${key}`);
+          if (!allowed.includes(key)) throw new Error(`engine.nodes.complete 不认识字段 ${key}`);
         }
-        if (typeof raw.commit !== 'boolean') throw new Error('engine.nodes.complete.commit 必须是 true / false');
-        next.engine.nodes.complete = { commit: raw.commit };
+        const merged = { ...next.engine.nodes.complete };
+        for (const key of ['commit', 'push', 'pr']) {
+          if (raw[key] === undefined) continue;
+          if (typeof raw[key] !== 'boolean') throw new Error(`engine.nodes.complete.${key} 必须是 true / false`);
+          merged[key] = raw[key];
+        }
+        if (raw.remote !== undefined) merged.remote = validateRef('远端 remote', raw.remote);
+        if (raw.base !== undefined) merged.base = validateRef('基准分支 base', raw.base);
+        next.engine.nodes.complete = merged;
         continue;
       }
       for (const key of Object.keys(raw)) {
@@ -363,6 +400,13 @@ export async function saveProjectConfig(projectDir, patch = {}) {
       if (typeof raw.preset !== 'string') throw new Error(`engine.nodes.${nodeId}.preset 必须是字符串`);
       next.engine.nodes[nodeId] = { preset: raw.preset.trim() };
     }
+  }
+  // 收尾是一串有顺序的动作：不能跳过前一步开后一步。
+  if (next.engine.nodes.complete.push && !next.engine.nodes.complete.commit) {
+    throw new Error('推送需要先提交：先勾上「提交」');
+  }
+  if (next.engine.nodes.complete.pr && !next.engine.nodes.complete.push) {
+    throw new Error('创建 PR 需要推送：先开「推送」');
   }
   for (const stage of STAGES) {
     const id = next.engine.nodes[stage]?.preset ?? '';

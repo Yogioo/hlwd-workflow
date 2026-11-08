@@ -53,7 +53,10 @@ function edgeGeom(edge) {
 const nodeSub = (node, mode) => {
   if (mode === 'template') {
     if (node.kind === 'ai') return node.presetName ? `预设 · ${node.presetName}` : '未选预设';
-    if (node.id === 'complete') return node.commit ? '通过后提交' : '不提交';
+    if (node.id === 'complete') {
+      const bits = [node.commit && '提交', node.push && '推送', node.pr && 'PR'].filter(Boolean);
+      return bits.length ? bits.join(' · ') : '不发布';
+    }
     return node.kind === 'end' ? '终态' : '不调用模型';
   }
   if (node.count > 1) return `第 ${node.attempt} 轮`;
@@ -81,17 +84,20 @@ export function createGraph(root, options = {}) {
   };
   const presetOf = (stage) => presets.find((preset) => preset.id === presetIdOf(stage)) ?? null;
 
-  /** 收尾节点自己的行为：没配过默认提交（和 engine 的老默认一致）。 */
-  const commitOf = () => nodes?.complete?.commit !== false;
+  /** 收尾节点自己的行为：提交 → 推送 → PR，没配过的部分按默认关掉。 */
+  const completeOf = () => nodes?.complete ?? {};
 
   /** 节点上的配置标记：设置页用，来自 config.engine.nodes / presets。 */
   const markPresets = () => {
     if (!graph) return;
+    const complete = completeOf();
     for (const node of graph.nodes) {
       const preset = node.stage ? presetOf(node.stage) : null;
       node.presetId = preset?.id ?? '';
       node.presetName = preset?.name ?? '';
-      node.commit = node.id === 'complete' ? commitOf() : null;
+      node.commit = node.id === 'complete' ? complete.commit !== false : null;
+      node.push = node.id === 'complete' ? complete.push === true : null;
+      node.pr = node.id === 'complete' ? complete.pr === true : null;
     }
   };
 
@@ -200,10 +206,19 @@ export function createGraph(root, options = {}) {
       ])}<p class="graph-note">接单必然发生：有这张图就说明已经被接走了。</p></section>`;
     }
     if (node.id === 'complete') {
+      const pushed = graph.push
+        ? (graph.push.ok ? `${graph.push.remote}/${graph.push.branch}` : `失败：${String(graph.push.error ?? '').slice(0, 120)}`)
+        : '';
+      const pr = graph.pr?.url
+        ? `<p class="graph-note">PR：<a href="${esc(graph.pr.url)}" target="_blank" rel="noreferrer">${esc(graph.pr.url)}</a></p>`
+        : '';
       return `<section><h4>收尾</h4>${kv([
+        ['分支', graph.git?.branch ?? ''],
+        ['基于', graph.git?.base ?? ''],
         ['提交', graph.commit || '（无代码改动）'],
+        ['推送', pushed],
         ['结局', graph.outcome ?? ''],
-      ])}<p class="graph-note">通过后才提交并关单；这一步不调用模型。</p></section>`;
+      ])}${pr}<p class="graph-note">通过后才提交并关单；这一步不调用模型。</p></section>`;
     }
     if (!node.attempt) {
       return `<section><h4>${esc(node.label)}</h4><p class="graph-note">这一步还没跑到。</p></section>`;
@@ -243,13 +258,17 @@ export function createGraph(root, options = {}) {
         <div class="graph-actions"><button type="button" class="ghost" data-action="gate">打开脚本</button></div></section>`;
     }
     if (node.id === 'complete') {
+      const cur = completeOf();
       return `<section>
         <h4>收尾</h4>
-        <label class="graph-field chk-field">通过后自动提交
-          <span class="graph-note">（审查通过才走到这里；关掉就只关单、不动 git）</span>
-          <input type="checkbox" data-field="commit"${commitOf() ? ' checked' : ''} />
-        </label>
-        <p class="graph-note">提交信息由 engine 写（<code>卡片id: 标题</code> + 运行目录 trailer）。改完<strong>下一次运行</strong>生效。</p>
+        <label class="chk-line"><input type="checkbox" data-field="commit"${cur.commit ? ' checked' : ''} /> 提交（git add -A + commit）</label>
+        <label class="chk-line"><input type="checkbox" data-field="push"${cur.push ? ' checked' : ''} /> 推送到远端（需要先提交）</label>
+        <label class="chk-line"><input type="checkbox" data-field="pr"${cur.pr ? ' checked' : ''} /> 创建 PR（需要推送；每张单一条 card/&lt;id&gt; 分支）</label>
+        <div class="graph-grid">
+          <label class="graph-field">远端<input data-field="remote" value="${esc(cur.remote ?? 'origin')}" maxlength="120" /></label>
+          <label class="graph-field">基准分支<input data-field="base" value="${esc(cur.base ?? 'main')}" maxlength="120" /></label>
+        </div>
+        <p class="graph-note">顺序：提交 → 推送 → PR → 关单。任一步失败都不关单，评论写原因；PR 建好后工作区切回基准分支。</p>
       </section>`;
     }
     const stage = node.stage;
@@ -273,6 +292,22 @@ export function createGraph(root, options = {}) {
     </section>`;
   };
 
+  /** 收尾的三个开关有顺序：不提交就推送没意义，不推送就建 PR 没意义。 */
+  const wireCompleteForm = () => {
+    const commit = drawer.querySelector('[data-field="commit"]');
+    const push = drawer.querySelector('[data-field="push"]');
+    const pr = drawer.querySelector('[data-field="pr"]');
+    if (!commit || !push || !pr) return;
+    const sync = () => {
+      push.disabled = !commit.checked;
+      if (!commit.checked) push.checked = false;
+      pr.disabled = !push.checked;
+      if (!push.checked) pr.checked = false;
+    };
+    for (const el of [commit, push, pr]) el.addEventListener('change', sync);
+    sync();
+  };
+
   const open = (node) => {
     selected = node.id;
     drawer.hidden = false;
@@ -292,6 +327,7 @@ export function createGraph(root, options = {}) {
         <button type="button" class="graph-drawer-x" data-action="close" aria-label="关闭">×</button>
       </header>
       <div class="graph-drawer-body">${opts.mode === 'template' ? templateBody(node) : runBody(node)}</div>${foot}`;
+    if (opts.mode === 'template' && node.id === 'complete') wireCompleteForm();
     render();
   };
 
@@ -329,7 +365,14 @@ export function createGraph(root, options = {}) {
           prompt: promptEl.value,
           preset: drawer.querySelector('[data-field="preset"]')?.value ?? '',
         }
-      : { nodeId: node.id, commit: Boolean(commitEl.checked) };
+      : {
+          nodeId: node.id,
+          commit: Boolean(drawer.querySelector('[data-field="commit"]')?.checked),
+          push: Boolean(drawer.querySelector('[data-field="push"]')?.checked),
+          pr: Boolean(drawer.querySelector('[data-field="pr"]')?.checked),
+          remote: drawer.querySelector('[data-field="remote"]')?.value ?? '',
+          base: drawer.querySelector('[data-field="base"]')?.value ?? '',
+        };
     btn.disabled = true;
     try {
       await opts.onSaveNode?.(payload);
@@ -337,7 +380,16 @@ export function createGraph(root, options = {}) {
         prompts = { ...prompts, [payload.stage]: payload.prompt };
         nodes = { ...nodes, [payload.stage]: { preset: payload.preset } };
       } else {
-        nodes = { ...nodes, complete: { commit: payload.commit } };
+        nodes = {
+          ...nodes,
+          complete: {
+            commit: payload.commit,
+            push: payload.push,
+            pr: payload.pr,
+            remote: payload.remote,
+            base: payload.base,
+          },
+        };
       }
       const ok = drawer.querySelector('.graph-saved');
       if (ok) {

@@ -413,7 +413,7 @@ node wf.mjs board --lan --token 口令
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `presets` | 一份「默认」 | AI 预设：`{id, name, runner, model, thinking}`。执行 / 审查各挂一份，改预设对下一次运行生效 |
-| `nodes` | 两个 AI 节点挂「默认」，收尾提交 | `{execute:{preset}, review:{preset}, complete:{commit}}`：AI 节点只引用预设；收尾节点决定通过后是否提交 |
+| `nodes` | AI 节点挂「默认」，收尾只提交 | `{execute:{preset}, review:{preset}, complete:{commit, push, pr, remote, base}}`：AI 节点只引用预设；收尾节点决定提交 / 推送 / 建 PR |
 | `sandbox` | `workspace-write` | `read-only` / `workspace-write` / `danger-full-access` |
 | `attempts` | `2` | 执行→门禁→审查 最多几轮（1–5） |
 | `timeoutMs` | `1800000` | 单次 AI 回合超时 |
@@ -428,6 +428,14 @@ node wf.mjs board --lan --token 口令
 
 想让它「先写测试再动手」「必须改哪几个文件」，改提示词，不要改引擎。
 
+**收尾节点：提交 → 推送 → 建 PR**
+
+- 三个开关有顺序：不提交就没有可推的东西，不推送就没法建 PR。页面按这个顺序禁用，服务端也拒绝矛盾组合。
+- 打开 `pr` 后，engine **接单时就切出 `card/<id>` 分支**（从 `origin/<base>` 切，避免把本地未推的提交卷进 PR）；同一张单重派会复用已有分支。
+- 建完 PR 自动切回 `base`；**任一步失败都不关单**，工单留在「执行中」并写一条评论说明卡在哪一步，修好后人工重派即可。
+- `gh` 是可选依赖：要建 PR 得先 `gh auth login`。没装或没登录会明确报错，不会假装成功。
+- `remote` / `base` 默认 `origin` / `main`，可在收尾节点里改。
+
 ---
 
 ## 10. 常见问题
@@ -436,7 +444,10 @@ node wf.mjs board --lan --token 口令
 `.hlwd/` 之外的未提交改动一律拦下（否则会被算进这张单的提交）。先提交/清理，或加 `--allow-dirty`。
 
 **AI 干完了但没提交？**
-「流程 → 收尾」里的「通过后自动提交」关了，或没有代码改动。看 `.hlwd/runs/<...>/run.json` 的 `outcome`。
+「流程 → 收尾」里的「提交」关着，或没有代码改动。看 `.hlwd/runs/<...>/run.json` 的 `outcome` 与 `push` / `pr`。
+
+**PR 没建出来 / 停在「执行中」？**
+收尾是「提交 → 推送 → PR」，任一步失败都不关单。看工单最新那条评论（写明卡在哪一步），再确认 `gh auth status` 正常、`base` 分支存在。分支会停在 `card/<id>` 上，方便看现场。
 
 **门禁一直挡住？**
 看同目录 `gate-<轮次>.log`。最常见的是门禁里跑 `npm test` 而项目本来就有失败用例——先把门禁改准，再放开。

@@ -557,7 +557,7 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
     assert.deepEqual(settings.config.engine.nodes, {
       execute: { preset: 'default' },
       review: { preset: 'default' },
-      complete: { commit: true },
+      complete: { commit: true, push: false, pr: false, remote: 'origin', base: 'main' },
     });
 
     const put = async (body) => {
@@ -580,7 +580,7 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
     assert.deepEqual(saved.body.config.engine.nodes, {
       execute: { preset: 'exec' },
       review: { preset: 'rev' },
-      complete: { commit: true },
+      complete: { commit: true, push: false, pr: false, remote: 'origin', base: 'main' },
     });
 
     // 收尾节点：通过后是否提交，独立于预设

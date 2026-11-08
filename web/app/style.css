@@ -2275,6 +2275,29 @@ body[data-mode='issue'] {
   padding: 0;
   accent-color: var(--open);
 }
+/* 收尾节点的开关是一列：勾选框 + 说明文字，按动作顺序排 */
+.chk-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  color: var(--bone);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.chk-line input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--open);
+}
+.chk-line input[type="checkbox"]:disabled + span,
+.chk-line:has(input:disabled) {
+  color: var(--faint);
+  cursor: not-allowed;
+}
 .graph-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
