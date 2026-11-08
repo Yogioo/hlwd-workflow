@@ -2269,6 +2269,12 @@ body[data-mode='issue'] {
   min-height: 120px;
   resize: vertical;
 }
+.graph-field input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--open);
+}
 .graph-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

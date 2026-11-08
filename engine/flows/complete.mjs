@@ -12,9 +12,11 @@ const oneLine = (text, max = 80) => {
 
 export async function complete({ cfg, workdir, issue, runDir, checks = [] }) {
   let commit = null;
+  // 收尾节点自己的配置：设置 → 流程 → 收尾里勾。没配过（老 run）默认提交。
+  const shouldCommit = cfg.nodes?.complete?.commit !== false;
   const isRepo = (await run('git', ['rev-parse', '--is-inside-work-tree'], { cwd: workdir })).code === 0;
-  if (cfg.gitCommit && !isRepo) log('不是 git 仓库，跳过提交');
-  if (cfg.gitCommit && isRepo) {
+  if (shouldCommit && !isRepo) log('不是 git 仓库，跳过提交');
+  if (shouldCommit && isRepo) {
     await run('git', ['add', '-A'], { cwd: workdir });
     const staged = await run('git', ['diff', '--cached', '--quiet'], { cwd: workdir });
     if (staged.code !== 0) {

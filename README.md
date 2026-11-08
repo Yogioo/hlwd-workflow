@@ -413,11 +413,10 @@ node wf.mjs board --lan --token 口令
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `presets` | 一份「默认」 | AI 预设：`{id, name, runner, model, thinking}`。执行 / 审查各挂一份，改预设对下一次运行生效 |
-| `nodes` | 两个节点都挂「默认」 | `{execute:{preset}, review:{preset}}`：节点只引用预设，没有「留空＝继承」 |
+| `nodes` | 两个 AI 节点挂「默认」，收尾提交 | `{execute:{preset}, review:{preset}, complete:{commit}}`：AI 节点只引用预设；收尾节点决定通过后是否提交 |
 | `sandbox` | `workspace-write` | `read-only` / `workspace-write` / `danger-full-access` |
 | `attempts` | `2` | 执行→门禁→审查 最多几轮（1–5） |
 | `timeoutMs` | `1800000` | 单次 AI 回合超时 |
-| `gitCommit` | `true` | 通过后自动提交 |
 | `actor` | `ai` | 接单时写的负责人名 |
 | `readyLabel` | `ready-for-agent` | 「可派给 AI」用的标签 |
 | `autoWatch` | `false` | 看板启动时是否自动开自动流水线 |
@@ -437,7 +436,7 @@ node wf.mjs board --lan --token 口令
 `.hlwd/` 之外的未提交改动一律拦下（否则会被算进这张单的提交）。先提交/清理，或加 `--allow-dirty`。
 
 **AI 干完了但没提交？**
-`gitCommit` 关了，或没有代码改动。看 `.hlwd/runs/<...>/run.json` 的 `outcome`。
+「流程 → 收尾」里的「通过后自动提交」关了，或没有代码改动。看 `.hlwd/runs/<...>/run.json` 的 `outcome`。
 
 **门禁一直挡住？**
 看同目录 `gate-<轮次>.log`。最常见的是门禁里跑 `npm test` 而项目本来就有失败用例——先把门禁改准，再放开。

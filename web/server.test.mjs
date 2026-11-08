@@ -554,7 +554,11 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
     assert.equal(boot.status, 200);
     const settings = await boot.json();
     assert.deepEqual(settings.config.engine.presets.map((p) => p.id), ['default']);
-    assert.deepEqual(settings.config.engine.nodes, { execute: { preset: 'default' }, review: { preset: 'default' } });
+    assert.deepEqual(settings.config.engine.nodes, {
+      execute: { preset: 'default' },
+      review: { preset: 'default' },
+      complete: { commit: true },
+    });
 
     const put = async (body) => {
       const res = await fetch(`${base}/api/settings${t}`, {
@@ -573,7 +577,17 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
       engine: { presets, nodes: { execute: { preset: 'exec' }, review: { preset: 'rev' } } },
     });
     assert.equal(saved.status, 200);
-    assert.deepEqual(saved.body.config.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
+    assert.deepEqual(saved.body.config.engine.nodes, {
+      execute: { preset: 'exec' },
+      review: { preset: 'rev' },
+      complete: { commit: true },
+    });
+
+    // 收尾节点：通过后是否提交，独立于预设
+    const noCommit = await put({ engine: { nodes: { complete: { commit: false } } } });
+    assert.equal(noCommit.status, 200);
+    assert.equal(noCommit.body.config.engine.nodes.complete.commit, false);
+    assert.equal((await put({ engine: { nodes: { complete: { commit: 'yes' } } } })).status, 400);
 
     // 只改预设，节点挂着不动
     const tweak = await put({ engine: { presets: [presets[0], { ...presets[1], model: 'other' }] } });

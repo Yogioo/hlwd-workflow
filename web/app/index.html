@@ -323,7 +323,7 @@
           <section class="settings-panel" data-panel="engine" hidden>
             <div class="settings-head">
               <h3>运行</h3>
-              <p class="dialog-note">整条流水线的运行参数。AI 用哪个执行器/模型由「AI 预设」决定，去「流程」里给执行、审查两个节点各选一份。可派标签建议去「标签库」改名（会级联历史工单）；这里直接改只影响以后接单。</p>
+              <p class="dialog-note">整条流水线的运行参数。AI 用哪个执行器/模型由「AI 预设」决定，去「流程」里给执行、审查两个节点各选一份；<b>通过后是否提交</b>也在「流程 → 收尾」节点里。可派标签建议去「标签库」改名（会级联历史工单）；这里直接改只影响以后接单。</p>
             </div>
             <form id="engineForm">
               <div class="settings-grid">
@@ -338,7 +338,6 @@
                 <label>单轮超时（分钟）<input name="timeoutMin" type="number" min="1" max="240" /></label>
                 <label>AI 账号名<input name="actor" placeholder="ai" /></label>
                 <label>可派标签<input name="readyLabel" placeholder="ready-for-agent" /></label>
-                <label class="chk-row"><input name="gitCommit" type="checkbox" /> 通过后自动提交</label>
                 <label class="chk-row"><input name="autoWatch" type="checkbox" /> 看板启动时自动开「自动流水线」</label>
               </div>
               <menu>

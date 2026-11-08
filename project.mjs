@@ -11,12 +11,14 @@ export const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), '.hlwd');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
-export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'gitCommit', 'autoWatch', 'presets', 'nodes'];
+export const ENGINE_KEYS = ['runner', 'model', 'thinking', 'sandbox', 'attempts', 'actor', 'readyLabel', 'timeoutMs', 'autoWatch', 'presets', 'nodes'];
 export const RUNNERS = ['pi', 'codex', 'agent'];
 const SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
-/** 只有会起 agent 回合的阶段能选预设；节点 id 就是 engine 的阶段名。 */
+/** 会起 agent 回合、要选 AI 预设的节点。 */
 export const STAGES = ['execute', 'review'];
 export const STAGE_LABEL = { execute: '执行', review: '审查' };
+/** 能配自己行为的节点：两个 AI 节点挂预设，收尾节点决定通过后要不要提交。 */
+export const NODES = [...STAGES, 'complete'];
 /** 预设里决定「用谁跑」的三个字段；sandbox / attempts / 超时是整条流水线的参数，不进预设。 */
 export const PRESET_KEYS = ['runner', 'model', 'thinking'];
 export const MAX_PRESETS = 20;
@@ -24,7 +26,10 @@ const PRESET_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PRESET_NAME_MAX = 40;
 const PRESET_VALUE_MAX = 120;
 const DEFAULT_PRESET = { id: 'default', name: '默认', runner: 'pi', model: '', thinking: '' };
-const defaultNodes = () => Object.fromEntries(STAGES.map((stage) => [stage, { preset: DEFAULT_PRESET.id }]));
+const defaultNodes = () => ({
+  ...Object.fromEntries(STAGES.map((stage) => [stage, { preset: DEFAULT_PRESET.id }])),
+  complete: { commit: true },
+});
 
 const str = (value) => (value == null ? '' : String(value).trim());
 
@@ -50,15 +55,21 @@ function cleanPresets(input) {
   return out;
 }
 
-/** 节点只能指向存在的预设；坏引用回落到给定兜底（再不行就用第一份预设）。 */
-function cleanNodes(input, presets, fallback = {}) {
+/**
+ * 节点配置收敛成能跑的形状：
+ *   AI 节点只能指向存在的预设（坏引用回落到兜底，再不行用第一份）；
+ *   收尾节点只认 commit 布尔值，缺了就继承旧的 engine.gitCommit（默认 true）。
+ */
+function cleanNodes(input, presets, fallback = {}, legacyCommit = true) {
   const first = presets[0]?.id ?? '';
+  const nodes = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   const out = {};
   for (const stage of STAGES) {
-    const raw = input && typeof input === 'object' && !Array.isArray(input) ? input[stage] : null;
-    const id = str(raw?.preset);
+    const id = str(nodes[stage]?.preset);
     out[stage] = { preset: presets.some((p) => p.id === id) ? id : (fallback[stage] ?? first) };
   }
+  const commit = typeof nodes.complete?.commit === 'boolean' ? nodes.complete.commit : legacyCommit !== false;
+  out.complete = { commit };
   return out;
 }
 
@@ -98,8 +109,11 @@ function migrateLegacy(raw = {}) {
 function readEngine(rawInput) {
   const raw = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput : {};
   const engine = { ...DEFAULT_CONFIG.engine, ...raw };
-  // 旧字段不对外暴露：stages 已经折成预设，presets/nodes 下面统一重建。
+  // 收尾节点接管旧的全局 gitCommit；缺省仍然是「提交」。
+  const legacyCommit = typeof raw.gitCommit === 'boolean' ? raw.gitCommit : true;
+  // 旧字段不对外暴露：stages 折成预设、gitCommit 折成 nodes.complete，presets/nodes 下面统一重建。
   delete engine.stages;
+  delete engine.gitCommit;
   delete engine.presets;
   delete engine.nodes;
   // 旧的全局 runner/model/thinking 只在没有预设时被 migrateLegacy 用到，顺手收敛一下
@@ -107,9 +121,11 @@ function readEngine(rawInput) {
   engine.model = str(engine.model);
   engine.thinking = str(engine.thinking);
   const explicit = cleanPresets(raw.presets);
-  if (explicit.length) return { ...engine, presets: explicit, nodes: cleanNodes(raw.nodes, explicit) };
+  if (explicit.length) {
+    return { ...engine, presets: explicit, nodes: cleanNodes(raw.nodes, explicit, {}, legacyCommit) };
+  }
   const { presets, fallback } = migrateLegacy(raw);
-  return { ...engine, presets, nodes: cleanNodes(raw.nodes, presets, fallback) };
+  return { ...engine, presets, nodes: cleanNodes(raw.nodes, presets, fallback, legacyCommit) };
 }
 
 /** 严格校验：页面写进来的预设宁可不保存，也不落一份坏配置。 */
@@ -169,9 +185,9 @@ export const DEFAULT_CONFIG = {
     actor: 'ai',
     readyLabel: 'ready-for-agent',
     timeoutMs: 1800000,
-    gitCommit: true,
     autoWatch: false,
-    // AI 配置的唯一来源：预设 + 节点挂载。runner/model/thinking 是旧字段，留着只为兼容读取。
+    // AI 配置的唯一来源：预设 + 节点挂载。runner/model/thinking 是旧字段，留着只为兼容读取；
+    // 「通过后是否提交」不在这里，它是收尾节点自己的配置（nodes.complete.commit）。
     presets: [{ ...DEFAULT_PRESET }],
     nodes: defaultNodes(),
   },
@@ -318,7 +334,8 @@ export async function saveProjectConfig(projectDir, patch = {}) {
     if (!Number.isInteger(n) || n < 60000) throw new Error('timeoutMs 不能小于 60000');
     next.engine.timeoutMs = n;
   }
-  if (engine.gitCommit !== undefined) next.engine.gitCommit = Boolean(engine.gitCommit);
+  // 旧客户端还在提交 engine.gitCommit：折进收尾节点，不再写回全局字段。
+  if (engine.gitCommit !== undefined) next.engine.nodes.complete = { commit: Boolean(engine.gitCommit) };
   if (engine.autoWatch !== undefined) next.engine.autoWatch = Boolean(engine.autoWatch);
   for (const key of ['model', 'thinking', 'actor', 'readyLabel']) {
     if (engine[key] !== undefined) next.engine[key] = String(engine[key]).trim();
@@ -329,14 +346,22 @@ export async function saveProjectConfig(projectDir, patch = {}) {
     if (!engine.nodes || typeof engine.nodes !== 'object' || Array.isArray(engine.nodes)) {
       throw new Error('engine.nodes 必须是对象');
     }
-    for (const [stage, raw] of Object.entries(engine.nodes)) {
-      if (!STAGES.includes(stage)) throw new Error(`未知阶段 ${stage}：只有 ${STAGES.join(' / ')} 可以配预设`);
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.nodes.${stage} 必须是对象`);
-      for (const key of Object.keys(raw)) {
-        if (key !== 'preset') throw new Error(`engine.nodes.${stage} 不认识字段 ${key}`);
+    for (const [nodeId, raw] of Object.entries(engine.nodes)) {
+      if (!NODES.includes(nodeId)) throw new Error(`未知节点 ${nodeId}：只有 ${NODES.join(' / ')} 可以配置`);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`engine.nodes.${nodeId} 必须是对象`);
+      if (nodeId === 'complete') {
+        for (const key of Object.keys(raw)) {
+          if (key !== 'commit') throw new Error(`engine.nodes.complete 不认识字段 ${key}`);
+        }
+        if (typeof raw.commit !== 'boolean') throw new Error('engine.nodes.complete.commit 必须是 true / false');
+        next.engine.nodes.complete = { commit: raw.commit };
+        continue;
       }
-      if (typeof raw.preset !== 'string') throw new Error(`engine.nodes.${stage}.preset 必须是字符串`);
-      next.engine.nodes[stage] = { preset: raw.preset.trim() };
+      for (const key of Object.keys(raw)) {
+        if (key !== 'preset') throw new Error(`engine.nodes.${nodeId} 不认识字段 ${key}`);
+      }
+      if (typeof raw.preset !== 'string') throw new Error(`engine.nodes.${nodeId}.preset 必须是字符串`);
+      next.engine.nodes[nodeId] = { preset: raw.preset.trim() };
     }
   }
   for (const stage of STAGES) {
@@ -350,8 +375,9 @@ export async function saveProjectConfig(projectDir, patch = {}) {
     }
     throw new Error(`预设「${id}」不存在：${used.join('、')}选错了`);
   }
-  // 旧字段不再写回：stages 已折成预设，presets/nodes 才是配置。
+  // 旧字段不再写回：stages 已折成预设，gitCommit 已折成收尾节点，presets/nodes 才是配置。
   delete next.engine.stages;
+  delete next.engine.gitCommit;
   if (!next.engine.readyLabel) throw new Error('可派标签不能为空：engine 靠它找就绪单');
 
   if (patch.tags !== undefined) {

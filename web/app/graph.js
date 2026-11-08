@@ -53,6 +53,7 @@ function edgeGeom(edge) {
 const nodeSub = (node, mode) => {
   if (mode === 'template') {
     if (node.kind === 'ai') return node.presetName ? `预设 · ${node.presetName}` : '未选预设';
+    if (node.id === 'complete') return node.commit ? '通过后提交' : '不提交';
     return node.kind === 'end' ? '终态' : '不调用模型';
   }
   if (node.count > 1) return `第 ${node.attempt} 轮`;
@@ -80,13 +81,17 @@ export function createGraph(root, options = {}) {
   };
   const presetOf = (stage) => presets.find((preset) => preset.id === presetIdOf(stage)) ?? null;
 
-  /** 节点上的预设标记：设置页用，来自 config.engine.nodes / presets。 */
+  /** 收尾节点自己的行为：没配过默认提交（和 engine 的老默认一致）。 */
+  const commitOf = () => nodes?.complete?.commit !== false;
+
+  /** 节点上的配置标记：设置页用，来自 config.engine.nodes / presets。 */
   const markPresets = () => {
     if (!graph) return;
     for (const node of graph.nodes) {
       const preset = node.stage ? presetOf(node.stage) : null;
       node.presetId = preset?.id ?? '';
       node.presetName = preset?.name ?? '';
+      node.commit = node.id === 'complete' ? commitOf() : null;
     }
   };
 
@@ -238,7 +243,14 @@ export function createGraph(root, options = {}) {
         <div class="graph-actions"><button type="button" class="ghost" data-action="gate">打开脚本</button></div></section>`;
     }
     if (node.id === 'complete') {
-      return `<section><h4>收尾</h4><p class="graph-note">提交与关单。开关在「运行」的「通过后自动提交」，这里不重复配。</p></section>`;
+      return `<section>
+        <h4>收尾</h4>
+        <label class="graph-field chk-field">通过后自动提交
+          <span class="graph-note">（审查通过才走到这里；关掉就只关单、不动 git）</span>
+          <input type="checkbox" data-field="commit"${commitOf() ? ' checked' : ''} />
+        </label>
+        <p class="graph-note">提交信息由 engine 写（<code>卡片id: 标题</code> + 运行目录 trailer）。改完<strong>下一次运行</strong>生效。</p>
+      </section>`;
     }
     const stage = node.stage;
     const cur = presetOf(stage);
@@ -266,9 +278,10 @@ export function createGraph(root, options = {}) {
     drawer.hidden = false;
     const chip =
       opts.mode === 'template' ? '' : `<span class="graph-chip t-${node.tone ?? 'idle'}">${TONE_TEXT[node.tone ?? 'idle'] ?? ''}</span>`;
-    // 保存按钮固定在页脚：正文再长也不会把它顶出可视区
+    // 保存按钮固定在页脚：正文再长也不会把它顶出可视区；没有可配项的节点（接单 / 门禁 / 终态）不显示
+    const configurable = Boolean(node.stage) || node.id === 'complete';
     const foot =
-      opts.mode === 'template'
+      opts.mode === 'template' && configurable
         ? `<div class="graph-drawer-foot">
              <button type="button" class="primary" data-action="save">保存这个节点</button>
              <span class="graph-saved" hidden>已保存</span>
@@ -305,19 +318,27 @@ export function createGraph(root, options = {}) {
   };
 
   const save = async (btn) => {
-    const stageSel = drawer.querySelector('[data-field="prompt"]');
-    if (!stageSel) return;
     const node = graph.nodes.find((n) => n.id === selected);
-    const payload = {
-      stage: node.stage,
-      prompt: stageSel.value,
-      preset: drawer.querySelector('[data-field="preset"]')?.value ?? '',
-    };
+    const promptEl = drawer.querySelector('[data-field="prompt"]');
+    const commitEl = drawer.querySelector('[data-field="commit"]');
+    if (!promptEl && !commitEl) return;
+    const payload = promptEl
+      ? {
+          nodeId: node.id,
+          stage: node.stage,
+          prompt: promptEl.value,
+          preset: drawer.querySelector('[data-field="preset"]')?.value ?? '',
+        }
+      : { nodeId: node.id, commit: Boolean(commitEl.checked) };
     btn.disabled = true;
     try {
       await opts.onSaveNode?.(payload);
-      prompts = { ...prompts, [payload.stage]: payload.prompt };
-      nodes = { ...nodes, [payload.stage]: { preset: payload.preset } };
+      if (payload.prompt !== undefined) {
+        prompts = { ...prompts, [payload.stage]: payload.prompt };
+        nodes = { ...nodes, [payload.stage]: { preset: payload.preset } };
+      } else {
+        nodes = { ...nodes, complete: { commit: payload.commit } };
+      }
       const ok = drawer.querySelector('.graph-saved');
       if (ok) {
         ok.hidden = false;

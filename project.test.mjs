@@ -54,7 +54,11 @@ test('ensureProject 在空目录里建出 .hlwd/、config.json、两份提示词
     // 开箱就有一份预设，两个 AI 节点都挂着它：新项目不会因为「没配模型」跑不起来
     assert.equal(config.engine.presets.length, 1);
     assert.equal(config.engine.presets[0].id, 'default');
-    assert.deepEqual(config.engine.nodes, { execute: { preset: 'default' }, review: { preset: 'default' } });
+    assert.deepEqual(config.engine.nodes, {
+      execute: { preset: 'default' },
+      review: { preset: 'default' },
+      complete: { commit: true },
+    });
 
     for (const name of ['execute', 'review']) {
       const text = await fs.readFile(path.join(dir, '.hlwd', 'prompts', `${name}.md`), 'utf8');
@@ -99,7 +103,9 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
     });
     assert.equal(saved.labels.priorities['2'], '普通');
     assert.equal(saved.engine.attempts, 3);
-    assert.equal(saved.engine.gitCommit, false);
+    // 旧的 engine.gitCommit 写成收尾节点自己的配置，不再留全局字段
+    assert.equal(saved.engine.nodes.complete.commit, false);
+    assert.equal(saved.engine.gitCommit, undefined);
     assert.equal(saved.engine.runner, 'codex');
     assert.equal(saved.engine.autoWatch, true, '看板启动时自动开流水线是个开关，要能存');
     assert.equal(saved.labels.statuses.open, '待接', '未改的字段要保留');
@@ -124,7 +130,11 @@ test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
       },
     });
     assert.deepEqual(saved.engine.presets.map((p) => p.id), ['exec', 'rev']);
-    assert.deepEqual(saved.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
+    assert.deepEqual(saved.engine.nodes, {
+      execute: { preset: 'exec' },
+      review: { preset: 'rev' },
+      complete: { commit: true },
+    });
     assert.equal(saved.engine.stages, undefined, '旧字段不再写回，读出来也不该有');
 
     // 只改预设（比如换模型）：节点挂着不动
@@ -137,7 +147,16 @@ test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
       },
     });
     assert.equal(again.engine.presets[0].model, 'other');
-    assert.deepEqual(again.engine.nodes, { execute: { preset: 'exec' }, review: { preset: 'rev' } });
+    assert.deepEqual(again.engine.nodes, {
+      execute: { preset: 'exec' },
+      review: { preset: 'rev' },
+      complete: { commit: true },
+    });
+
+    // 收尾节点：通过后是否提交，下一次运行生效
+    const noCommit = await saveProjectConfig(dir, { engine: { nodes: { complete: { commit: false } } } });
+    assert.equal(noCommit.engine.nodes.complete.commit, false);
+    assert.equal(noCommit.engine.presets[0].id, 'exec', '改收尾节点不该动预设');
 
     // 新预设可以不带 id：服务端发一个 p-N，页面靠返回值刷新
     const withNew = await saveProjectConfig(dir, {
@@ -177,8 +196,16 @@ test('engine.presets + nodes：执行和审查各挂一份预设', async () => {
       /执行器只能是/,
     );
     await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { execute: { preset: 'missing' } } } }), /不存在/);
-    await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { claim: { preset: 'exec' } } } }), /未知阶段/);
+    await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { claim: { preset: 'exec' } } } }), /未知节点/);
     await assert.rejects(() => saveProjectConfig(dir, { engine: { nodes: { execute: { preset: 'exec', model: 'x' } } } }), /不认识字段/);
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { commit: 'yes' } } } }),
+      /true \/ false/,
+    );
+    await assert.rejects(
+      () => saveProjectConfig(dir, { engine: { nodes: { complete: { preset: 'exec' } } } }),
+      /不认识字段/,
+    );
     // 还挂在节点上的预设删不掉：先换节点，再删
     await assert.rejects(
       () => saveProjectConfig(dir, { engine: { presets: [{ id: 'rev', name: '审查', runner: 'codex', model: '', thinking: '' }] } }),
@@ -193,18 +220,29 @@ test('旧配置（engine.stages / 全局模型）读的时候折成预设', asyn
     await fs.writeFile(
       path.join(dir, '.hlwd', 'config.json'),
       JSON.stringify({
-        engine: { runner: 'pi', model: 'global-model', thinking: 'high', stages: { execute: { model: 'exec-model' } } },
+        engine: {
+          runner: 'pi',
+          model: 'global-model',
+          thinking: 'high',
+          gitCommit: false,
+          stages: { execute: { model: 'exec-model' } },
+        },
       }),
       'utf8',
     );
     const cfg = await readProjectConfig(dir);
     assert.equal(cfg.engine.stages, undefined, '旧字段不再对外暴露');
+    assert.equal(cfg.engine.gitCommit, undefined, '旧字段不再对外暴露');
     const byId = Object.fromEntries(cfg.engine.presets.map((p) => [p.id, p]));
     assert.equal(byId.default.model, 'global-model');
     assert.equal(byId.default.thinking, 'high');
     assert.equal(byId['stage-execute'].model, 'exec-model');
     assert.equal(byId['stage-execute'].runner, 'pi');
-    assert.deepEqual(cfg.engine.nodes, { execute: { preset: 'stage-execute' }, review: { preset: 'default' } });
+    assert.deepEqual(cfg.engine.nodes, {
+      execute: { preset: 'stage-execute' },
+      review: { preset: 'default' },
+      complete: { commit: false },
+    });
   });
 });
 
@@ -223,7 +261,11 @@ test('手改坏的 presets / nodes 读回来也收敛成能跑的形状', async 
     );
     const cfg = await readProjectConfig(dir);
     assert.deepEqual(cfg.engine.presets, [{ id: 'ok', name: 'ok', runner: 'pi', model: '', thinking: '' }]);
-    assert.deepEqual(cfg.engine.nodes, { execute: { preset: 'ok' }, review: { preset: 'ok' } });
+    assert.deepEqual(cfg.engine.nodes, {
+      execute: { preset: 'ok' },
+      review: { preset: 'ok' },
+      complete: { commit: true },
+    });
   });
 });
 

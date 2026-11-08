@@ -2204,7 +2204,6 @@ async function openSettings() {
   f.timeoutMin.value = Math.max(1, Math.round((e.timeoutMs ?? 1800000) / 60000));
   f.actor.value = e.actor ?? 'ai';
   f.readyLabel.value = e.readyLabel ?? 'ready-for-agent';
-  f.gitCommit.checked = e.gitCommit !== false;
   f.autoWatch.checked = e.autoWatch === true;
   // 设置页的图：同一份拓扑，只是把「看回放」换成「改节点」
   state.settingsGraph ??= createGraph($('#settingsGraph'), {
@@ -2225,15 +2224,13 @@ async function openSettings() {
   $('#settingsDialog').showModal();
 }
 
-/** 保存一个节点：提示词只属于它自己，AI 配置只通过所选预设生效。 */
-async function saveGraphNode({ stage, prompt, preset }) {
-  const saved = await api('/api/settings', {
-    method: 'PUT',
-    body: JSON.stringify({
-      prompts: prompt == null ? undefined : { [stage]: prompt },
-      engine: { nodes: { [stage]: { preset } } },
-    }),
-  });
+/** 保存一个节点：AI 节点存提示词 + 所选预设；收尾节点只存「通过后是否提交」。 */
+async function saveGraphNode({ nodeId, stage, prompt, preset, commit }) {
+  const body =
+    nodeId === 'complete'
+      ? { engine: { nodes: { complete: { commit: Boolean(commit) } } } }
+      : { prompts: { [stage]: prompt }, engine: { nodes: { [stage]: { preset } } } };
+  const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
   state.presets = saved.config?.engine?.presets ?? state.presets;
   state.nodes = saved.config?.engine?.nodes ?? state.nodes;
   state.settingsGraph?.setData({ prompts: saved.prompts ?? {}, presets: state.presets, nodes: state.nodes });
@@ -2251,7 +2248,6 @@ async function saveEngine(event) {
       timeoutMs: Math.round(Number(f.get('timeoutMin') ?? 30) * 60000),
       actor: String(f.get('actor') ?? ''),
       readyLabel: String(f.get('readyLabel') ?? ''),
-      gitCommit: f.get('gitCommit') === 'on',
       autoWatch: f.get('autoWatch') === 'on',
     },
   };

@@ -54,7 +54,6 @@ const DEFAULTS = {
   actor: 'ai',
   readyLabel: 'ready-for-agent',
   timeoutMs: 1800000,
-  gitCommit: true,
   presets: [],
   nodes: {},
 };
