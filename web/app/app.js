@@ -2533,9 +2533,9 @@ async function openSettings() {
     api('/api/tags')
       .then((payload) => ({ tags: payload.tags ?? [] }))
       .catch((error) => ({ error })),
-    // 设置 → 访问要显示「现在绑在哪、同事该用哪个地址」，顺手刷一次
-    api('/api/meta').then(applyConfig).catch(() => {}),
     api('/api/update').catch((error) => ({ error: error.message })),
+    // 设置 → 访问要显示「现在绑在哪、同事该用哪个地址」，顺手刷一次（不需要返回值）
+    api('/api/meta').then(applyConfig).catch(() => {}),
   ]);
   state.update = update;
   state.gate = gate ?? { path: '', exists: false };
