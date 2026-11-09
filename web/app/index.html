@@ -27,12 +27,21 @@
           <button id="authTabRegister" class="seg-btn" type="button">注册</button>
         </div>
 
-        <label>用户名<input name="name" required maxlength="24" autocomplete="username" spellcheck="false" /></label>
+        <label id="authEmailRow" hidden>邮箱<input name="email" type="email" maxlength="120" autocomplete="email" spellcheck="false" placeholder="name@公司域名" /></label>
+        <label id="authNameRow"><span id="authNameLabel">用户名</span><input name="name" maxlength="24" autocomplete="username" spellcheck="false" /></label>
         <label id="authDisplayRow" hidden>显示名（可选）<input name="display" maxlength="32" placeholder="别人看到的名字" /></label>
-        <label>密码<input name="password" type="password" required minlength="6" autocomplete="current-password" /></label>
+        <label id="authCodeRow" hidden>邮箱验证码
+          <span class="auth-code">
+            <input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字" />
+            <button id="authSendCode" class="ghost" type="button">获取验证码</button>
+          </span>
+        </label>
+        <label id="authPasswordRow">密码<input name="password" type="password" minlength="6" autocomplete="current-password" /></label>
+        <label id="authNewPasswordRow" hidden>新密码<input name="newPassword" type="password" minlength="6" autocomplete="new-password" /></label>
 
         <div id="authError" class="auth-error" hidden></div>
         <button id="authSubmit" class="primary" type="submit">登录</button>
+        <button id="authForgot" class="auth-link" type="button" hidden>忘记密码？</button>
         <p id="authHint" class="auth-hint"></p>
       </form>
     </section>
@@ -389,7 +398,7 @@
             </div>
             <ul class="access-notes">
               <li>地址里可能混着 Tailscale / WSL 等虚拟网卡；同事能不能连通取决于网络，一般挑 <code>192.168</code> 或 <code>10.</code> 开头那条。</li>
-              <li>内网按可信处理：注册是开放的，能连上的人都能注册并改单（邮箱注册以后补）。</li>
+              <li>内网按可信处理：注册要公司邮箱验证码；没配发件邮箱（~/.hlwd/mail.json）时退回用户名注册。</li>
               <li>权限还没做：任何登录用户都能改任何工单；owner / member 目前只是记录。</li>
               <li>「自动流水线」「查看门禁脚本」都在服务端跑/看，内网谁都能用；改门禁脚本要克隆项目改 <code>.hlwd/gate.mjs</code>。</li>
               <li><code>stop</code> 会连自动流水线一起停；看板起来后按「运行」里的 <b>autoWatch</b> 自动拉起，或点右上角「自动流水线」。</li>

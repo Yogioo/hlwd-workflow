@@ -71,7 +71,7 @@ const state = {
   comments: [],
   combos: {}, // 标签快选的实例（工单页 / 新建工单）
   newComments: new Set(), // 页面开着期间新进来的评论（一直标记，刷新才清）
-  auth: { auth: false, user: null, firstRun: false },
+  auth: { auth: false, user: null, firstRun: false, mail: false },
   share: null, // 看板绑定与内网地址（/api/meta 的 share；设置 → 访问 用）
   authed: false,
   timer: null,
@@ -2139,31 +2139,83 @@ function authError(text) {
   el.hidden = !text;
 }
 
-const authMode = () => ($('#authTabRegister').classList.contains('active') ? 'register' : 'login');
+let authModeState = 'login';
+const authMode = () => authModeState;
+
+/** 显示/隐藏一行表单；隐藏时把 input 一起 disable，免得必填校验卡在看不见的字段上。 */
+function showRow(selector, show) {
+  const row = $(selector);
+  row.hidden = !show;
+  // 除了 hidden 属性再上 inline style：标签页可能还拿着旧样式表（改完没刷新）
+  row.style.display = show ? '' : 'none';
+  for (const input of row.querySelectorAll('input')) input.disabled = !show;
+}
+
+let codeTimer = null;
+function resetCodeButton() {
+  if (codeTimer) clearInterval(codeTimer);
+  codeTimer = null;
+  const btn = $('#authSendCode');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = '获取验证码';
+}
 
 function setAuthMode(mode) {
-  const reg = mode === 'register';
-  $('#authTabLogin').classList.toggle('active', !reg);
+  const mail = Boolean(state.auth?.mail);
+  authModeState = mode === 'reset' ? 'reset' : mode === 'register' ? 'register' : 'login';
+  const reg = authModeState === 'register';
+  const reset = authModeState === 'reset';
+  const emailMode = mail && (reg || reset);
+
+  $('#authTabLogin').classList.toggle('active', authModeState === 'login');
   $('#authTabRegister').classList.toggle('active', reg);
-  // 显示名只在注册时出现。除了 hidden 属性再上 inline style：
-  // 标签页可能还拿着旧样式表（改完没刷新），那也得藏住
-  const displayRow = $('#authDisplayRow');
-  displayRow.hidden = !reg;
-  displayRow.style.display = reg ? '' : 'none';
-  $('#authTitle').textContent = reg ? '注册' : '登录';
-  $('#authSubmit').textContent = reg ? '注册并进入' : '登录';
-  $('#authIntro').textContent = reg
-    ? state.auth?.firstRun
-      ? '第一个注册的账号是管理员。填个名字就能开始派活了。'
-      : '注册之后，你建的工单、改的状态、发的评论都会记在你名下。'
-    : '这台机器上的工单是几个人共用的。登录后，谁建的、谁改的状态、谁评论的都会留下名字。';
-  $('#authForm').password.autocomplete = reg ? 'new-password' : 'current-password';
-  $('#authHint').textContent = reg ? '密码至少 6 位，用户名以后改不了。' : '还没有账号？切到「注册」。';
+  showRow('#authEmailRow', emailMode);
+  showRow('#authNameRow', authModeState === 'login' || (reg && !mail));
+  showRow('#authDisplayRow', reg);
+  showRow('#authCodeRow', emailMode);
+  showRow('#authPasswordRow', !reset);
+  showRow('#authNewPasswordRow', reset);
+  $('#authForgot').hidden = authModeState !== 'login' || !mail;
+
+  $('#authNameLabel').textContent = mail && authModeState === 'login' ? '用户名或邮箱' : '用户名';
+  $('#authTitle').textContent = reset ? '重置密码' : reg ? '注册' : '登录';
+  $('#authSubmit').textContent = reset ? '重置密码' : reg ? '注册并进入' : '登录';
+  $('#authIntro').textContent = reset
+    ? '用注册邮箱收一个验证码，就能设新密码。'
+    : reg
+      ? mail
+        ? state.auth?.firstRun
+          ? '第一个注册的账号是管理员。用公司邮箱收个验证码就能开始派活。'
+          : '用公司邮箱验证一下，之后你建的工单、改的状态、发的评论都会记在你名下。'
+        : state.auth?.firstRun
+          ? '第一个注册的账号是管理员。填个名字就能开始派活了。'
+          : '注册之后，你建的工单、改的状态、发的评论都会记在你名下。'
+      : '这台机器上的工单是几个人共用的。登录后，谁建的、谁改的状态、谁评论的都会留下名字。';
+
+  // 注意：form.name 是表单自己的 name 属性（字符串），不是 name 输入框，所以统一走 elements
+  const form = $('#authForm');
+  const field = (n) => form.elements.namedItem(n);
+  field('password').autocomplete = reg || reset ? 'new-password' : 'current-password';
+  field('password').required = !reset;
+  field('name').required = authModeState === 'login' || (reg && !mail);
+  field('email').required = emailMode;
+  field('code').required = emailMode;
+  field('newPassword').required = reset;
+
+  $('#authHint').textContent = reset
+    ? '验证码 10 分钟内有效。'
+    : reg
+      ? mail
+        ? '验证码 10 分钟内有效，密码至少 6 位。'
+        : '密码至少 6 位，用户名以后改不了。'
+      : '还没有账号？切到「注册」。';
   authError('');
+  resetCodeButton();
 }
 
 function applyAuth(me) {
-  state.auth = me ?? { auth: false, user: null, firstRun: false };
+  state.auth = { mail: false, ...(me ?? {}) };
   const authed = Boolean(me?.auth && me.user);
   const needsLogin = Boolean(me?.auth && !me.user);
   state.authed = authed;
@@ -2183,8 +2235,34 @@ function applyAuth(me) {
 
 /** 会话过期时从任何地方掉回登录页。 */
 function showAuth() {
-  applyAuth({ auth: true, user: null, firstRun: state.auth?.firstRun });
-  $('#authForm').name?.focus?.();
+  applyAuth({ auth: true, user: null, firstRun: state.auth?.firstRun, mail: state.auth?.mail });
+  $('#authForm').elements.namedItem('name')?.focus?.();
+}
+
+/** 让服务器发一封验证码邮件；按钮自己倒数 60 秒。 */
+async function sendCode() {
+  const email = String(new FormData($('#authForm')).get('email') ?? '').trim();
+  if (!email) return authError('先填邮箱');
+  const btn = $('#authSendCode');
+  btn.disabled = true;
+  authError('');
+  try {
+    const out = await api('/api/auth/code', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose: authModeState === 'reset' ? 'reset' : 'register' }),
+    });
+    let left = Number(out.cooldown ?? 60);
+    btn.textContent = `${left} 秒后重发`;
+    codeTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) return resetCodeButton();
+      btn.textContent = `${left} 秒后重发`;
+    }, 1000);
+    $('#authHint').textContent = `验证码已发到 ${email}，${Math.round((out.ttl ?? 600) / 60)} 分钟内有效。`;
+  } catch (err) {
+    authError(err.message);
+    resetCodeButton();
+  }
 }
 
 async function submitAuth(event) {
@@ -2192,15 +2270,40 @@ async function submitAuth(event) {
   const form = event.target;
   const f = new FormData(form);
   const mode = authMode();
-  const payload = { name: String(f.get('name') ?? ''), password: String(f.get('password') ?? '') };
-  if (mode === 'register') payload.display = String(f.get('display') ?? '');
+  const mail = Boolean(state.auth?.mail);
   const btn = $('#authSubmit');
   btn.disabled = true;
   authError('');
   try {
+    if (mode === 'reset') {
+      await api('/api/auth/reset', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: String(f.get('email') ?? ''),
+          code: String(f.get('code') ?? ''),
+          newPassword: String(f.get('newPassword') ?? ''),
+        }),
+      });
+      setAuthMode('login');
+      $('#authHint').textContent = '密码改好了，用新密码登录。';
+      return;
+    }
+
+    const payload =
+      mode === 'register' && mail
+        ? {
+            email: String(f.get('email') ?? ''),
+            code: String(f.get('code') ?? ''),
+            display: String(f.get('display') ?? ''),
+            password: String(f.get('password') ?? ''),
+          }
+        : { name: String(f.get('name') ?? ''), password: String(f.get('password') ?? '') };
+    if (mode === 'register' && !mail) payload.display = String(f.get('display') ?? '');
+
     const out = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify(payload) });
-    applyAuth({ auth: true, user: out.user, firstRun: false });
+    applyAuth({ auth: true, user: out.user, firstRun: false, mail });
     form.reset();
+    resetCodeButton();
     await enterBoard();
     hint(mode === 'register' ? `注册好了，欢迎 ${out.user.display}` : `欢迎回来，${out.user.display}`);
   } catch (err) {
@@ -3309,6 +3412,8 @@ $('#recentProjects').addEventListener('click', (e) => {
 // —— 登录页 ——
 $('#authTabLogin').addEventListener('click', () => setAuthMode('login'));
 $('#authTabRegister').addEventListener('click', () => setAuthMode('register'));
+$('#authSendCode').addEventListener('click', sendCode);
+$('#authForgot').addEventListener('click', () => setAuthMode('reset'));
 $('#authForm').addEventListener('submit', submitAuth);
 $('#logout').addEventListener('click', logout);
 

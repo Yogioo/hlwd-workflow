@@ -36,13 +36,17 @@ import {
   countUsers,
   createSession,
   dropSession,
+  findUser,
   listUsers,
   publicUser,
   readSession,
   register,
   renameUser,
+  resetPassword,
   verify,
 } from './auth.mjs';
+import { mailEnabled } from './mail.mjs';
+import { VerifyError, consumeCode, issueCode } from './verify.mjs';
 import { getRun, latestRun, latestRuns, listRuns, readRunFile, setProjectDir } from './runs.mjs';
 import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
@@ -59,7 +63,7 @@ let HOST = process.env.HOST ?? '127.0.0.1';
 const TOKEN = String(process.env.WF_TOKEN ?? '').trim();
 // 账号登录：部署在没人守的机器上、同事从内网访问时默认开。单机自用可以 WF_AUTH=off 关掉。
 const AUTH = String(process.env.WF_AUTH ?? 'on').toLowerCase() !== 'off';
-const AUTH_OPEN = new Set(['/api/auth/me', '/api/auth/login', '/api/auth/register']);
+const AUTH_OPEN = new Set(['/api/auth/me', '/api/auth/login', '/api/auth/register', '/api/auth/code', '/api/auth/reset']);
 
 /** 内网可访问的地址：绑 0.0.0.0 时给同事的就是这些。 */
 function lanUrls(port) {
@@ -585,6 +589,8 @@ async function route(req, res, url) {
       auth: AUTH,
       user: user ? publicUser(user) : null,
       firstRun: AUTH && (await countUsers()) === 0,
+      // 配了发信邮箱才走「邮箱 + 验证码」；没配就退回用户名注册，功能不至于整块不可用
+      mail: AUTH ? await mailEnabled() : false,
       users: AUTH ? await listUsers() : [],
     });
   }
@@ -599,12 +605,68 @@ async function route(req, res, url) {
         return json(res, 200, { ok: true, user: null });
       }
       const body = await readBody(req);
+      let account;
+      if (pathname === '/api/auth/register') {
+        if (await mailEnabled()) {
+          // 邮箱注册：先验码，再建号。先查重，别把码白白用掉
+          const email = String(body.email ?? '').trim();
+          if (!email) throw new AuthError('注册需要邮箱和验证码');
+          if (await findUser(email)) throw new AuthError('这个邮箱已经注册过了，直接登录就行', 409);
+          await consumeCode({ email, code: body.code });
+          account = await register({ email, display: body.display, password: body.password });
+        } else {
+          account = await register(body);
+        }
+      } else {
+        account = await verify(body);
+      }
       // 注册完直接算登录：不用让人填两遍
-      const account = pathname === '/api/auth/register' ? await register(body) : await verify(body);
       setSessionCookie(res, await createSession(account.name));
       return json(res, pathname === '/api/auth/register' ? 201 : 200, { user: account, auth: AUTH });
     } catch (err) {
-      return json(res, err instanceof AuthError ? err.status : 400, { error: err.message });
+      const status = err instanceof AuthError || err instanceof VerifyError ? err.status : 400;
+      return json(res, status, { error: err.message });
+    }
+  }
+
+  // 发验证码：注册和找回密码共用。ip 只用来限流，不落别处。
+  if (pathname === '/api/auth/code') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    try {
+      if (!AUTH) throw new AuthError('这个看板没开登录（启动时设了 WF_AUTH=off）', 400);
+      const body = await readBody(req);
+      const email = String(body.email ?? '').trim();
+      const purpose = body.purpose === 'reset' ? 'reset' : 'register';
+      // 先按用途把明显的错挡掉：注册发码不发已注册的邮箱，重置发码不发没注册的邮箱
+      const existing = email ? await findUser(email) : null;
+      if (purpose === 'register' && existing) throw new AuthError('这个邮箱已经注册过了，直接登录就行', 409);
+      if (purpose === 'reset' && (!existing || !existing.email)) throw new AuthError('这个邮箱还没有注册过', 404);
+      const out = await issueCode({
+        email,
+        ip: req.socket.remoteAddress ?? '',
+        purpose,
+      });
+      return json(res, 200, out);
+    } catch (err) {
+      const status = err instanceof AuthError || err instanceof VerifyError ? err.status : 400;
+      return json(res, status, { error: err.message });
+    }
+  }
+
+  // 忘记密码：邮箱验证码 → 改密码 → 踢掉所有旧会话，回登录页
+  if (pathname === '/api/auth/reset') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    try {
+      if (!AUTH) throw new AuthError('这个看板没开登录（启动时设了 WF_AUTH=off）', 400);
+      const body = await readBody(req);
+      const target = await findUser(body.email);
+      if (!target || !target.email) throw new AuthError('这个邮箱还没有注册过', 404);
+      await consumeCode({ email: body.email, code: body.code });
+      await resetPassword(target.name, body.newPassword);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      const status = err instanceof AuthError || err instanceof VerifyError ? err.status : 400;
+      return json(res, status, { error: err.message });
     }
   }
 

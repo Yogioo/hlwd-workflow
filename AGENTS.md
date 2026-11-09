@@ -91,17 +91,34 @@ comment(id, text) -> void
 **Identity**（`web/auth.mjs`；web 与 engine 共用一个「actor」的说法）
 
 ```
-register({name, display, password}) -> user    # 第一个注册的人是 owner，其余 member
-verify({name, password}) -> user              # 失败抛 AuthError(401)，不区分「没这人」和「密码错」
+register({email, display, password}) -> user   # 邮箱注册（先验码）；没配发件邮箱时退回 {name, display, password}
+verify({name, password}) -> user              # name 可以是用户名或邮箱；失败抛 AuthError(401)，不区分「没这人」和「密码错」
 createSession(name) -> token / readSession(token) -> user / dropSession(token)
 changePassword(name, old, next, keepToken)    # 换密码顺手踢掉其他设备
+resetPassword(name, next)                     # 忘记密码：改完踢掉这个人的全部会话
 publicUser(user) -> {name, display, role, createdAt}   # 对外的唯一形状（不含 salt/hash）
 ```
 
-- 身份是**全局**的（`~/.hlwd/users.json`），HTTP 面只有 `GET /api/auth/me` 与 `POST /api/auth/{register,login,logout}`；cookie 里是随机 token，不是密码。
+- 邮箱注册时 `name` 就是规范化后的邮箱（小写、唯一）；老账号仍用用户名，登录时两种都能填。
+- 身份是**全局**的（`~/.hlwd/users.json`），HTTP 面是 `GET /api/auth/me` 与 `POST /api/auth/{register,login,logout,code,reset}`；cookie 里是随机 token，不是密码。
 - 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，人工关单/重开补一条工单开关评论。
 - `WF_AUTH=off` 关掉登录（单机自用）：不拦接口，写操作不带 actor，评论按 bd 的默认值记。
 - 权限**还没做**：`role` 已经存在（owner / member），以后判权限只改 auth.mjs，不动页面。
+
+**Mail**（`web/mail.mjs` + `web/verify.mjs`，只有 web 用）
+
+```
+sendMail({to, subject, text}) -> {ok, code}   # 只读 ~/.hlwd/mail.json；SMTP 465 直连 TLS，零依赖
+issueCode({email, ip, purpose}) -> {ok, cooldown, ttl}
+consumeCode({email, code}) -> {ok}            # 错/过期抛 VerifyError
+```
+
+- 配置是这台机器的 `~/.hlwd/mail.json`（0600，不进项目）：`{host, port, secure, user, pass, from, allowDomains}`；`WF_SMTP_*` 可覆盖。
+- 没配 `pass` 等于没开邮箱注册：`/api/auth/me` 返回 `mail:false`，注册退回「用户名 + 密码」，`POST /api/auth/code` 明确报 503。
+- 验证码在 `~/.hlwd/codes.json`（0600），只存 `sha256(salt + code)`：10 分钟有效、一次性、错 5 次作废、60 秒冷却、每邮箱 5 封/小时、每 IP 20 次/小时。
+- 域名白名单：`allowDomains` 没写就用发件邮箱的域名；不在名单里直接拒，不发信。
+- 发信失败不吞：接口返回 502 并带上 SMTP 原话；这次没送到的码同时作废，可以马上重试。
+- 注册和找回密码共用同一套码，`purpose` 只改邮件措辞（注册验证码 / 密码重置验证码）。
 
 **UserPrefs**（`web/prefs.mjs`，只有 web 读写）
 
@@ -305,7 +322,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 ```
 
 - 不给 `--project` 就用上次打开的项目；首次打开会自动建 `.hlwd/` 与 `.beads/`。
-- 看板默认要登录（部署在没人守的机器上时，同事从内网访问各自注册）：第一个访问的人看到的是「注册」，第一个账号是管理员；单机自用想省这一步就 `WF_AUTH=off`。
+- 看板默认要登录（部署在没人守的机器上时，同事从内网访问各自注册）：配好 `~/.hlwd/mail.json` 后，用公司邮箱收验证码注册，第一个账号是管理员；没配发件邮箱就退回「用户名 + 密码」注册。单机自用想省这一步就 `WF_AUTH=off`。
 - `work` 的参数原样透传：`--dry` / `--id <卡片>` / `--attempts N` / `--allow-dirty` / `--fresh`（忽略「发布失败只重试收尾」的捷径）。
 - 脚本 / 冒烟测试用一次性项目时，加 `WF_NO_REMEMBER=1`：这次调用不改「上次打开的项目」（否则下次 `node wf.mjs` 会指向临时目录）。
 - `engine` 一次只跑一张，跑完就退；要连续跑就外面套循环。
@@ -329,7 +346,7 @@ node wf.mjs board --bg                         # 收回本机（默认 127.0.0.1
 - 分享地址由 `/api/meta.share` 给出（每个非回环 IPv4 一条），终端里 `board` 与 `node wf.mjs` 都会打印。
 - 看板「设置 → 访问」能就地切换监听（`POST /api/board/bind {lan: true|false}`：关连接 → `server.close` → 再 `listen`，并写回 `board.json`）。
   不用填 IP、不重启进程；`0.0.0.0` 仍接受 `127.0.0.1`，所以开放时当前页面不断，收回时内网连接会断（预期）。
-- **内网按可信处理**：不做共享口令，靠每人一个账号区分到人；注册开放，以后换成邮箱注册。
+- **内网按可信处理**：不做共享口令，靠每人一个账号区分到人；注册要公司邮箱验证码（只允许 `allowDomains` 里的域名）。
   `WF_TOKEN` / `--token` 的代码还在，只用于临时把看板暴露到可信内网之外，不属于内网流程。
 - 「起停自动流水线」「查看门禁脚本」内网谁都能用：前者在服务器上起进程，后者只是 `GET /api/gate/script` 的只读文本。
 - 看板进程的信息（端口 / 绑的地址 / 口令）记在 `~/.hlwd/board.json`，`node wf.mjs` 用它探活和打印分享地址；`stop` 会删。
