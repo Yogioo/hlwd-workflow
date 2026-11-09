@@ -48,15 +48,18 @@ import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from '
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
 const ENGINE_WATCH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'engine', 'watch.mjs');
-const WATCH_LOG = path.join(os.homedir(), '.hlwd', 'watch.log');
+// 全局运行期信息（看板 / 流水线的进程信息）：跟账号一样属于这台机器
+const HOME_DIR = process.env.HLWD_HOME ? path.resolve(process.env.HLWD_HOME) : path.join(os.homedir(), '.hlwd');
+const WATCH_LOG = path.join(HOME_DIR, 'watch.log');
+const BOARD_FILE = path.join(HOME_DIR, 'board.json');
 const PORT = Number(process.env.PORT ?? 3100);
-const HOST = process.env.HOST ?? '127.0.0.1';
-// 设了口令就全站要口令：内网分享时至少不是裸奔（?token= 会记成 cookie，之后不用再带）
+// 监听地址可以在运行时切换（设置 → 访问），所以是 let；进程不重启
+let HOST = process.env.HOST ?? '127.0.0.1';
+// 可选的全站口令：内网按可信处理不需要；只用于把看板临时暴露到内网之外（?token= 记成 cookie）
 const TOKEN = String(process.env.WF_TOKEN ?? '').trim();
 // 账号登录：部署在没人守的机器上、同事从内网访问时默认开。单机自用可以 WF_AUTH=off 关掉。
 const AUTH = String(process.env.WF_AUTH ?? 'on').toLowerCase() !== 'off';
 const AUTH_OPEN = new Set(['/api/auth/me', '/api/auth/login', '/api/auth/register']);
-const isLoopbackAddr = (addr = '') => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 
 /** 内网可访问的地址：绑 0.0.0.0 时给同事的就是这些。 */
 function lanUrls(port) {
@@ -93,7 +96,7 @@ function appendCookie(res, value) {
   res.setHeader('set-cookie', [...list, value]);
 }
 
-// —— 访问口令（可选，内网分享时建议开） ——
+// —— 访问口令（可选，内网流程不用；只给临时对外暴露兜底） ——
 function cookieValue(req, name) {
   for (const part of String(req.headers.cookie ?? '').split(';')) {
     const [key, ...rest] = part.trim().split('=');
@@ -224,7 +227,7 @@ const runSig = (run) =>
       ].join('|')
     : '';
 
-// —— 门禁：只负责把用户送到那个文件（不读内容、不编辑，改脚本是编辑器的事） ——
+// —— 门禁：设置里只给路径与只读内容；页面不编辑脚本，改脚本是编辑器 + 版本库的事 ——
 async function gatePayload(dir) {
   const file = gateFile(dir);
   const exists = await fs
@@ -312,80 +315,21 @@ async function watchAction(dir, action) {
   }
   return { ...(await watchState(dir)), stopping: true };
 }
-function launch(cmd, args) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (ok, error) => {
-      if (settled) return;
-      settled = true;
-      resolve({ ok, error });
-    };
-    try {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
-      child.on('spawn', () => done(true));
-      child.on('error', (err) => done(false, err.message));
-      child.unref();
-    } catch (err) {
-      done(false, err.message);
-    }
-  });
-}
-
-/** 依次尝试几个打开方式，第一个起得来的算数。返回的是“当时用了哪个命令”。 */
-async function launchFirst(attempts, what) {
-  const errors = [];
-  for (const [cmd, args, label] of attempts) {
-    const res = await launch(cmd, args);
-    if (res.ok) return label ?? cmd;
-    errors.push(`${label ?? cmd}: ${res.error}`);
-  }
-  throw new Error(`打不开${what}（${errors.join('；')}）`);
-}
-
-/** PATH 里有没有这个命令：win32 下 spawn .cmd 需要 shell，所以先问一句再决定。 */
-function hasCommand(cmd) {
-  const [finder, args] = process.platform === 'win32' ? ['where.exe', [cmd]] : ['which', [cmd]];
-  return new Promise((resolve) => {
-    const child = spawn(finder, args, { stdio: 'ignore', windowsHide: true });
-    child.on('error', () => resolve(false));
-    child.on('close', (code) => resolve(code === 0));
-  });
-}
-
-/** target=editor 用编辑器打开脚本；target=folder 在文件管理器里定位到它。 */
-async function openGate(dir, target) {
-  const gate = await gatePayload(dir);
-  if (!gate.exists) throw new Error(`门禁脚本不存在：${gate.path}（重新打开项目会自动创建）`);
-  const win = process.platform === 'win32';
-  const mac = process.platform === 'darwin';
-
-  if (target === 'folder') {
-    const attempts = win
-      ? [['explorer.exe', [`/select,"${gate.path}"`], 'explorer']]
-      : mac
-        ? [['open', ['-R', gate.path], 'finder']]
-        : [['xdg-open', [path.dirname(gate.path)], 'xdg-open']];
-    const via = await launchFirst(attempts, '文件管理器');
-    return { ...gate, target, via };
-  }
-
-  // editor：自定义编辑器 > VS Code > 系统默认关联程序
-  const custom = (process.env.HLWD_EDITOR ?? '').trim().split(/\s+/).filter(Boolean);
-  const attempts = [];
-  if (custom.length) attempts.push([custom[0], [...custom.slice(1), gate.path], custom[0]]);
-  if (await hasCommand('code')) {
-    attempts.push(win ? ['cmd.exe', ['/c', 'code', '--goto', gate.path], 'code'] : ['code', ['--goto', gate.path], 'code']);
-  }
-  attempts.push(
-    win
-      ? ['cmd.exe', ['/c', 'start', '', gate.path], '系统默认程序']
-      : mac
-        ? ['open', [gate.path], '系统默认程序']
-        : ['xdg-open', [gate.path], 'xdg-open'],
-  );
-
-  const via = await launchFirst(attempts, '门禁脚本');
-  return { ...gate, target, via };
+/** 门禁脚本的只读视图：给看板的内嵌窗口看，远端一样能用；改文件仍然靠编辑器 + 版本库。 */
+async function gateScript(dir) {
+  const file = gateFile(dir);
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat) return { path: file, exists: false };
+  const raw = await fs.readFile(file, 'utf8');
+  const MAX = 256 * 1024; // 防止误把大文件塞进 JSON；正常门禁脚本远小于这个
+  return {
+    path: file,
+    exists: true,
+    size: stat.size,
+    mtime: stat.mtime.toISOString(),
+    truncated: raw.length > MAX,
+    content: raw.length > MAX ? raw.slice(0, MAX) : raw,
+  };
 }
 
 // 搜索：标题 + 描述 + 评论。评论按 issue.updated 缓存，避免每敲一个字都重跑 bd。
@@ -703,6 +647,31 @@ async function route(req, res, url) {
     });
   }
 
+  // 设置 → 访问：就地换监听地址（127.0.0.1 ⇄ 0.0.0.0），不重启进程、不用填 IP
+  if (pathname === '/api/board/bind') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    const body = await readBody(req);
+    if (typeof body.lan !== 'boolean') return json(res, 400, { error: '需要 lan: true|false' });
+    const nextHost = body.lan ? '0.0.0.0' : '127.0.0.1';
+    if (rebinding) return json(res, 409, { error: '正在切换监听地址，稍等' });
+    if (nextHost === HOST) return json(res, 200, { host: HOST, changed: false });
+    json(res, 200, { host: nextHost, changed: true });
+    // 先把回包写完再动监听，否则这次请求会被自己掐断
+    setTimeout(() => {
+      rebind(nextHost).catch(async (err) => {
+        console.error(`换成 ${nextHost} 失败：${err.message}`);
+        try {
+          await rebind(HOST);
+          console.error(`已退回 ${HOST}`);
+        } catch (fallback) {
+          console.error(`退回 ${HOST} 也失败：${fallback.message}`);
+          process.exit(1);
+        }
+      });
+    }, 300);
+    return;
+  }
+
   if (pathname === '/api/project') {
     if (req.method === 'GET') return json(res, 200, await projectPayload());
     if (req.method === 'POST') {
@@ -804,10 +773,7 @@ async function route(req, res, url) {
     const p = await project();
     if (req.method === 'GET') return json(res, 200, { watch: await watchState(p.dir) });
     if (req.method === 'POST') {
-      // 这个会在这台机器上起 AI：只允许本机点（内网只能看状态、派单）
-      if (!isLoopbackAddr(req.socket.remoteAddress)) {
-        return json(res, 403, { error: '只允许在本机开关自动流水线' });
-      }
+      // 服务本来就跑在服务器上，没有「本机用户」这回事：内网谁都能起停（内网按可信处理）
       const body = await readBody(req);
       const action = ['stop', 'force'].includes(body.action) ? body.action : 'start';
       return json(res, 200, { watch: await watchAction(p.dir, action) });
@@ -815,21 +781,12 @@ async function route(req, res, url) {
     return json(res, 405, { error: 'method not allowed' });
   }
 
-  // 设置里的「门禁」按钮：把用户送到 <项目>/.hlwd/gate.mjs
-  if (pathname === '/api/gate/open') {
-    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
-    // 这个接口会在这台机器上调起编辑器：内网分享时只能是本机自己点
-    if (!isLoopbackAddr(req.socket.remoteAddress)) {
-      return json(res, 403, { error: '只允许在本机打开门禁脚本；远程请直接改文件' });
-    }
-    const body = await readBody(req);
-    const target = body.target === 'folder' ? 'folder' : 'editor';
+  // 设置里的「查看门禁脚本」：只读文本，内网谁都能看（改文件靠编辑器 + 版本库）
+  if (pathname === '/api/gate/script') {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
     const p = await project();
-    try {
-      return json(res, 200, await openGate(p.dir, target));
-    } catch (err) {
-      return json(res, 400, { error: err.message });
-    }
+    const script = await gateScript(p.dir);
+    return json(res, script.exists ? 200 : 404, script);
   }
 
   if (pathname === '/api/issues') {
@@ -1051,7 +1008,72 @@ const server = http.createServer((req, res) => {
   });
 });
 
+
+let rebinding = false;
+
+/** 关一次再 listen 一次：成功返回 null，失败返回错误（EADDRINUSE 由调用方重试）。 */
+function listenOnce(host) {
+  return new Promise((resolve) => {
+    const onError = (err) => {
+      server.removeListener('listening', onListening);
+      resolve(err);
+    };
+    const onListening = () => {
+      server.removeListener('error', onError);
+      resolve(null);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(PORT, host);
+  });
+}
+
+/**
+ * 换监听地址：关掉现有连接和监听，再绑到新地址。进程不重启。
+ * 0.0.0.0 仍然接受 127.0.0.1 的访问，所以「开放到内网」不会掐断当前页面；
+ * 「收回本机」则会断开从内网地址进来的连接（预期行为）。
+ */
+async function rebind(nextHost) {
+  rebinding = true;
+  try {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(() => resolve()));
+    for (let i = 0; i < 40; i += 1) {
+      const err = await listenOnce(nextHost);
+      if (!err) {
+        HOST = nextHost;
+        await rememberBind(nextHost);
+        console.log(`监听已改为 ${nextHost}:${PORT}`);
+        if (nextHost !== '127.0.0.1' && nextHost !== 'localhost') {
+          console.log(`内网分享：${lanUrls(PORT).join('  ') || '没找到内网地址'}`);
+        }
+        return;
+      }
+      if (err.code !== 'EADDRINUSE') throw err;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    throw new Error('端口一直被占用，没能重新绑定');
+  } finally {
+    rebinding = false;
+  }
+}
+
+/** 把换过的监听地址写回 board.json：`node wf.mjs` 探活/打印分享地址时要读它。 */
+async function rememberBind(host) {
+  try {
+    const info = JSON.parse(await fs.readFile(BOARD_FILE, 'utf8'));
+    await fs.writeFile(
+      BOARD_FILE,
+      `${JSON.stringify({ ...info, host, port: PORT, pid: process.pid }, null, 2)}\n`,
+      'utf8',
+    );
+  } catch {
+    // 前台启动没有 board.json：不记也不影响
+  }
+}
+
 server.on('error', (err) => {
+  if (rebinding) return; // 切换监听期间的错误由 rebind 自己接
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${PORT} 已被占用（很可能看板已经在跑）。`);
     console.error(`→ 直接打开 http://127.0.0.1:${PORT}`);

@@ -1973,7 +1973,7 @@ body[data-mode='issue'] {
 .graph-canvas {
   position: relative;
   width: 100%;
-  height: 300px;
+  height: 340px;
   /* 图是只读拓扑：拖动不该有「选中文字 / 拖走元素」的反馈，唯一的动作是点 */
   user-select: none;
   -webkit-user-select: none;
@@ -1987,16 +1987,38 @@ body[data-mode='issue'] {
   inset: 0;
   width: 100%;
   height: 100%;
+  overflow: visible;
+}
+/* 边是 SVG，标签是 HTML：标签压在线上，用不透明底把线截断，一条线配一句话 */
+.graph-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 .ge {
   fill: none;
   stroke: var(--line-hi);
   stroke-width: 1.4;
-  opacity: 0.75;
+  opacity: 0.8;
+  transition: stroke-width 0.12s, opacity 0.12s;
 }
 .ge-retry,
 .ge-fail {
-  stroke-dasharray: 3 4;
+  stroke-dasharray: 5 4;
+}
+/* 箭头是真正的三角形，随最后一段路径旋转——方向不用猜 */
+.ge-arrow {
+  fill: var(--line-hi);
+}
+.ge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+}
+.ge-group.hot .ge {
+  stroke-width: 2.6;
+  opacity: 1;
 }
 .ge.t-done {
   stroke: color-mix(in srgb, var(--done) 50%, var(--line-hi));
@@ -2015,17 +2037,31 @@ body[data-mode='issue'] {
   stroke: color-mix(in srgb, var(--oops) 55%, var(--line-hi));
   opacity: 1;
 }
+.ge-arrow.t-done {
+  fill: color-mix(in srgb, var(--done) 65%, var(--line-hi));
+}
+.ge-arrow.t-live {
+  fill: var(--run);
+}
+.ge-arrow.t-warn {
+  fill: color-mix(in srgb, var(--review) 70%, var(--line-hi));
+}
+.ge-arrow.t-bad {
+  fill: color-mix(in srgb, var(--oops) 70%, var(--line-hi));
+}
 .ge-tag {
   position: absolute;
   transform: translate(-50%, -50%);
-  padding: 0 4px;
+  padding: 0 5px;
   border-radius: 4px;
   background: var(--card);
   color: var(--faint);
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 10.5px;
+  line-height: 15px;
   white-space: nowrap;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: default;
+  transition: color 0.12s, background 0.12s;
 }
 .ge-tag.t-done {
   color: var(--dim);
@@ -2035,6 +2071,28 @@ body[data-mode='issue'] {
 }
 .ge-tag.t-bad {
   color: #f0a19a;
+}
+.ge-tag.hot {
+  background: var(--line-hi);
+  color: var(--bone);
+}
+
+/* 图例：只解释线型，方向交给箭头 */
+.graph-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+  font-size: 11px;
+}
+.gk {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 1.5px solid var(--line-hi);
+}
+.gk-dash {
+  border-top-style: dashed;
 }
 .gnode {
   position: absolute;
@@ -2386,7 +2444,7 @@ body[data-mode='issue'] {
 }
 .graph-block .graph-canvas {
   flex: none;
-  height: 240px;
+  height: 300px;
 }
 .graph-block .graph-drawer {
   flex: 1;
@@ -2685,6 +2743,118 @@ body[data-mode='issue'] {
 .gate-actions button {
   font-size: 12px;
   padding: 4px 9px;
+}
+
+/* 设置 → 门禁脚本：只读弹窗（远端也能看，不依赖本机编辑器） */
+.gate-view {
+  padding: 18px 20px 20px;
+}
+.gate-path {
+  display: block;
+  margin: 10px 0 8px;
+  font-size: 12px;
+  color: var(--dim);
+  word-break: break-all;
+}
+.gate-code {
+  margin: 0;
+  max-height: 62vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--bone);
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* 设置 → 访问：只读现状 + 可复制的重启命令（绑定地址是进程启动参数） */
+.access-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.access-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+.access-item i {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--faint);
+}
+.access-item b {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--bone);
+  word-break: break-all;
+}
+.access-block {
+  margin-top: 14px;
+}
+.access-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.access-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.access-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--open);
+  text-decoration: none;
+  word-break: break-all;
+}
+.access-url:hover {
+  text-decoration: underline;
+}
+.access-url.is-preview {
+  color: var(--faint);
+  text-decoration: none;
+  cursor: default;
+}
+.access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.access-hint {
+  font-size: 12px;
+  color: var(--faint);
+}
+.access-manual {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+.access-manual code {
+  color: var(--dim);
+  user-select: all;
+}
+.access-notes {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.75;
+}
+.access-notes b {
+  color: var(--dim);
 }
 
 /* ---------- 设置：左侧分区 + 标签库 ---------- */

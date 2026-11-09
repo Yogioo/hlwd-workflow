@@ -13,8 +13,8 @@ const POS = {
   review: [63, 30],
   complete: [80, 30],
   closed: [92, 30],
-  rolled_back: [27, 78],
-  needs_human: [63, 78],
+  rolled_back: [27, 74],
+  needs_human: [63, 74],
 };
 
 const TONE_TEXT = { ok: '完成', live: '进行中', warn: '需注意', bad: '失败', idle: '未开始' };
@@ -29,25 +29,117 @@ const fmtTime = (at) => {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-/** 一条边怎么画：横向直连、回边从下面绕、竖向直连、斜向走贝塞尔。 */
-function edgeGeom(edge) {
-  const a = POS[edge.from];
-  const b = POS[edge.to];
+// 边的坐标必须按画布的真实像素算：原来的 viewBox 是 100x100 + preserveAspectRatio="none"，
+// 箭头会被横向拉扁，方向根本看不出来。现在 viewBox = 画布像素尺寸，节点仍用百分比定位。
+const TONES = ['idle', 'done', 'live', 'warn', 'bad'];
+const GAP = 2; // 线离节点边框的距离
+const RADIUS = 10; // 折线的圆角半径
+const LANE = 24; // 顶部回边通道之间的间距（容纳一行标签）
+
+const keyOf = (edge) => `${edge.from}->${edge.to}`;
+const n1 = (v) => Math.round(v * 10) / 10;
+
+/** 节点相对画布的位置（用 getBoundingClientRect，边框/padding 都不用自己算）。 */
+const rectOf = (el, origin) => {
+  const r = el.getBoundingClientRect();
+  const left = r.left - origin.left;
+  const top = r.top - origin.top;
+  return { left, top, right: left + r.width, bottom: top + r.height, cx: left + r.width / 2, cy: top + r.height / 2, w: r.width, h: r.height };
+};
+
+/** 折线 + 圆角：正交路由比贝塞尔更容易看出这条线从哪来到哪去，标签也才好压在线上。 */
+function polyline(points, radius = RADIUS) {
+  const pts = points.filter((p, i) => i === 0 || Math.abs(p.x - points[i - 1].x) + Math.abs(p.y - points[i - 1].y) > 0.2);
+  if (pts.length < 2) return '';
+  let d = `M${n1(pts[0].x)} ${n1(pts[0].y)}`;
+  for (let i = 1; i < pts.length - 1; i += 1) {
+    const prev = pts[i - 1];
+    const cur = pts[i];
+    const next = pts[i + 1];
+    const l1 = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const l2 = Math.hypot(next.x - cur.x, next.y - cur.y);
+    const rr = Math.min(radius, l1 / 2, l2 / 2);
+    const ax = cur.x - ((cur.x - prev.x) / l1) * rr;
+    const ay = cur.y - ((cur.y - prev.y) / l1) * rr;
+    const bx = cur.x + ((next.x - cur.x) / l2) * rr;
+    const by = cur.y + ((next.y - cur.y) / l2) * rr;
+    d += ` L${n1(ax)} ${n1(ay)} Q${n1(cur.x)} ${n1(cur.y)} ${n1(bx)} ${n1(by)}`;
+  }
+  const last = pts[pts.length - 1];
+  return `${d} L${n1(last.x)} ${n1(last.y)}`;
+}
+
+/**
+ * 一条边怎么画，返回路径 + 标签位置：
+ * - 同行向右：直连，标签在线上方
+ * - 同列向下：直连，标签压在线上
+ * - 回边（向左）：从源节点上沿出去，走自己的顶部通道，再从目标上沿回来（箭头朝下指进目标）
+ * - 落到下一行的终态：从源节点底部下去，横切到终态的侧面（箭头指进侧面）；
+ *   横切会穿过别的节点时，改从终端那一行的下面绕过去（收尾失败 → 退回待接）
+ */
+function edgeGeom(edge, rects, laneOf, entryOf, exitOf, height) {
+  const a = rects[edge.from];
+  const b = rects[edge.to];
   if (!a || !b) return null;
-  const [x1, y1] = a;
-  const [x2, y2] = b;
-  if (Math.abs(y1 - y2) < 0.5 && x2 < x1) {
-    const dip = y1 + (edge.from === 'review' ? 44 : 26);
-    return { d: `M${x1} ${y1}C${x1} ${dip} ${x2} ${dip} ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: dip - 2 };
+  const key = keyOf(edge);
+  const sx = a.cx + (exitOf.get(key) ?? 0);
+
+  if (Math.abs(a.cy - b.cy) < 6 && b.cx > a.cx) {
+    const y = (a.cy + b.cy) / 2;
+    return { d: polyline([{ x: a.right + GAP, y }, { x: b.left - GAP, y }]), lx: (a.right + b.left) / 2, ly: y - 13 };
   }
-  if (Math.abs(y1 - y2) < 0.5) {
-    return { d: `M${x1} ${y1}L${x2} ${y2}`, lx: (x1 + x2) / 2, ly: y1 - 2.5 };
+
+  if (Math.abs(a.cx - b.cx) < 6 && b.cy > a.cy) {
+    return { d: polyline([{ x: sx, y: a.bottom + GAP }, { x: b.cx, y: b.top - GAP }]), lx: sx, ly: (a.bottom + b.top) / 2 };
   }
-  if (Math.abs(x1 - x2) < 0.5) {
-    return { d: `M${x1} ${y1}L${x2} ${y2}`, lx: x1 + 2.5, ly: (y1 + y2) / 2 };
+
+  if (Math.abs(a.cy - b.cy) < 6 && b.cx < a.cx) {
+    const lane = laneOf.get(key);
+    if (lane == null) return null;
+    const ex = b.cx + (entryOf.get(key) ?? 0);
+    return {
+      d: polyline([
+        { x: a.cx, y: a.top - GAP },
+        { x: a.cx, y: lane },
+        { x: ex, y: lane },
+        { x: ex, y: b.top - GAP },
+      ]),
+      lx: (a.cx + ex) / 2,
+      ly: lane,
+    };
   }
-  const dip = Math.max(y1, y2) + (y2 > y1 ? 6 : 10);
-  return { d: `M${x1} ${y1}C${x1} ${dip} ${x2} ${dip} ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: Math.max(y1, y2) + 6 };
+
+  if (b.cy > a.cy) {
+    const y = b.cy;
+    const ex = b.cx > a.cx ? b.left - GAP : b.right + GAP;
+    // 横着切过去会不会穿过别的节点（比如从收尾直接横穿到最左边的终态）？
+    // 会穿就绕到终端那一行的下面，再多走一段，别把线压在节点上。
+    const blocked = Object.entries(rects).some(
+      ([id, r]) =>
+        id !== edge.from &&
+        id !== edge.to &&
+        y > r.top &&
+        y < r.bottom &&
+        Math.min(sx, ex) < r.right &&
+        Math.max(sx, ex) > r.left,
+    );
+    if (!blocked) {
+      return { d: polyline([{ x: sx, y: a.bottom + GAP }, { x: sx, y }, { x: ex, y }]), lx: (sx + ex) / 2, ly: y };
+    }
+    const bottom = Math.max(...Object.values(rects).map((r) => r.bottom));
+    const lane = Math.min(height - 16, bottom + 26);
+    return {
+      d: polyline([
+        { x: sx, y: a.bottom + GAP },
+        { x: sx, y: lane },
+        { x: b.cx, y: lane },
+        { x: b.cx, y: b.bottom + GAP },
+      ]),
+      lx: b.cx + (sx - b.cx) * 0.35,
+      ly: lane,
+    };
+  }
+  return null;
 }
 
 const nodeSub = (node, mode) => {
@@ -76,6 +168,11 @@ export function createGraph(root, options = {}) {
   let presets = [];
   let nodes = {};
   let selected = null;
+  let edgeSvg = null;
+  let labelsEl = null;
+  let hotEdge = null;
+  let raf = 0;
+  let lastSig = null;
 
   /** 节点挂的预设：找不到就像引擎一样回落到第一份（正常配置不会走到这里）。 */
   const presetIdOf = (stage) => {
@@ -101,20 +198,106 @@ export function createGraph(root, options = {}) {
     }
   };
 
-  const edgeSvg = (edge) => {
-    const g = edgeGeom(edge);
-    if (!g) return '';
-    const cls = `ge ${edge.kind ? `ge-${edge.kind}` : ''} t-${edge.tone ?? 'idle'}`;
-    return `<path class="${cls}" d="${g.d}" vector-effect="non-scaling-stroke" />`;
+  /** 按画布像素给边算路径：先量节点，再画线；标签跟着线走，窗口变了重算。 */
+  const layout = () => {
+    if (!graph || !edgeSvg || !labelsEl) return;
+    const base = edgeSvg.getBoundingClientRect();
+    if (base.width < 40 || base.height < 40) return; // 面板还藏着，等 ResizeObserver 再画
+    hotEdge = null; // 重画会换掉节点，旧的悬停状态跟着作废
+    edgeSvg.setAttribute('viewBox', `0 0 ${base.width} ${base.height}`);
+    edgeSvg.setAttribute('preserveAspectRatio', 'none');
+
+    // 节点用百分比定位，边按实际像素画——两边在同一坐标系里，箭头才不会被拉扁
+    const rects = {};
+    for (const node of graph.nodes) {
+      const el = canvas.querySelector(`[data-node="${CSS.escape(node.id)}"]`);
+      if (el) rects[node.id] = rectOf(el, base);
+    }
+
+    // 回边要走顶部通道：线越多通道越高，每条通道留出一行标签的高度
+    const tops = graph.nodes.filter((n) => rects[n.id] && rects[n.id].cy < base.height / 2).map((n) => rects[n.id].top);
+    const rowTop = tops.length ? Math.min(...tops) : base.height * 0.2;
+    const laneBase = Math.max(14, rowTop - 18);
+    const loops = graph.edges
+      .filter((e) => {
+        const a = rects[e.from];
+        const b = rects[e.to];
+        return a && b && Math.abs(a.cy - b.cy) < 6 && b.cx < a.cx;
+      })
+      .sort((e1, e2) => Math.abs(rects[e1.from].cx - rects[e1.to].cx) - Math.abs(rects[e2.from].cx - rects[e2.to].cx));
+    const laneOf = new Map();
+    loops.forEach((e, i) => laneOf.set(keyOf(e), Math.max(14, laneBase - i * LANE)));
+
+    // 同一个目标收到多条回边时错开进入点：绕得最远的那条走最左边，
+    // 它的竖线才不会横穿较短那条的横向通道（反过来就会在目标顶上打叉）。
+    const entryOf = new Map();
+    const byTo = new Map();
+    for (const e of loops) {
+      const list = byTo.get(e.to) ?? [];
+      list.push(e);
+      byTo.set(e.to, list);
+    }
+    for (const list of byTo.values()) {
+      list.forEach((e, i) => entryOf.set(keyOf(e), (list.length - 1 - i - (list.length - 1) / 2) * 26));
+    }
+
+    // 一个节点有多条向下的边（收尾 → 需要人处理 / 退回待接）时，出口左右错开：
+    // 绕远路的那条走外侧，否则两条线会从同一点出发、再互相横穿。
+    const exitOf = new Map();
+    const downOf = new Map();
+    for (const e of graph.edges) {
+      const a = rects[e.from];
+      const b = rects[e.to];
+      if (!a || !b || b.cy <= a.cy) continue;
+      const list = downOf.get(e.from) ?? [];
+      list.push(e);
+      downOf.set(e.from, list);
+    }
+    for (const list of downOf.values()) {
+      list.sort((e1, e2) => rects[e2.to].cx - rects[e1.to].cx);
+      list.forEach((e, i) => exitOf.set(keyOf(e), (i - (list.length - 1) / 2) * 28));
+    }
+
+    const defs = TONES.map(
+      (tone) =>
+        `<marker id="ge-arrow-${tone}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path class="ge-arrow t-${tone}" d="M0 0L8 4L0 8Z" /></marker>`,
+    ).join('');
+
+    labelsEl.textContent = '';
+    const shapes = [];
+    for (const edge of graph.edges) {
+      const g = edgeGeom(edge, rects, laneOf, entryOf, exitOf, base.height);
+      if (!g) continue;
+      const tone = edge.tone ?? 'idle';
+      const kind = edge.kind ? ` ge-${edge.kind}` : '';
+      const key = keyOf(edge);
+      shapes.push(
+        `<g class="ge-group t-${tone}" data-edge="${esc(key)}"><path class="ge${kind} t-${tone}" d="${g.d}" marker-end="url(#ge-arrow-${tone})" /><path class="ge-hit" d="${g.d}" /></g>`,
+      );
+      if (!edge.label) continue;
+      const tag = document.createElement('span');
+      tag.className = `ge-tag t-${tone}${kind}`;
+      tag.dataset.edge = key;
+      tag.style.left = `${g.lx}px`;
+      tag.style.top = `${g.ly}px`;
+      tag.textContent = edge.label;
+      labelsEl.append(tag);
+    }
+    edgeSvg.innerHTML = `<defs>${defs}</defs>${shapes.join('')}`;
   };
 
-  // 标签不能画在 SVG 里：viewBox 是 100x100 且 preserveAspectRatio="none"，
-  // 文字会被横向拉长。用同百分比定位的 HTML 标签，跟着容器走。
-  const edgeLabel = (edge) => {
-    if (!edge.label || !['retry', 'fail'].includes(edge.kind)) return '';
-    const g = edgeGeom(edge);
-    if (!g) return '';
-    return `<span class="ge-tag t-${edge.tone ?? 'idle'}" style="left:${g.lx}%;top:${g.ly}%">${esc(edge.label)}</span>`;
+  /** 悬停时把线和它的标签一起点亮：不用猜这段文字属于哪条虚线。 */
+  const setHot = (key) => {
+    if (key === hotEdge) return;
+    for (const el of canvas?.querySelectorAll('[data-edge]') ?? []) {
+      if (el.dataset.edge === hotEdge || el.dataset.edge === key) el.classList.toggle('hot', el.dataset.edge === key);
+    }
+    hotEdge = key ?? null;
+  };
+  const onPointerMove = (event) => {
+    if (!canvas) return;
+    const el = event.target.closest?.('[data-edge]');
+    setHot(el && canvas.contains(el) ? el.dataset.edge : null);
   };
 
   const toneOf = (node) => (opts.mode === 'template' ? 'plain' : node.tone ?? 'idle');
@@ -139,10 +322,13 @@ export function createGraph(root, options = {}) {
       )
       .join('');
 
+  // 图例只解释线型；方向由箭头表达，不用再写「箭头 = 方向」这种废话
+  const legendHtml = `<span class="graph-key"><i class="gk gk-solid"></i>正常流转</span><span class="graph-key"><i class="gk gk-dash"></i>回退 / 失败</span>`;
+
   const metaHtml = () => {
     if (!graph) return '';
     if (opts.mode === 'template') {
-      return `<span class="graph-hint">点节点查看并编辑它自己的提示词和 AI 预设（再点一次收起）。拓扑固定在代码里，不能拖动，也不能连线。</span>`;
+      return `<span class="graph-hint">点节点查看并编辑它自己的提示词和 AI 预设（再点一次收起）。拓扑固定在代码里，不能拖动，也不能连线。</span>${legendHtml}`;
     }
     const bits = [];
     if (graph.outcome) bits.push(`<span class="graph-pill">结局 <b>${esc(graph.outcome)}</b></span>`);
@@ -150,7 +336,7 @@ export function createGraph(root, options = {}) {
     if (graph.interrupted) bits.push('<span class="graph-pill bad">已中断</span>');
     if (graph.reopened) bits.push('<span class="graph-pill warn">工单已重新打开</span>');
     if (graph.live) bits.push('<span class="graph-pill live">正在跑</span>');
-    return bits.join('') || '<span class="graph-hint">还没有运行记录。这张图就是流程模板。</span>';
+    return (bits.join('') || '<span class="graph-hint">还没有运行记录。这张图就是流程模板。</span>') + legendHtml;
   };
 
   const render = () => {
@@ -158,16 +344,22 @@ export function createGraph(root, options = {}) {
       if (canvas) canvas.innerHTML = '';
       if (list) list.innerHTML = '';
       if (meta) meta.innerHTML = '';
+      edgeSvg = null;
+      labelsEl = null;
       return;
     }
     markPresets();
+    hotEdge = null;
     if (canvas) {
-      canvas.innerHTML =
-        `<svg class="graph-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">` +
-        graph.edges.map(edgeSvg).join('') +
-        `</svg>` +
-        graph.edges.map(edgeLabel).join('') +
-        graph.nodes.map(nodeHtml).join('');
+      canvas.innerHTML = graph.nodes.map(nodeHtml).join('');
+      edgeSvg = document.createElementNS(NS, 'svg');
+      edgeSvg.setAttribute('class', 'graph-edges');
+      edgeSvg.setAttribute('aria-hidden', 'true');
+      labelsEl = document.createElement('div');
+      labelsEl.className = 'graph-labels';
+      canvas.prepend(labelsEl);
+      canvas.prepend(edgeSvg);
+      layout();
     }
     if (list) list.innerHTML = listHtml();
     if (meta) meta.innerHTML = metaHtml();
@@ -255,7 +447,7 @@ export function createGraph(root, options = {}) {
     }
     if (node.id === 'gate') {
       return `<section><h4>门禁</h4><p class="graph-note">门禁是项目里的一个 JS 文件（进版本库），页面不编辑它。</p>
-        <div class="graph-actions"><button type="button" class="ghost" data-action="gate">打开脚本</button></div></section>`;
+        <div class="graph-actions"><button type="button" class="ghost" data-action="gate">查看脚本</button></div></section>`;
     }
     if (node.id === 'complete') {
       const cur = completeOf();
@@ -441,18 +633,38 @@ export function createGraph(root, options = {}) {
   root.addEventListener('click', onRootClick);
   // 双保险：万一浏览器把按钮当可拖元素，直接掐掉
   root.addEventListener('dragstart', (e) => e.preventDefault());
+  canvas?.addEventListener('pointermove', onPointerMove);
+  canvas?.addEventListener('pointerleave', () => setHot(null));
+  // 画布宽度跟着窗口走：节点是百分比，线是像素，尺寸变了必须重画
+  const ro = canvas
+    ? new ResizeObserver(() => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          layout();
+        });
+      })
+    : null;
+  ro?.observe(canvas);
   drawer.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') close();
   });
 
   return {
     update(next) {
+      // 卡片页每 2s 会拿同一份图来更新：没变就不重画，免得悬停/选中被打断
+      const sig = JSON.stringify(next ?? null);
+      if (sig === lastSig) return;
+      lastSig = sig;
       graph = next;
       if (selected && !graph?.nodes.some((n) => n.id === selected)) close(false);
       render();
     },
     setData({ graph: g, prompts: p, presets: ps, nodes: ns }) {
-      if (g) graph = g;
+      if (g) {
+        graph = g;
+        lastSig = JSON.stringify(g);
+      }
       if (p) prompts = p;
       if (ps) presets = ps;
       if (ns) nodes = ns;
@@ -461,6 +673,9 @@ export function createGraph(root, options = {}) {
     close,
     destroy() {
       root.removeEventListener('click', onRootClick);
+      canvas?.removeEventListener('pointermove', onPointerMove);
+      ro?.disconnect();
+      if (raf) cancelAnimationFrame(raf);
       close(false);
       graph = null;
     },

@@ -70,7 +70,7 @@ node engine/watch.mjs --project <dir> --status            # 一行 JSON 状态
 - 同一项目只跑一个（已有 pid 活着就拒绝再起）；不同项目互不干扰。
 - 停止是**协作式**：先写 `<项目key>.stop`，循环跑完手上这张才退（空转时最多 0.5s 就反应）；`--force`/看板上的「再点一下」会连子进程一起强杀（可能留下 `in_progress` 的单，需要人工改回待接）。
 - `wf.mjs work` 在流水线运行时拒绝（否则两个进程会同时接单）；`--dry` 不受影响。
-- web 侧：`GET /api/watch` 只读（内网也允许），`POST /api/watch {action: start|stop|force}` **仅本机**（它会在宿主机上起 AI）。
+- web 侧：`GET /api/watch` 只读，`POST /api/watch {action: start|stop|force}` 内网谁都能调（服务就跑在服务器上，没有「本机用户」这回事；内网按可信处理）。
 
 **WorkSource**（beads 适配层，`web` 与 `engine` 共用一份实现）
 
@@ -140,7 +140,8 @@ export default async ({workdir, issue, runDir, attempt, cfg})
 - 默认模板是 always true，新项目不会被门禁卡住；要真检查（测试/构建/lint/自定义规则）就改这个文件，不碰工具代码。
 - 原始输出留在 `<run>/gate-<attempt>.log`；结论（pass/reason/ms）进 `run.json` 的 `attempts[].gate` 与 journal 的 `gate` 事件。
 - 门禁不是审查：它只回答「机器能查的过没过」，代码质量、无关改动、假实现仍归 review。
-- 看板「设置」只显示它的路径 + 「打开脚本 / 打开所在目录 / 复制路径」（`POST /api/gate/open`，`HLWD_EDITOR` 可指定编辑器）——页面不编辑脚本，脚本进版本库、用编辑器改。
+- 看板「设置」只给路径 + 「查看脚本（只读窗口）/ 复制路径」（`GET /api/gate/script` 返回 `{path, exists, content, truncated}`，远端同样可用）。
+  页面**不编辑**脚本：改 `.hlwd/gate.mjs` 是克隆项目后用编辑器改、走版本库；engine 下一轮运行读新文件。
 
 **Publish**（`engine/git.mjs`，只在 engine 内部用；web 不读它）
 
@@ -320,14 +321,17 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 **内网分享**（给同网段的同事看/建/改单）
 
 ```bash
-node wf.mjs board --bg --lan --token 口令      # 推荐：带口令，打印每个网卡的分享地址
-node wf.mjs board --lan                        # 不带口令：本网段谁都能改单
-node wf.mjs board --host 192.168.1.7 --bg      # 只绑某块网卡
+node wf.mjs board --bg --lan                   # 绑 0.0.0.0，打印每块网卡的分享地址
+node wf.mjs board --host 192.168.1.7 --bg      # 只绑某块网卡（多网卡时更干净）
+node wf.mjs board --bg                         # 收回本机（默认 127.0.0.1）
 ```
 
-- 分享地址由 `/api/meta.share` 给出（每个非内网回环 IPv4 一条），终端里 `board` 与 `node wf.mjs` 都会打印。
-- 设了 `WF_TOKEN` / `--token` 就全站要口令：`http://ip:port/?token=口令` 打开一次，之后靠 cookie，不用一直带。
-- 即使开了口令，「设置 → 打开脚本/打开所在目录」也只允许**本机**调（`/api/gate/open` 校验 loopback 来源），远程只能改文件。
+- 分享地址由 `/api/meta.share` 给出（每个非回环 IPv4 一条），终端里 `board` 与 `node wf.mjs` 都会打印。
+- 看板「设置 → 访问」能就地切换监听（`POST /api/board/bind {lan: true|false}`：关连接 → `server.close` → 再 `listen`，并写回 `board.json`）。
+  不用填 IP、不重启进程；`0.0.0.0` 仍接受 `127.0.0.1`，所以开放时当前页面不断，收回时内网连接会断（预期）。
+- **内网按可信处理**：不做共享口令，靠每人一个账号区分到人；注册开放，以后换成邮箱注册。
+  `WF_TOKEN` / `--token` 的代码还在，只用于临时把看板暴露到可信内网之外，不属于内网流程。
+- 「起停自动流水线」「查看门禁脚本」内网谁都能用：前者在服务器上起进程，后者只是 `GET /api/gate/script` 的只读文本。
 - 看板进程的信息（端口 / 绑的地址 / 口令）记在 `~/.hlwd/board.json`，`node wf.mjs` 用它探活和打印分享地址；`stop` 会删。
 
 

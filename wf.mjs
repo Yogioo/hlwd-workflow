@@ -35,8 +35,9 @@ const HELP = `用法：node wf.mjs [--project <目录>] <动词>
 
   （不带参数）        我现在该干什么：工单概况 + 下一步
   board [--bg]       看板（建单、看全链路）；--bg 后台启动，马上返回
-                     --lan 绑 0.0.0.0 让内网同事打开；--token <口令> 加访问口令
+                     --lan 绑 0.0.0.0 让内网同事打开（内网按可信处理，不设口令）
                      --host <ip> 绑指定网卡（等价自选内网地址）
+                     --token <口令> 可选的全站口令，只用于临时暴露到内网之外
   stop               停掉后台看板
   work [参数]        让 AI 干下一张就绪单（--dry / --id <卡片> / --attempts N 原样透传）
   watch [--bg]       自动流水线：常驻，有就绪单就自动开干
@@ -155,7 +156,7 @@ function printShare(meta, token = '') {
   const share = meta?.share;
   if (!share || share.host === '127.0.0.1' || share.host === 'localhost') return false;
   const urls = share.lan ?? [];
-  console.log(`\n分享（内网，绑 ${share.host}）：${share.token ? '需要访问口令' : '没设口令，本网段谁都能建单/改单'}`);
+  console.log(`\n分享（内网，绑 ${share.host}）${share.token ? '：需要访问口令' : ''}`);
   if (!urls.length) console.log('  （没找到内网地址，检查网卡）');
   for (const url of urls) console.log(`  ${share.token ? `${url}/?token=${token || '<口令>'}` : url}`);
   return true;
@@ -228,7 +229,7 @@ async function status({ dir, cfg, info }) {
 
   console.log('\n下一步');
   if (!meta) console.log('  node wf.mjs board            起看板，建单 / 看全链路');
-  if (!meta) console.log('  node wf.mjs board --lan      同上，并暴露到内网给同事（可加 --token 口令）');
+  if (!meta) console.log('  node wf.mjs board --lan      同上，并暴露到内网给同事');
   if (!watch?.running) console.log('  node wf.mjs watch --bg       自动流水线：有就绪单就自动开干');
   if (ready.length) console.log('  node wf.mjs work             让 AI 干下一张就绪单');
   else console.log('  先在看板里建单（或 node wf.mjs new "标题"），再 work');
@@ -334,7 +335,7 @@ async function board(projectDir, flags) {
   setTimeout(() => openBrowser(localUrl(flags.token)), 700);
   console.log(`看板：${localUrl(flags.token)}`);
   if (bindHost !== '127.0.0.1' && bindHost !== 'localhost') {
-    console.log(`暴露到内网（绑 ${bindHost}）${flags.token ? '，已设访问口令' : '；没设 --token / WF_TOKEN，本网段谁都能改单'}`);
+    console.log(`暴露到内网（绑 ${bindHost}）${flags.token ? '，已设访问口令' : ''}`);
   }
   await saveBoardInfo(info);
   return child(process.execPath, [path.join(ROOT, 'web', 'server.mjs')], { cwd: projectDir, env });

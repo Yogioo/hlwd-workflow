@@ -286,6 +286,7 @@
             <button type="button" data-sec="presets">AI 预设</button>
             <button type="button" data-sec="engine">运行</button>
             <button type="button" data-sec="gate">门禁</button>
+            <button type="button" data-sec="access">访问</button>
           </nav>
           <p class="settings-side-note">工作流状态由 engine 固定管理：待接 → 执行 → 门禁 → 审查 → 完成。它不再作为工单字段配置。</p>
         </aside>
@@ -358,11 +359,41 @@
             <div class="gate-row">
               <code id="gatePath" class="mono">—</code>
               <div class="gate-actions">
-                <button type="button" class="ghost" id="gateOpen">打开脚本</button>
-                <button type="button" class="ghost" id="gateReveal">打开所在目录</button>
+                <button type="button" class="ghost" id="gateOpen">查看脚本</button>
                 <button type="button" class="ghost" id="gateCopy">复制路径</button>
               </div>
             </div>
+          </section>
+
+          <section class="settings-panel" data-panel="access" hidden>
+            <div class="settings-head">
+              <h3>访问</h3>
+              <p class="dialog-note" id="accessLead">看板默认只绑本机回环（<code>127.0.0.1</code>）。要让同网段的同事打开，用下面的命令重启看板——<b>监听地址是进程启动参数</b>，页面里改不了；重启不动工单和账号，浏览器换了地址重新登录一次即可。</p>
+            </div>
+            <div class="settings-grid access-grid">
+              <div class="access-item"><i>当前监听</i><b id="accessHost" class="mono">—</b></div>
+              <div class="access-item"><i>登录</i><b id="accessAuth">—</b></div>
+            </div>
+            <div class="access-block">
+              <div class="access-block-head"><span id="accessUrlsTitle">内网地址</span></div>
+              <div id="accessUrls" class="access-urls"></div>
+            </div>
+            <div class="access-block">
+              <div class="access-block-head"><span>切换监听</span></div>
+              <div class="access-actions">
+                <button type="button" class="primary" id="accessOpen">开放到内网</button>
+                <button type="button" class="ghost" id="accessClose" hidden>收回本机</button>
+                <span id="accessHint" class="access-hint"></span>
+              </div>
+              <p class="access-manual">不想点按钮就重启看板：<code class="mono">node wf.mjs board --bg --lan</code>（绑全部网卡，不用填 IP）。</p>
+            </div>
+            <ul class="access-notes">
+              <li>地址里可能混着 Tailscale / WSL 等虚拟网卡；同事能不能连通取决于网络，一般挑 <code>192.168</code> 或 <code>10.</code> 开头那条。</li>
+              <li>内网按可信处理：注册是开放的，能连上的人都能注册并改单（邮箱注册以后补）。</li>
+              <li>权限还没做：任何登录用户都能改任何工单；owner / member 目前只是记录。</li>
+              <li>「自动流水线」「查看门禁脚本」都在服务端跑/看，内网谁都能用；改门禁脚本要克隆项目改 <code>.hlwd/gate.mjs</code>。</li>
+              <li><code>stop</code> 会连自动流水线一起停；看板起来后按「运行」里的 <b>autoWatch</b> 自动拉起，或点右上角「自动流水线」。</li>
+            </ul>
           </section>
 
           <section class="settings-panel" data-panel="graph" hidden>
@@ -381,6 +412,14 @@
           </section>
         </div>
       </div>
+    </dialog>
+
+    <dialog id="gateView" class="dialog wide gate-view">
+      <button type="button" class="dialog-x" data-close aria-label="关闭">×</button>
+      <h2>门禁脚本</h2>
+      <p class="dialog-note">只读视图，内网谁都能看。要改：克隆项目后用编辑器改 <code>.hlwd/gate.mjs</code>（它进版本库），提交后 engine 下一轮就用新脚本。</p>
+      <code id="gateViewPath" class="mono gate-path">—</code>
+      <pre id="gateViewCode" class="mono gate-code">读取中…</pre>
     </dialog>
 
     <dialog id="projectDialog" class="dialog">

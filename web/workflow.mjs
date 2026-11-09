@@ -150,6 +150,8 @@ export const TOPOLOGY = {
     { from: 'review', to: 'complete', label: '通过' },
     { from: 'complete', to: 'closed' },
     { from: 'execute', to: 'rolled_back', label: '执行失败', kind: 'fail' },
+    // 收尾失败：engine 现在多走 publish_failed → needs_human，但这条回退路径仍保留在拓扑里，
+    // 画的是一条绕到终端行下面的回边（见 graph.js 的 edgeGeom），不和别的线抢通道。
     { from: 'complete', to: 'rolled_back', label: '收尾失败', kind: 'fail' },
     { from: 'gate', to: 'execute', label: '门禁未过', kind: 'retry' },
     { from: 'review', to: 'execute', label: '审查未过', kind: 'retry' },

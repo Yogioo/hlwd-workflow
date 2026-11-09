@@ -1,5 +1,5 @@
 // server 的集成测试：起一个真进程，验证访问口令（WF_TOKEN）与分享信息。
-// 只测只读接口，不碰 /api/gate/open——那会在本机真的拉起编辑器。
+// 只测只读接口 + 不跑 AI 的写接口：门禁脚本只看内容，不会在本机拉起编辑器/文件管理器。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -659,4 +659,75 @@ test('退回并附修正意见：评论 + 改回待接 + 打上可派标签；�
     },
     { beads: true },
   );
+});
+
+test('门禁脚本：只读查看，远端也能拿到内容（不再调本机编辑器）', async () => {
+  await withServer(async ({ base, dir }) => {
+    const t = `?token=${TOKEN}`;
+    await fetch(`${base}/api/meta${t}`); // 触发 openProject，确保 .hlwd/ 与 gate.mjs 已创建
+
+    await fs.writeFile(path.join(dir, '.hlwd', 'gate.mjs'), 'export default async () => true;\n', 'utf8');
+    const res = await fetch(`${base}/api/gate/script${t}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.exists, true);
+    assert.equal(body.path, path.join(dir, '.hlwd', 'gate.mjs'));
+    assert.match(body.content, /export default async/);
+    assert.equal(body.truncated, false);
+
+    // 文件被删掉：404 + exists=false，页面显示「不存在」而不是崩
+    await fs.rm(path.join(dir, '.hlwd', 'gate.mjs'));
+    const gone = await fetch(`${base}/api/gate/script${t}`);
+    assert.equal(gone.status, 404);
+    assert.equal((await gone.json()).exists, false);
+
+    // 写接口不再存在：门禁只在页面里看
+    assert.equal((await fetch(`${base}/api/gate/open${t}`, { method: 'POST', body: '{}' })).status, 404);
+  });
+});
+
+test('访问：一键切监听地址（127.0.0.1 ⇄ 0.0.0.0），不重启进程，写回 board.json', async () => {
+  await withServer(async ({ base, dir }) => {
+    const t = '?token=' + TOKEN;
+    const bind = (body) =>
+      fetch(base + '/api/board/bind' + t, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const waitHost = async (host) => {
+      for (let i = 0; i < 50; i += 1) {
+        try {
+          const meta = await (await fetch(base + '/api/meta' + t)).json();
+          if (meta.share?.host === host) return meta;
+        } catch {
+          // 换监听的空档，连接会断一下
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      throw new Error('等不到 host=' + host);
+    };
+
+    // 先把 board.json 摆好（真实场景里是 wf.mjs board --bg 写的）
+    const home = path.join(dir, 'home');
+    await fs.mkdir(home, { recursive: true });
+    await fs.writeFile(
+      path.join(home, 'board.json'),
+      JSON.stringify({ pid: process.pid, port: 0, host: '127.0.0.1', token: '', startedAt: 'x' }),
+    );
+
+    assert.equal((await bind({ lan: 'yes' })).status, 400, 'lan 必须是 boolean');
+
+    const open = await bind({ lan: true });
+    assert.equal(open.status, 200);
+    const opened = await waitHost('0.0.0.0');
+    assert.ok(opened.share.lan.length >= 1, '开放后要列出内网地址');
+    const afterOpen = JSON.parse(await fs.readFile(path.join(home, 'board.json'), 'utf8'));
+    assert.equal(afterOpen.host, '0.0.0.0', 'board.json 要跟着改，wf.mjs 才不会打印过期的分享地址');
+
+    assert.equal((await bind({ lan: false })).status, 200);
+    await waitHost('127.0.0.1');
+    const afterClose = JSON.parse(await fs.readFile(path.join(home, 'board.json'), 'utf8'));
+    assert.equal(afterClose.host, '127.0.0.1');
+  });
 });

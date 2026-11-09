@@ -72,6 +72,7 @@ const state = {
   combos: {}, // 标签快选的实例（工单页 / 新建工单）
   newComments: new Set(), // 页面开着期间新进来的评论（一直标记，刷新才清）
   auth: { auth: false, user: null, firstRun: false },
+  share: null, // 看板绑定与内网地址（/api/meta 的 share；设置 → 访问 用）
   authed: false,
   timer: null,
 };
@@ -197,6 +198,7 @@ function applyConfig(cfg) {
   }
   if (cfg.readyLabel) state.readyLabel = cfg.readyLabel;
   else if (cfg.engine?.readyLabel) state.readyLabel = cfg.engine.readyLabel;
+  if (cfg.share) state.share = cfg.share;
   fillPrioritySelect($('#createPriority'), 2);
   fillPrioritySelect($('#panelPriority'), state.current?.priority ?? 2);
 }
@@ -1667,7 +1669,7 @@ function ensureGraphView() {
     mode: 'run',
     cardId: () => state.current?.id ?? null,
     onOpenTurn: ({ runId, phaseKey }) => showTurnFromGraph({ runId, phaseKey }),
-    onOpenGate: () => openGate('gate'),
+    onOpenGate: showGateScript,
   });
   return state.graph.view;
 }
@@ -2230,6 +2232,8 @@ async function openSettings() {
     api('/api/tags')
       .then((payload) => ({ tags: payload.tags ?? [] }))
       .catch((error) => ({ error })),
+    // 设置 → 访问要显示「现在绑在哪、同事该用哪个地址」，顺手刷一次
+    api('/api/meta').then(applyConfig).catch(() => {}),
   ]);
   state.gate = gate ?? { path: '', exists: false };
   state.tagCatalog = tagResult.tags ?? [];
@@ -2253,7 +2257,7 @@ async function openSettings() {
   // 设置页的图：同一份拓扑，只是把「看回放」换成「改节点」
   state.settingsGraph ??= createGraph($('#settingsGraph'), {
     mode: 'template',
-    onOpenGate: () => openGate('gate'),
+    onOpenGate: showGateScript,
     onSaveNode: saveGraphNode,
     onEditPreset: openPresetFromNode,
   });
@@ -2265,8 +2269,82 @@ async function openSettings() {
   });
   renderTagList();
   renderPresetList();
+  renderAccess();
   showSettingsSection('tags');
   $('#settingsDialog').showModal();
+}
+
+/**
+ * 设置 → 访问：看板绑在哪、同事该用哪个地址、以及把「开放/收回」的重启命令复制走。
+ * 绑定地址是进程启动参数（HOST/--lan/--host），页面里改不了——否则看板得在请求中途杀掉自己。
+ */
+function renderAccess() {
+  const s = state.share ?? {};
+  const host = String(s.host ?? '');
+  const loopback = !host || host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  const port = s.port ?? 3100;
+
+  $('#accessHost').textContent = host ? `${host}:${port}` : '—';
+  $('#accessLead').innerHTML = loopback
+    ? '看板现在只绑本机回环（<code>127.0.0.1</code>）。点「开放到内网」就地切到 <code>0.0.0.0</code>：不填 IP、不重启进程，当前页面也不会断。'
+    : `看板现在绑在 <code>${esc(host)}</code>，同网段的人可以打开下面这些地址。点「收回本机」随时退回 <code>127.0.0.1</code>。`;
+  $('#accessAuth').textContent =
+    state.auth?.auth === false ? '免登录（WF_AUTH=off）' : '需要登录（每人一个账号）';
+
+  // 169.254.x 是链路本地（Tailscale / 虚拟网卡常见），不适合当给同事的地址，排后面
+  const entries = (Array.isArray(s.lan) ? s.lan : [])
+    .filter(Boolean)
+    .map((url) => {
+      try {
+        return { url, host: new URL(url).hostname };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const ordered = [...entries.filter((e) => !e.host.startsWith('169.254.')), ...entries.filter((e) => e.host.startsWith('169.254.'))];
+  $('#accessUrlsTitle').textContent = loopback ? '开放后同事用的地址（预演）' : '分享给同事的地址';
+  // 还绑在本机时这些地址根本不通，就别做成能点的链接，只当预演
+  const addr = (e) => `${esc(e.url)}${e.host.startsWith('169.254.') ? '（虚拟网卡）' : ''}`;
+  $('#accessUrls').innerHTML = ordered.length
+    ? ordered
+        .map((e) =>
+          loopback
+            ? `<span class="access-url is-preview">${addr(e)}</span>`
+            : `<a class="access-url" href="${esc(e.url)}" target="_blank" rel="noreferrer">${addr(e)}</a>`,
+        )
+        .join('')
+    : '<div class="empty">这台机器没有非回环的 IPv4（没联网？）</div>';
+
+  // 一键切换：服务端就地 close + listen，不重启进程，也不用填 IP
+  $('#accessOpen').hidden = !loopback;
+  $('#accessClose').hidden = loopback;
+  $('#accessHint').textContent = loopback
+    ? '点一下切到 0.0.0.0；当前 127.0.0.1 的页面不会断。'
+    : '当前已对内网开放；收回后，从内网地址打开的页面会断开。';
+}
+
+/** 剪贴板：从内网 http 地址打开时没有 navigator.clipboard，退回 execCommand。 */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    return ok;
+  }
 }
 
 /** 保存一个节点：AI 节点存提示词 + 所选预设；收尾节点只存「通过后是否提交」。 */
@@ -3096,29 +3174,78 @@ $('#createForm').addEventListener('submit', async (e) => {
 });
 
 $('#settings').addEventListener('click', () => openSettings().catch((err) => hint(err.message, true)));
-async function openGate(target) {
-  if (!state.gate?.path) return hint('当前项目还没有门禁路径', true);
+/** 门禁脚本的只读视图：在页面里直接看，不依赖编辑器 / 文件管理器，远端同事一样能用。 */
+async function showGateScript() {
+  const dlg = $('#gateView');
+  $('#gateViewPath').textContent = state.gate?.path ?? '—';
+  $('#gateViewCode').textContent = '读取中…';
+  if (!dlg.open) dlg.showModal();
   try {
-    const res = await api('/api/gate/open', { method: 'POST', body: JSON.stringify({ target }) });
-    hint(target === 'folder' ? `已在文件管理器里定位：${res.path}` : `已用 ${res.via} 打开：${res.path}`);
+    const res = await api('/api/gate/script');
+    $('#gateViewPath').textContent = res.path ?? state.gate?.path ?? '—';
+    $('#gateViewCode').textContent = res.truncated
+      ? `${res.content}\n\n…（文件太大，只显示前 256KB）`
+      : res.content;
   } catch (err) {
-    hint(`打不开，手动去改：${state.gate.path}`, true);
-    throw err;
+    $('#gateViewCode').textContent = `读不到：${err.message}`;
   }
 }
 
-$('#gateOpen').addEventListener('click', () => openGate('editor').catch((err) => hint(`打不开：${err.message}`, true)));
-$('#gateReveal').addEventListener('click', () => openGate('folder').catch((err) => hint(`打不开：${err.message}`, true)));
+$('#gateOpen').addEventListener('click', showGateScript);
 $('#gateCopy').addEventListener('click', async () => {
   const text = state.gate?.path ?? '';
   if (!text) return hint('当前项目还没有门禁路径', true);
-  try {
-    await navigator.clipboard.writeText(text);
-    hint(`已复制门禁路径：${text}`);
-  } catch {
-    hint('复制失败，请手动选中上面的路径', true);
-  }
+  const ok = await copyText(text);
+  hint(ok ? `已复制门禁路径：${text}` : '复制失败，请手动选中上面的路径', !ok);
 });
+
+/** 设置 → 访问：让服务端就地换监听地址（关掉监听再 listen，进程不重启）。 */
+async function bindBoard(lan) {
+  const btn = lan ? $('#accessOpen') : $('#accessClose');
+  if (!btn || btn.disabled) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '切换中…';
+  const want = lan ? '0.0.0.0' : '127.0.0.1';
+  try {
+    await api('/api/board/bind', { method: 'POST', body: JSON.stringify({ lan }) });
+    // 服务端先回包再换 listen：等 /api/meta 报出新 host（中间可能有一两百毫秒连不上）
+    let ok = false;
+    for (let i = 0; i < 25; i += 1) {
+      await new Promise((r) => setTimeout(r, 200));
+      const share = await api('/api/meta')
+        .then((cfg) => {
+          applyConfig(cfg);
+          return state.share;
+        })
+        .catch(() => null);
+      if (share?.host === want) {
+        ok = true;
+        break;
+      }
+    }
+    renderAccess();
+    if (!ok) {
+      hint(
+        lan
+          ? '已请求开放到内网，但没等到新地址生效：刷新看看，或看板日志'
+          : `已请求收回本机。若这个页面开始转圈，用 http://127.0.0.1:${state.share?.port ?? 3100} 重新打开`,
+        !lan,
+      );
+      return;
+    }
+    hint(lan ? '已开放到内网：同事可以直接打开上面的地址' : '已收回本机：内网地址已断开');
+  } catch (err) {
+    hint(`切换失败：${err.message}`, true);
+    renderAccess();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+$('#accessOpen').addEventListener('click', () => bindBoard(true));
+$('#accessClose').addEventListener('click', () => bindBoard(false));
 
 // 弹窗：点背景或右上角 × 就能关，不必滚到底部找「取消」
 for (const dialog of document.querySelectorAll('dialog.dialog')) {
