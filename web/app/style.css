@@ -3001,6 +3001,32 @@ body[data-mode='issue'] {
   color: var(--dim);
 }
 
+
+/* 设置 → 更新：状态一句话 + 检查/更新按钮（仓库信息复用 .access-item） */
+.update-state {
+  margin: 8px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.update-state.is-ok {
+  border-color: color-mix(in srgb, var(--done) 38%, var(--line));
+  color: var(--done);
+}
+.update-state.is-warn {
+  border-color: color-mix(in srgb, var(--run) 38%, var(--line));
+  color: var(--run);
+}
+.update-state.is-err {
+  border-color: color-mix(in srgb, var(--oops) 42%, var(--line));
+  color: var(--oops);
+}
+
 /* ---------- 设置：左侧分区 + 标签库 ---------- */
 
 .settings-dialog {

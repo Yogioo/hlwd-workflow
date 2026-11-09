@@ -307,6 +307,7 @@
             <button type="button" data-sec="engine">运行</button>
             <button type="button" data-sec="gate">门禁</button>
             <button type="button" data-sec="access">访问</button>
+            <button type="button" data-sec="update">更新</button>
           </nav>
           <p class="settings-side-note">工单状态是固定六段（新建 / 开发中 / 策划验收 / 测试验收 / 已完成 / 已归档），人工推进；AI 只负责接单、执行和交付。</p>
         </aside>
@@ -413,6 +414,33 @@
               <li>权限还没做：任何登录用户都能改任何工单；owner / member 目前只是记录。</li>
               <li>「自动流水线」「查看门禁脚本」都在服务端跑/看，内网谁都能用；改门禁脚本要克隆项目改 <code>.hlwd/gate.mjs</code>。</li>
               <li><code>stop</code> 会连自动流水线一起停；看板起来后按「运行」里的 <b>autoWatch</b> 自动拉起，或点右上角「自动流水线」。</li>
+            </ul>
+          </section>
+
+          <section class="settings-panel" data-panel="update" hidden>
+            <div class="settings-head">
+              <h3>更新</h3>
+              <p class="dialog-note">从<b>工具仓库</b>的远端拉取最新代码，然后重启看板。只更新工具本身（本仓库），不动当前项目的工单、配置和运行记录；自动流水线是独立进程，重新打开看板也不会打断正在跑的那张单。</p>
+            </div>
+            <div class="settings-grid access-grid">
+              <div class="access-item"><i>工具仓库</i><b id="updateRoot" class="mono">—</b></div>
+              <div class="access-item"><i>当前版本</i><b id="updateVersion" class="mono">—</b></div>
+              <div class="access-item"><i>远端</i><b id="updateRemote" class="mono">—</b></div>
+              <div class="access-item"><i>工作区</i><b id="updateDirty">—</b></div>
+            </div>
+            <div class="access-block">
+              <div class="access-block-head"><span>更新状态</span><span id="updateChecked" class="access-hint"></span></div>
+              <p id="updateState" class="update-state">点「检查更新」去远端看一眼；也可以直接「更新并重启」。</p>
+              <div class="access-actions">
+                <button type="button" class="ghost" id="updateCheck">检查更新</button>
+                <button type="button" class="primary" id="updateApply">更新并重启</button>
+              </div>
+            </div>
+            <ul class="access-notes">
+              <li>只走 <code>git fetch</code> + <code>git merge --ff-only</code>：不会丢弃本地提交，也不会 reset 文件；工作区有未提交改动时直接拒绝。</li>
+              <li>更新成功后看板会重启，当前页面短暂断开，然后自动重新加载；登录状态存在 <code>~/.hlwd/sessions.json</code>，不用重新登录。</li>
+              <li>工具目录不是独立的 git 仓库、没有 remote、或当前是 detached HEAD 时，这里会说明原因并禁用更新。</li>
+              <li>内网按可信处理：能打开设置的人都能点更新（和起停自动流水线一样）。</li>
             </ul>
           </section>
 
