@@ -17,7 +17,8 @@ import { ensureProject, readProjectConfig, readState, rememberProject as remembe
 const rememberProject = (dir) => (process.env.WF_NO_REMEMBER === '1' ? Promise.resolve(null) : rememberProjectRaw(dir));
 import * as beads from './web/beads.mjs';
 import { latestRuns, listRuns, setProjectDir } from './web/runs.mjs';
-import { WORKFLOW_COLUMNS, workflowOf } from './web/workflow.mjs';
+import { STAGES, stageOf } from './web/stages.mjs';
+import { workflowOf } from './web/workflow.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -196,7 +197,7 @@ async function useProject(explicitDir) {
   return { dir, info, cfg };
 }
 
-const statusName = (cfg, s) => cfg.labels.statuses[s] ?? s;
+const statusName = (s) => stageOf(s).label;
 const prioName = (cfg, p) => cfg.labels.priorities[p] ?? `P${p}`;
 
 async function status({ dir, cfg, info }) {
@@ -204,7 +205,7 @@ async function status({ dir, cfg, info }) {
   const runs = await latestRuns();
   const rows = issues.map((issue) => ({ issue, wf: workflowOf(issue, runs.get(issue.id)) }));
   const readyLabel = cfg.engine.readyLabel;
-  const counts = WORKFLOW_COLUMNS.map((c) => [c.label, rows.filter((r) => r.wf.column === c.id).length]);
+  const counts = STAGES.map((c) => [c.label, rows.filter((r) => stageOf(r.issue).id === c.id).length]);
   const ready = rows
     .filter((r) => r.issue.status === 'open' && r.issue.labels.includes(readyLabel) && !r.wf.active)
     .map((r) => r.issue);
@@ -242,11 +243,13 @@ async function trace(cardId, cfg) {
 
   console.log(`${issue.id}  ${issue.title}`);
   const wf = workflowOf(issue, runs[0] ?? null);
-  console.log(`进度 ${wf.label || wf.column}${wf.detail ? `（${wf.detail}）` : ''} · 负责人 ${issue.assignee || '—'} · 优先级 ${prioName(cfg, issue.priority)}`);
+  console.log(
+    `状态 ${stageOf(issue).label} · AI ${wf.label || '未运行'}${wf.detail ? `（${wf.detail}）` : ''} · 负责人 ${issue.assignees?.join('、') || '—'} · 优先级 ${prioName(cfg, issue.priority)}`,
+  );
 
   if (history.length) {
     console.log('\n工单开关变更');
-    for (const h of history) console.log(`  ${time(h.at)}  ${statusName(cfg, h.status)}${h.assignee ? ` · ${h.assignee}` : ''}`);
+    for (const h of history) console.log(`  ${time(h.at)}  ${statusName(h.status)}${h.assignee ? ` · ${h.assignee}` : ''}`);
   }
 
   if (!runs.length) {

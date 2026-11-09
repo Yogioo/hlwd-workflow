@@ -434,8 +434,8 @@ test('账号：没登录 401，注册后按人记账（创建者 / 评论作者 
     const change = after.data.comments.at(-1);
     assert.equal(change.author, '爱丽丝', '状态变更要署上是谁改的');
     assert.match(change.text, /状态/);
-    assert.match(change.text, /待接|open/);
-    assert.match(change.text, /执行中|in_progress/);
+    assert.match(change.text, /新建/);
+    assert.match(change.text, /开发中/);
 
     // 6) 第二个人：重名不行，密码错不行
     const dup = await call('/api/auth/register', {
@@ -745,7 +745,7 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
 });
 
 
-test('退回并附修正意见：评论 + 改回待接 + 打上可派标签；跑着的单拒绝', async () => {
+test('退回并附修正意见：评论 + 改回新建 + 打上可派标签；跑着的单拒绝', async () => {
   await withServer(
     async ({ base, dir }) => {
       const t = `?token=${TOKEN}`;
@@ -789,6 +789,70 @@ test('退回并附修正意见：评论 + 改回待接 + 打上可派标签；�
       );
       const busy = await post(`/api/issues/${issue.id}/revise`, { text: '再改一版' });
       assert.equal(busy.status, 409, '这一轮的提示词已经写死了，别假装退回成功');
+    },
+    { beads: true },
+  );
+});
+
+test('工单：状态六段 + 负责人/关注人多选 + 创建时间', async () => {
+  await withServer(
+    async ({ base }) => {
+      const t = `?token=${TOKEN}`;
+      const call = async (p, opts = {}) => {
+        const res = await fetch(`${base}${p}${t}`, {
+          ...opts,
+          headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+      };
+
+      const created = await call('/api/issues', {
+        method: 'POST',
+        body: JSON.stringify({ title: '多人协作', assignees: ['张三', '李四'], watchers: ['王五', '赵六'] }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.data));
+      const card = created.data.issue;
+      assert.equal(card.status, 'open');
+      assert.equal(card.stage.id, 'new');
+      assert.equal(card.assignee, '张三', 'bd 的 assignee 放第一个负责人');
+      assert.deepEqual(card.assignees, ['张三', '李四']);
+      assert.deepEqual(card.watchers, ['王五', '赵六']);
+      assert.ok(card.created, '工单要带创建时间');
+      assert.equal(card.closed, '');
+
+      // 状态改成策划验收：bd 用自定义状态，看板拿到固定的 stage
+      const plan = await call(`/api/issues/${card.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'plan_review' }),
+      });
+      assert.equal(plan.status, 200, JSON.stringify(plan.data));
+      assert.equal(plan.data.issue.status, 'plan_review');
+      assert.equal(plan.data.issue.stage.label, '策划验收');
+
+      const archived = await call(`/api/issues/${card.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'archived' }),
+      });
+      assert.equal(archived.data.issue.stage.label, '已归档');
+
+      const people = await call(`/api/issues/${card.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ assignees: ['李四', '赵六'], watchers: ['王五'] }),
+      });
+      assert.equal(people.status, 200);
+      assert.equal(people.data.issue.assignee, '李四');
+      assert.deepEqual(people.data.issue.assignees, ['李四', '赵六']);
+      assert.deepEqual(people.data.issue.watchers, ['王五']);
+
+      const detail = await call(`/api/issues/${card.id}`);
+      const log = detail.data.comments.map((c) => c.text).join('\n');
+      assert.match(log, /状态：新建 → 策划验收/);
+      assert.match(log, /状态：策划验收 → 已归档/);
+      assert.match(log, /负责人：李四、赵六/);
+      assert.match(log, /关注人：王五/);
+
+      assert.equal((await call(`/api/issues/${card.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'nope' }) })).status, 400);
+      assert.equal((await call(`/api/issues/${card.id}`, { method: 'PATCH', body: JSON.stringify({ assignees: '张三' }) })).status, 400);
     },
     { beads: true },
   );

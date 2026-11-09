@@ -1,5 +1,5 @@
 /* 工单看板 —— 值班台。
-   四条工作流列是流水线上真实的一串珠子：颜色只用来标进度，其余一律安静。
+   六条工单状态是流程上真实的一串珠子：颜色只用来标状态，其余一律安静。
    排版靠字号与间距分层，不靠圆角、阴影和渐变。 */
 
 :root {
@@ -18,7 +18,9 @@
   --open: #7fb0c9;
   --run: #e2b03c;
   --review: #b18bd8;
+  --test: #7cc0b0;
   --done: #4fb08a;
+  --archived: #6f858d;
   --oops: #e0685f;
 
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -84,7 +86,25 @@ body {
   margin: 0 5px;
 }
 
-/* 工作流进度 → 颜色；data-status 保留给旧链接/旧数据兜底 */
+/* 工单状态 → 颜色；data-status / data-workflow 保留给旧链接与旧数据兜底 */
+[data-stage="new"] {
+  --state: var(--open);
+}
+[data-stage="developing"] {
+  --state: var(--run);
+}
+[data-stage="plan_review"] {
+  --state: var(--review);
+}
+[data-stage="test_review"] {
+  --state: var(--test);
+}
+[data-stage="done"] {
+  --state: var(--done);
+}
+[data-stage="archived"] {
+  --state: var(--archived);
+}
 [data-workflow="queued"] {
   --state: var(--open);
 }
@@ -434,8 +454,8 @@ select {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(4, minmax(210px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(6, minmax(180px, 1fr));
+  gap: 14px;
   padding: 16px 20px calc(var(--bar-h) + 26px);
   align-items: start;
 }
@@ -825,6 +845,26 @@ select {
 .card-wf {
   margin-top: 7px;
 }
+/* 工单状态徽章：看板列、详情页 meta 共用；颜色来自 data-stage。 */
+.stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--state) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--state) 9%, transparent);
+  color: color-mix(in srgb, var(--state) 78%, var(--bone));
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+.stage-pill i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--state);
+}
 .panel-workflow {
   display: flex;
   flex-direction: column;
@@ -834,6 +874,110 @@ select {
 .panel-wf-when {
   color: var(--faint);
   font-size: 10.5px;
+}
+
+/* 负责人 / 关注人：可多选，也可以直接输入名字。 */
+.people-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.people-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 8px;
+  border: 1px solid var(--line-hi);
+  border-radius: 999px;
+  color: var(--bone);
+  font-size: 11.5px;
+  line-height: 18px;
+}
+.person-chip button {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.person-chip button:hover {
+  color: var(--oops);
+}
+.people-picker summary {
+  display: inline-block;
+  width: fit-content;
+  list-style: none;
+  cursor: pointer;
+}
+.people-picker summary::-webkit-details-marker {
+  display: none;
+}
+.people-picker summary::before {
+  content: '+ ';
+}
+.people-menu {
+  margin-top: 6px;
+  padding: 6px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line-hi);
+  border-radius: 6px;
+  background: var(--desk);
+}
+.people-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.people-opt:hover {
+  background: var(--card-hi);
+}
+.people-opt i {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 10px;
+  font-style: normal;
+}
+.people-empty {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.people-free {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.people-free input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line-hi);
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--bone);
+  font-size: 12px;
+}
+.people-free button {
+  padding: 3px 8px;
+  border: 1px solid var(--line-hi);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--bone);
+  font-size: 12px;
+  cursor: pointer;
 }
 .rail-label {
   color: var(--faint);
@@ -3189,7 +3333,13 @@ body[data-mode='issue'] {
 
 @media (max-width: 1180px) {
   .board {
-    grid-template-columns: repeat(2, minmax(200px, 1fr));
+    grid-template-columns: repeat(3, minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .board {
+    grid-template-columns: repeat(2, minmax(190px, 1fr));
   }
 }
 
@@ -3281,7 +3431,9 @@ body[data-mode='issue'] {
     padding-top: 2px;
   }
   .list-row .c-type,
+  .list-row .c-ai,
   .list-row .c-assignee,
+  .list-row .c-watchers,
   .list-row .c-createdby,
   .list-row .c-created,
   .list-row .c-updated,

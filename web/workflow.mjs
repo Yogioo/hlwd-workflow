@@ -1,15 +1,6 @@
-// 工作流进度：由 engine 的 run.json 派生，不是工单字段。
-// 工单只保留 open/closed + 标签；看板和详情页把 run 的当前步骤拼上来。
+// AI 进度：由 engine 的 run.json 派生，不是工单状态。
+// 工单状态在 web/stages.mjs；这里只画「AI 跑到哪一步」的徽章与只读节点图。
 // 这里不写任何状态：run.json 是运行记录，删掉只会丢追溯，不影响工单成立。
-
-export const WORKFLOW_COLUMNS = [
-  { id: 'queued', label: '待接', empty: '没有待接的单。' },
-  { id: 'active', label: '执行中', empty: '没有在跑的单。' },
-  { id: 'review', label: '审查中', empty: '没有在审查的单。' },
-  { id: 'done', label: '已完成', empty: '还没有完成的单。' },
-];
-
-export const WORKFLOW_ORDER = Object.fromEntries(WORKFLOW_COLUMNS.map((c, i) => [c.id, i]));
 
 const phase = (column, label, tone, { detail = '', active = false, run = null, attempt = null, retry = null } = {}) => ({
   column,
@@ -36,11 +27,13 @@ export const alive = (pid) => {
   }
 };
 
-/** 没有 run 时，用工单自己的开关（open/closed）和旧状态兜底。 */
+/** 没有 run 时，用工单自己的状态兜底；徽章只有在有 run 时才显示。 */
 function fromIssue(issue) {
   if (issue.status === 'closed') return phase('done', '已完成', 'ok');
-  if (issue.status === 'review') return phase('review', '审查中', 'live', { active: true });
-  if (issue.status === 'in_progress') return phase('active', '执行中', 'live', { active: true });
+  if (issue.status === 'archived') return phase('done', '已归档', 'idle');
+  if (issue.status === 'review') return phase('active', '开发中', 'idle');
+  if (issue.status === 'in_progress') return phase('active', '开发中', 'idle');
+  if (issue.status === 'plan_review' || issue.status === 'test_review') return phase('review', '验收中', 'idle');
   return phase('queued', '待接', 'idle');
 }
 
@@ -57,20 +50,27 @@ export function workflowOf(issue, run) {
   const n = last?.attempt ?? attempts.length ?? null;
   const round = n ? `第 ${n} 轮` : '';
 
-  // 人工关单是最终态，不能被上一次 run 的 running 覆盖。
-  if (issue.status === 'closed') {
-    return phase('done', '已完成', 'ok', {
+  // 人工关单/归档是最终态，不能被上一次 run 的 running 覆盖。
+  if (issue.status === 'closed' || issue.status === 'archived') {
+    const label = issue.status === 'archived' ? '已归档' : '已完成';
+    return phase('done', label, 'ok', {
       detail: run.outcome === 'running' ? 'AI 仍在跑，但工单已被人工关闭' : run.commit ? `提交 ${run.commit}` : '',
       run,
       attempt: n || null,
     });
   }
 
-  // 上一次已经完成，但工单被重新打开了：回到待接，别再显示「已完成」。
-  if (run.outcome === 'closed') {
-    return phase('queued', '待接', 'idle', { detail: '上次已完成，重新打开后待接', run, attempt: n || null });
+  // AI 交付完成。状态由人推进：还在开发中 = 等人工验收；已经进入验收 = 验收中。
+  // （旧 run 的 outcome 叫 closed；新 run 叫 delivered，两者都表示「AI 干完了」。）
+  if (run.outcome === 'delivered' || run.outcome === 'closed') {
+    if (issue.status === 'open') {
+      return phase('queued', '上次已交付', 'idle', { detail: '改回新建，待重派', run, attempt: n || null });
+    }
+    if (issue.status === 'plan_review' || issue.status === 'test_review') {
+      return phase('review', 'AI 已完成', 'ok', { detail: '验收中', run, attempt: n || null });
+    }
+    return phase('active', 'AI 已完成', 'ok', { detail: '待人工验收', run, attempt: n || null });
   }
-
   if (run.outcome === 'running') {
     // 新 run 会写 pid；进程不在了就别假装还在跑。
     if (run.pid && !alive(run.pid)) {
@@ -139,16 +139,16 @@ export const TOPOLOGY = {
     { id: 'gate', label: '门禁', kind: 'mech' },
     { id: 'review', label: '审查', kind: 'ai', stage: 'review' },
     { id: 'complete', label: '收尾', kind: 'mech' },
-    { id: 'closed', label: '已关闭', kind: 'end' },
+    { id: 'delivered', label: '已交付', kind: 'end' },
     { id: 'needs_human', label: '需要人处理', kind: 'end' },
-    { id: 'rolled_back', label: '退回待接', kind: 'end' },
+    { id: 'rolled_back', label: '退回新建', kind: 'end' },
   ],
   edges: [
     { from: 'claim', to: 'execute' },
     { from: 'execute', to: 'gate', label: '执行成功' },
     { from: 'gate', to: 'review', label: '通过' },
     { from: 'review', to: 'complete', label: '通过' },
-    { from: 'complete', to: 'closed' },
+    { from: 'complete', to: 'delivered' },
     { from: 'execute', to: 'rolled_back', label: '执行失败', kind: 'fail' },
     // 收尾失败：engine 现在多走 publish_failed → needs_human，但这条回退路径仍保留在拓扑里，
     // 画的是一条绕到终端行下面的回边（见 graph.js 的 edgeGeom），不和别的线抢通道。
@@ -163,13 +163,14 @@ export const TOPOLOGY = {
 };
 
 const TERMINAL_BY_OUTCOME = {
-  closed: 'closed',
+  delivered: 'delivered',
+  closed: 'delivered', // 旧 run 的 outcome
   needs_human: 'needs_human',
   rolled_back: 'rolled_back',
   // 发布失败：代码已过审查，人只要修好推送/PR 的环境再重试收尾
   publish_failed: 'needs_human',
 };
-const TERMINAL_TONE = { closed: 'ok', needs_human: 'warn', rolled_back: 'bad' };
+const TERMINAL_TONE = { delivered: 'ok', needs_human: 'warn', rolled_back: 'bad' };
 
 const clip = (text, max = 60) => {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -308,8 +309,8 @@ export function graphOf(issue, run) {
     edges,
     live,
     interrupted,
-    // 人工关过又重开：轨迹还是那次完成的，但工单已经不在完成态了
-    reopened: issue?.status !== 'closed' && run.outcome === 'closed',
+    // 人工把交付后的单改回「新建」= 明确重开；停在开发中/验收中只是等验收，不算重开
+    reopened: issue?.status === 'open' && (run.outcome === 'delivered' || run.outcome === 'closed'),
     outcome: run.outcome ?? null,
     attempt: trail.findLast((s) => s.attempt != null)?.attempt ?? null,
     attempts: attempts.size,

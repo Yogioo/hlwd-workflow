@@ -75,18 +75,30 @@ test('审查未过同样回炉，审查节点标 warn', () => {
   assert.equal(edge(g, 'review', 'execute').tone, 'live');
 });
 
-test('完成：一路 ok，终态是已关闭', () => {
+test('交付：一路 ok，终态是已交付（不是关单）', () => {
   const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
-  const g = graphOf(card({ status: 'closed' }), run({ attempts, outcome: 'closed', endedAt: '2026-01-01T00:01:00.000Z' }));
+  const g = graphOf(card({ status: 'in_progress' }), run({ attempts, outcome: 'delivered', endedAt: '2026-01-01T00:01:00.000Z' }));
   assert.equal(node(g, 'complete').tone, 'ok');
-  assert.equal(node(g, 'closed').tone, 'ok');
+  assert.equal(node(g, 'delivered').tone, 'ok');
   assert.equal(node(g, 'needs_human').tone, 'idle');
-  assert.equal(edge(g, 'complete', 'closed').tone, 'done');
+  assert.equal(edge(g, 'complete', 'delivered').tone, 'done');
   assert.equal(g.live, false);
   assert.equal(g.reopened, false);
+  // 旧 run 的 outcome=closed 也落在「已交付」节点上
+  const old = graphOf(card({ status: 'closed' }), run({ attempts, outcome: 'closed' }));
+  assert.equal(node(old, 'delivered').tone, 'ok');
 });
 
-test('执行失败：直接落到退回待接，不经过门禁', () => {
+test('交付后进度：开发中 = AI 已完成待验收，不把工单显示成待接', () => {
+  const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
+  const wf = workflowOf(card({ status: 'in_progress' }), run({ attempts, outcome: 'delivered' }));
+  assert.equal(wf.label, 'AI 已完成');
+  assert.match(wf.detail, /待人工验收/);
+  assert.equal(wf.active, false);
+  assert.equal(workflowOf(card({ status: 'open' }), run({ attempts, outcome: 'delivered' })).column, 'queued');
+});
+
+test('执行失败：直接落到退回新建，不经过门禁', () => {
   const attempts = [{ attempt: 1, execute: { ok: false, error: 'agent 超时' } }];
   const g = graphOf(card({ status: 'open' }), run({ attempts, outcome: 'rolled_back' }));
   assert.equal(node(g, 'execute').tone, 'bad');
@@ -108,7 +120,7 @@ test('轮次用尽：最后一轮的门禁指向需要人处理', () => {
   assert.equal(edge(g, 'gate', 'execute').tone, 'done');
 });
 
-test('收尾失败：从收尾指向退回待接', () => {
+test('收尾失败：从收尾指向退回新建', () => {
   const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
   const g = graphOf(card(), run({ attempts, outcome: 'rolled_back' }));
   assert.equal(node(g, 'rolled_back').tone, 'bad');
@@ -149,7 +161,7 @@ test('进程没了：最后一个节点标成已中断，不再算 live', () => 
 
 test('人工重开：轨迹还在，但标记为 reopened', () => {
   const attempts = [{ attempt: 1, execute: { ok: true }, gate: { pass: true }, review: { pass: true } }];
-  const g = graphOf(card({ status: 'open' }), run({ attempts, outcome: 'closed' }));
+  const g = graphOf(card({ status: 'open' }), run({ attempts, outcome: 'delivered' }));
   assert.equal(g.reopened, true);
-  assert.equal(node(g, 'closed').tone, 'ok');
+  assert.equal(node(g, 'delivered').tone, 'ok');
 });

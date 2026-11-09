@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 自动流水线：常驻循环，有「待接 + 可派」的单就跑一张，跑完接着看，没有就等。
+// 自动流水线：常驻循环，有「新建 + 可派」的单就跑一张，跑完接着看，没有就等。
 // 单进程 + 心跳文件（~/.hlwd/watch/<项目>.json）：看板和终端只读状态，不替它做决定。
 //
 //   node engine/watch.mjs --project <dir> [--interval 5000]   # 前台跑（日志就在终端）
@@ -213,7 +213,7 @@ async function main() {
     await sleep(600);
     await fs.rm(stopFile(dir), { force: true });
     await writeWatch(dir, { state: 'stopped', card: null, childPid: null, stoppedAt: new Date().toISOString() });
-    console.log('已强停' + (state.card ? `；卡在 ${state.card} 上，需要的话把状态改回待接` : ''));
+    console.log('已强停' + (state.card ? `；卡在 ${state.card} 上，需要的话把状态改回新建或继续开发` : ''));
     return 0;
   }
   if (args.stop) {

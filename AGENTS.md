@@ -1,7 +1,7 @@
 # AGENTS.md
 
 一个**本地工具**：看板 + AI 工作流。它自己不存业务数据——数据都在被打开的那个**项目目录**里。
-人建单、AI 干活：**接单 → 执行 → 门禁 → 审查 → 完成工单**。
+人建单、AI 干活：**接单 → 执行 → 门禁 → 审查 → 交付 PR**；人验收后才推进工单状态。
 
 ## 1. 三条铁律
 
@@ -14,8 +14,8 @@
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `beads`（`bd`） | 工单存储与状态，每个项目一份 | 不跑 AI、不判验收 |
-| `web` | 看板、建单、改单、标签库、关单/重开、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
-| `engine` | 接单 → 执行 → 门禁 → 审查 → 回写结论；`watch.mjs` 常驻循环自动接单 | 不渲染页面、不定义工单字段 |
+| `web` | 看板、建单、改单、状态/负责人/关注人、标签库、归档/恢复、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
+| `engine` | 接单 → 执行 → 门禁 → 审查 → 交付 PR、回写结论；`watch.mjs` 常驻循环自动接单 | 不渲染页面、不定义工单字段、不替人做验收 |
 | `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
 数据流：`人 → web → beads → engine → beads → web → 人`。web 与 engine 互不调用，beads 是消息总线。
@@ -68,7 +68,7 @@ node engine/watch.mjs --project <dir> --status            # 一行 JSON 状态
 - 心跳：`~/.hlwd/watch/<项目key>.json`（`{pid, state: idle|running|stopped, card, lastCode, lastError, beatAt, interval, stopping}`）；`running` 以 pid 还活着为准，不靠文件自证。
 - 每张单起独立的 `engine/run.mjs` 子进程：单张崩了不带走循环，进程退出也不留残留状态。
 - 同一项目只跑一个（已有 pid 活着就拒绝再起）；不同项目互不干扰。
-- 停止是**协作式**：先写 `<项目key>.stop`，循环跑完手上这张才退（空转时最多 0.5s 就反应）；`--force`/看板上的「再点一下」会连子进程一起强杀（可能留下 `in_progress` 的单，需要人工改回待接）。
+- 停止是**协作式**：先写 `<项目key>.stop`，循环跑完手上这张才退（空转时最多 0.5s 就反应）；`--force`/看板上的「再点一下」会连子进程一起强杀（可能留下 `in_progress` 的单，需要人工改回新建或继续开发）。
 - `wf.mjs work` 在流水线运行时拒绝（否则两个进程会同时接单）；`--dry` 不受影响。
 - web 侧：`GET /api/watch` 只读，`POST /api/watch {action: start|stop|force}` 内网谁都能调（服务就跑在服务器上，没有「本机用户」这回事；内网按可信处理）。
 
@@ -83,7 +83,10 @@ update(id, patch) -> Issue     # 含状态迁移
 comment(id, text) -> void
 ```
 
-- `Issue` 最小字段集：`id, title, body, status, labels, assignee, created, updated, createdBy`。`status` 只剩 `open/closed` 作为系统开关；界面不把它当工作流，也不配置它。
+- `Issue` 最小字段集：`id, title, body, status, labels, assignee, assignees, watchers, created, updated, closed, createdBy`。
+- `status` 是工单的规范化状态：`open`（新建）/ `in_progress`（开发中）/ `plan_review`（策划验收）/ `test_review`（测试验收）/ `closed`（已完成）/ `archived`（已归档）。前三个是 bd 内置，后三个通过 `ensureWorkflowStatuses()` 写进项目自己的 `status.custom`（`plan_review:active`、`test_review:active`、`archived:frozen`）。旧数据里的 `review` 读取时归入「开发中」。
+- `assignee` 是 bd 原生主负责人（单人，放名单第一个）；完整负责人名单在 metadata `assignees`（JSON 数组），关注人在 metadata `watchers`（JSON 数组）。两者都可以多选，名单里存显示名。
+- `closed` 是 bd 原生的 `closed_at`：工单真正完成的时间，不是 run 的结束时间。
 - `createdBy` 是 bd 原生字段：建单时把 `--actor` 传进去，谁建的就是谁。
 - 写操作都能带 `actor`（`createIssue / updateIssue / commentIssue`）。没带就用 `setActor()` 设的默认值（engine 设成 `cfg.actor`）；都没有就不带，由 bd 回落到 git user。
 - 只能用 `bd` CLI（或 beads 官方 HTTP 接口）。禁止直连 `.beads/*.db` 写数据。
@@ -101,7 +104,7 @@ publicUser(user) -> {name, display, role, createdAt}   # 对外的唯一形状�
 
 - 邮箱注册时 `name` 就是规范化后的邮箱（小写、唯一）；老账号仍用用户名，登录时两种都能填。
 - 身份是**全局**的（`~/.hlwd/users.json`），HTTP 面是 `GET /api/auth/me` 与 `POST /api/auth/{register,login,logout,code,reset}`；cookie 里是随机 token，不是密码。
-- 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，人工关单/重开补一条工单开关评论。
+- 登录后所有写操作都带 `actor = 显示名`：建单记 `created_by`，评论记作者，人工改状态/归档/换负责人/改关注人补一条对应评论。
 - `WF_AUTH=off` 关掉登录（单机自用）：不拦接口，写操作不带 actor，评论按 bd 的默认值记。
 - 权限**还没做**：`role` 已经存在（owner / member），以后判权限只改 auth.mjs，不动页面。
 
@@ -128,9 +131,10 @@ prefsFor(user, projectDir) -> {list: {columns, sort, presets}}
 savePrefs(user, projectDir, {list}) -> {list}
 ```
 
-- `columns`: `[{id, w, hidden}]`，id 取自固定候选集（workflow / priority / type / title / assignee / createdBy / created / updated / labels / comments / ready / id），`w` 夹在 56–720。旧文件里的 `status` 列会在读取时迁成 `workflow`。
+- `columns`: `[{id, w, hidden}]`，id 取自固定候选集（stage / ai / priority / type / title / assignee / watchers / createdBy / created / updated / labels / comments / ready / id），`w` 夹在 56–720。旧文件里的 `status` / `workflow` 列会在读取时迁成 `stage`。
 - `sort`: `{key, dir}`，单列排序；`presets`: `[{id, name, filter}]`，最多 30 条。
-- `filter` 只有 AND 组合：`q / ready / workflow[] / priority[] / type[] / assignee[] / createdBy[] / labels[] / updated{period, from, to}`，没有 OR、没有表达式。旧预设里的 `status[]` 会按 `open→queued / in_progress→active / review→review / closed→done` 迁移。
+- `filter` 只有 AND 组合：`q / ready / stage[] / priority[] / type[] / assignee[] / createdBy[] / labels[] / updated{period, from, to}`，没有 OR、没有表达式。旧预设里的 `workflow[]` / `status[]`（AI 进度）按 `queued→new / active→developing / review→developing / done→done` 迁成 `stage[]`。
+- `assignee[]` 按「名单里任意一个人」匹配，不是只匹配 bd 的单个 assignee。
 - 存的键是「项目绝对路径」，所以换项目是另一套；新项目没见过就继承 `defaults` 里的列与排序（每次保存都会把 `defaults` 滚成刚存的那套）。预设不继承：它是给某个项目存的筛选。
 - 校验在服务端做：不认识的值一律丢掉，文件被手改坏也只是回落到默认列，不会让页面崩。
 - HTTP 面只有 `GET /api/prefs` 与 `PUT /api/prefs`，只读写**当前登录人**自己的文件，不暴露别人的。
@@ -172,7 +176,7 @@ returnToBase(workdir, {base, remote}) -> {ok, error}
 resumablePublish(run) -> {runId, commit, git, attempts} | null   # run.json 里 outcome=publish_failed 才算
 ```
 
-- 顺序固定：**提交 → 推送 → 建 PR → 关单**；前一步失败后面不做，**任何一步失败都不关单**（工单停在 in_progress，评论写原因）。
+- 顺序固定：**提交 → 推送 → 建 PR**；前一步失败后面不做，**任何一步失败都不改工单状态**（工单停在 in_progress / 开发中，评论写原因）。成功也不改状态，只把 `outcome` 记成 `delivered`。
 - `pr` 打开时每张单一条 `card/<id>` 分支：**接单后、执行前**从 `origin/<base>`（没有就用本地 `<base>`）切出来；分支已存在就复用，重派不会重建。
 - 分支从远端基准切、不从本地当前分支切：否则本地没推的提交会被卷进 PR。
 - 发布成功后切回 `<base>`；失败就留在 `card/<id>` 上，方便看现场（脏工作区也会自然挡住下一张单）。
@@ -217,7 +221,7 @@ GET /issue/<id>                  # 工单独立页面（返回同一个单页，
 ```
 
 - 一个卡片一条流，推送的是**整张卡**（issue + comments + 最新的 workflow 进度与节点图，都很小），前端按 id 覆盖渲染。
-- 触发：① 我们自己的写路径（评论 / 关单重开 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
+- 触发：① 我们自己的写路径（评论 / 改状态 / 换负责人 / 改关注人 / 改标签）直接广播；② 每条被看的卡一个 2s 轮询
   比对 `updated_at + comment_count + run 签名`，把 engine 或别的进程直接改 bd / run.json 的变化也接进来。
   轮询是**每卡一份**，不随观看人数增长；没人看就自己停。
 - 推送只走 HTTP，不落库：删了看板/重启，数据仍然只有 beads 一份。
@@ -245,29 +249,31 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 - 项目没写提示词时，回落到工具自带的 `engine/prompts/*.md`；在设置里清空提示词并保存 = 把默认模板写回项目文件（不是留空）。
 - 标签改名会级联到历史工单（先加新、再去旧）；删除默认要求确认，`?purge=1` 才从工单上摘掉。
 
-## 5. 工作流状态机（固定四段，工单只有 open/closed + 标签）
+## 5. 工单状态机（固定六段；AI 只负责推到「开发中」）
 
-工单（beads）只保留两个系统开关：`open` / `closed`。看板四列不是工单字段，而是最新一次 engine run 的投影：
+工单状态是 beads 的原生 `status`，不再是 run.json 的投影：
 
 ```
-待接 ──claim──> 执行中 ──gate/review──> 审查中 ──pass──> 已完成
-                    │
-                    ├──失败/中断──> 待接（带「上次失败 / 已中断」徽章）
-                    └──代码过审但没交付──> 发布失败（重派只重试收尾）
+新建 open ──AI 接单 / 人工开始──> 开发中 in_progress
+开发中 ──人工验收──> 策划验收 plan_review ──> 测试验收 test_review
+测试验收 ──> 已完成 closed ──> 已归档 archived
 ```
 
-- `open` / `closed` 只表示工单是否归档；人工在看板上只能「关闭 / 重新打开」，不再拖列改状态。
-- 看板列固定：**待接 / 执行中 / 审查中 / 已完成**；由 `web/workflow.mjs` 从最新 `run.json` 推导。卡上再细分「已接单 / 执行中 / 门禁中 / 审查中 / 已完成 / 上次失败 / 已中断」。
-- engine 内部仍用 `status=in_progress` 当接单锁（务实版，界面不展示），完成时置 `closed`；失败时按需要回 `open` 或留 `in_progress`。`review` 自定义状态不再由 engine 使用。
-- `ready-for-agent` 用 label 表达，与状态机正交：它回答「能不能派给 AI」。接单候选是 `open + ready`，看板不会把已有活跃 run 的卡再派一次。
-- 进度不是新状态库：`run.json` 是运行记录，删掉只丢追溯；工作流阶段从 `attempts[].execute/gate/review` 的未完成步骤推导。
-- 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工关单/重开补一条工单开关评论。
+- 六段固定，名字在 `web/stages.mjs`。`plan_review` / `test_review` / `archived` 由 `ensureWorkflowStatuses()` 写进项目自己的 `status.custom`（`active` / `active` / `frozen`）；`open` / `in_progress` / `closed` 是 bd 内置状态。
+- 看板列就是这六段。卡上的「AI 进度」徽章另算：由 `web/workflow.mjs` 从最新 `run.json` 推导，只说明执行 / 门禁 / 审查走到哪一步，不决定列。
+- AI 接单资格：`status=open`（新建）+ `ready-for-agent` 标签，且没有活跃 run。接单时置 `in_progress`（开发中），保留已有负责人；没人负责才写 `cfg.actor`。
+- AI 完成（门禁 + 审查通过）只做「提交 → 推送 → 建 PR」，`outcome=delivered`，**不改工单状态**，停在「开发中」等人工验收；评论写「AI 已完成…等人工验收」。
+- 人工看完 PR 后，在工单页把状态改成「策划验收」；后续由人推进测试验收 / 已完成 / 已归档。状态切换留一条「状态：A → B」评论（谁改的记 `--actor`）。
+- 失败 / 中断：执行失败回 `open`（新建，可被自动流水线重派），审查 / 发布失败留在 `in_progress`（开发中）。`run.json` 的 `outcome` + 徽章负责说明原因。
+- `ready-for-agent` 只回答「能不能派给 AI」，与六段状态正交；`closed` / `archived` 的单即使带标签也不会被接。
+- `assignee`（主负责人，bd 原生）+ `assignees`（完整名单）+ `watchers`（关注人）都可多选；完整名单和关注人存 bd metadata，更换时留一条「负责人 / 关注人」评论。关注人目前只存名单，通知还没做。
+- 每次迁移留一条评论，**只写一句结论**；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工改状态补一条状态变更评论。
 - **人工纠偏只有一个入口：工单评论。** 评论在**接单那一刻**抓一次快照，执行与审查的 `{{HISTORY}}` 都用它——所以运行中写的意见这一轮看不到，写它是给下一轮。
   `POST /api/issues/<id>/revise {text}`（看板评论框勾「这是修正意见」）把「一条评论 + 改回 open + 保留可派标签」合成一步；run 还活着时返回 409，不假装退回成功。
   `{{FEEDBACK}}` 是 engine 自己的回灌（同一次运行里门禁/审查没过），人工不直接写它。
   发布失败（`publish_failed`）时重派只重跑收尾、不叫 AI：要按意见重做必须 `node wf.mjs work --id <卡片> --fresh`。
 - **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
-- **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
+- **状态名和列不再可配置**：六段名字在 `web/stages.mjs`；`labels.statuses` / `columns` 只为旧配置兼容保留。旧项目里已有的 `review` 读取时归入「开发中」，新流程不再写 `review`。
 - **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改它自己的配置（AI 节点的提示词与预设、收尾节点的提交/推送/PR 与基准分支），不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
 
 ## 6. 目录
@@ -281,7 +287,8 @@ package.json       # 只有 scripts，没有依赖
 web/               # 页面 + beads 适配层
   prefs.mjs        # 用户偏好：列表列 / 列宽 / 排序 / 筛选预设（~/.hlwd/prefs/<用户>.json）
   beads.mjs        # WorkSource 适配层：全项目唯一调用 bd 的文件
-  workflow.mjs     # 固定工作流阶段：从最新 run.json 推导「AI 进度」与只读节点图
+  stages.mjs       # 工单状态六段（bd status ↔ 看板列）的唯一映射
+  workflow.mjs     # AI 进度：从最新 run.json 推导徽章与只读节点图
   tags.mjs         # 标签库：目录 + 使用数 + 改名级联 / 归档 / 删除
   runs.mjs         # 只读端口：把 <项目>/.hlwd/runs 与 journal 给看板
   sessions.mjs     # 只读端口：把每轮 agent 的 events.jsonl 归一成消息流（会话页 / SSE）
@@ -330,9 +337,9 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 依赖解析：要用能找到的 `bd` 与 AI CLI；`agent-tools` 用仓库自带的 `vendor/agent-tools`（`AGENT_TOOLS_BIN` 可覆盖）。
 - 首次打开空项目：`bd init` 会建 `.beads/` 并 `git init` + 提交一次（bd 基于 git 工作），项目的 `.gitignore` 也是它写的。
 - 看板只是 beads 的一层视图：关掉它不影响数据与流程。看板每 5s 自动刷新，搜索盖标题/描述/评论。
-- 看板四列是固定工作流（待接 / 执行中 / 审查中 / 已完成），不能拖列改状态；工单本身只有 open/closed + 标签。人工只能在工单页「关闭 / 重新打开」。
-- 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列（含「进度」），「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
-- **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「待接 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
+- 看板六列是固定工单状态（新建 / 开发中 / 策划验收 / 测试验收 / 已完成 / 已归档），不能拖列改状态；状态在工单页手动切换，负责人和关注人都可多选。工单页「归档 / 恢复」是状态切换的快捷方式。
+- 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列（含「状态 / AI 进度 / 关注人 / 创建时间」），「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
+- **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「新建 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
 - 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。
 
 **内网分享**（给同网段的同事看/建/改单）
@@ -360,7 +367,7 @@ node wf.mjs board --bg                         # 收回本机（默认 127.0.0.1
 - **一次只推进一步**：接单就只接单，执行就只执行，审查就只审查。跳阶段等于伪造记录。
 - **改动最小**：能改一个函数不新建文件，能改配置不加抽象层。新增抽象要说清它挡住了什么。
 - **不留暗门**：不做「先注释掉」「临时硬编码」；临时方案写进工单评论并标回滚条件。
-- **完成 = 可复现**：关闭工单时，触发它的人工步骤必须是看板上点一下或 `wf` 的一条命令。
+- **完成 = 可复现**：交付/验收/改状态时，触发它的人工步骤必须是看板上点一下或 `wf` 的一条命令。
 - **不确定就停**：需求含糊、契约要变、要动 beads schema —— 停下来问，不要猜。
 
 ## 9. 复用到别的项目

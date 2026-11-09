@@ -18,8 +18,10 @@ export async function listCandidates({ cfg }) {
   return out;
 }
 
-export async function claim({ issue, cfg, note = 'AI 接单，开始执行。' }) {
-  await beads.updateIssue(issue.id, { status: 'in_progress', assignee: cfg.actor });
+export async function claim({ issue, cfg, note = 'AI 接单（新建 → 开发中），开始执行。' }) {
+  // 负责人是人选的，AI 不抢：已经有人负责就保留，没人负责才把自己记上。
+  const assignees = issue.assignees?.length ? issue.assignees : [cfg.actor];
+  await beads.updateIssue(issue.id, { status: 'in_progress', assignees });
   await beads.commentIssue(issue.id, note);
   log(`接单 ${issue.id} — ${issue.title}`);
   return beads.getIssue(issue.id);

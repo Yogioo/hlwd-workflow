@@ -108,7 +108,7 @@ test('saveProjectConfig 合并写入并拒绝非法值', async () => {
     assert.equal(saved.engine.gitCommit, undefined);
     assert.equal(saved.engine.runner, 'codex');
     assert.equal(saved.engine.autoWatch, true, '看板启动时自动开流水线是个开关，要能存');
-    assert.equal(saved.labels.statuses.open, '待接', '未改的字段要保留');
+    assert.equal(saved.labels.statuses.open, '新建', '未改的字段要保留');
 
     await assert.rejects(() => saveProjectConfig(dir, { engine: { runner: 'nope' } }), /runner 只能是/);
     await assert.rejects(() => saveProjectConfig(dir, { engine: { attempts: 9 } }), /attempts/);

@@ -27,7 +27,8 @@ import {
 import * as beads from './beads.mjs';
 import { prefsFor, savePrefs } from './prefs.mjs';
 import { createTag, deleteTag, listTags, updateTag } from './tags.mjs';
-import { WORKFLOW_COLUMNS, alive, graphOf, workflowOf } from './workflow.mjs';
+import { STAGE_COLUMNS, STATUS_VALUES, stageOf, statusLabel } from './stages.mjs';
+import { alive, graphOf, workflowOf } from './workflow.mjs';
 import {
   AuthError,
   SESSION_COOKIE,
@@ -193,6 +194,8 @@ function applyProject(dir) {
 async function openProject(dir, { remember = false } = {}) {
   const info = await ensureProject(dir);
   applyProject(info.dir);
+  // 验收/归档是 bd 的自定义状态：老项目第一次打开时补进项目自己的配置。
+  await beads.ensureWorkflowStatuses().catch((err) => console.error(`状态配置没补上：${err.message}`));
   current = info;
   if (remember) await rememberProject(info.dir).catch(() => {});
   return info;
@@ -212,9 +215,9 @@ async function projectPayload() {
   return { dir: p.dir, created: p.created ?? [], config, prompts, recent: state.recent };
 }
 
-// —— 工作流进度：从最新 run 派生，不写回 beads ——
-// 列表只带 workflow（列用）；单卡再带 graph（节点图用），别给看板塞冗余。
-const withWorkflow = (issue, run) => ({ ...issue, workflow: workflowOf(issue, run) });
+// —— 工单状态 + AI 进度：状态从 beads 来，AI 进度从最新 run 派生，都不写回 beads ——
+// 列表带 stage（看板列）与 workflow（AI 徽章）；单卡再带 graph（节点图用），别给看板塞冗余。
+const withWorkflow = (issue, run) => ({ ...issue, stage: stageOf(issue), workflow: workflowOf(issue, run) });
 const withCard = (issue, run) => ({ ...withWorkflow(issue, run), graph: graphOf(issue, run) });
 const runSig = (run) =>
   run
@@ -698,9 +701,8 @@ async function route(req, res, url) {
     const p = await project();
     const cfg = await readProjectConfig(p.dir);
     return json(res, 200, {
-      // 兼容旧前端：状态不再作为工单字段展示；工作流列是固定的。
-      statuses: cfg.columns,
-      workflow: WORKFLOW_COLUMNS,
+      // 看板列 = 工单状态（固定六段）；AI 进度是卡片上的一枚徽章，不再是列。
+      stages: STAGE_COLUMNS,
       labels: cfg.labels,
       tags: cfg.tags ?? [],
       readyLabel: cfg.engine.readyLabel,
@@ -867,6 +869,8 @@ async function route(req, res, url) {
     }
     if (req.method === 'POST') {
       const body = await readBody(req);
+      if (body.assignees !== undefined && !Array.isArray(body.assignees)) return json(res, 400, { error: 'assignees 必须是数组' });
+      if (body.watchers !== undefined && !Array.isArray(body.watchers)) return json(res, 400, { error: 'watchers 必须是数组' });
       const issue = await beads.createIssue({
         title: body.title,
         description: body.description ?? '',
@@ -874,6 +878,8 @@ async function route(req, res, url) {
         priority: body.priority,
         labels: body.labels ?? [],
         assignee: body.assignee ?? undefined,
+        assignees: body.assignees,
+        watchers: body.watchers ?? [],
         actor: actorOf(user), // 记下是谁建的（bd 原生 created_by）
       });
       return json(res, 201, { issue: withWorkflow(issue, null) });
@@ -949,7 +955,7 @@ async function route(req, res, url) {
       return json(res, 200, { comments });
     }
     if (m[2] === '/revise') {
-      // 人工纠偏：一条修正意见 + 退回待接。评论会进下一轮执行/审查的 {{HISTORY}}。
+      // 人工纠偏：一条修正意见 + 退回新建。评论会进下一轮执行/审查的 {{HISTORY}}。
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
       const body = await readBody(req);
       const text = String(body.text ?? '').trim();
@@ -985,28 +991,45 @@ async function route(req, res, url) {
     if (req.method === 'PATCH') {
       const body = await readBody(req);
       const actor = actorOf(user);
-      // 状态变了要留一笔「谁改的」：bd 的 update 不记变更人，只能靠评论 + --actor
-      let before = null;
-      if (body.status) before = (await beads.getIssue(id)).issue;
+      if (body.status !== undefined && !STATUS_VALUES.includes(body.status)) {
+        return json(res, 400, { error: `不认识的状态 ${body.status}` });
+      }
+      if (body.assignees !== undefined && !Array.isArray(body.assignees)) return json(res, 400, { error: 'assignees 必须是数组' });
+      if (body.watchers !== undefined && !Array.isArray(body.watchers)) return json(res, 400, { error: 'watchers 必须是数组' });
+      // 状态 / 人变了要留一笔「谁改的」：bd 的 update 不记变更人，只能靠评论 + --actor
+      const touchedPeople = body.assignees !== undefined || body.assignee !== undefined || body.watchers !== undefined;
+      const before = body.status !== undefined || touchedPeople ? (await beads.getIssue(id)).issue : null;
       const issue = await beads.updateIssue(id, {
         status: body.status ?? undefined,
         priority: body.priority ?? undefined,
-        assignee: body.assignee ?? undefined,
+        assignee: body.assignees === undefined ? (body.assignee ?? undefined) : undefined,
+        assignees: body.assignees,
+        watchers: body.watchers,
         title: body.title ?? undefined,
         description: body.description ?? undefined,
         addLabels: body.addLabels ?? [],
         removeLabels: body.removeLabels ?? [],
         actor,
       });
-      if (before && before.status !== issue.status) {
-        const p = await project();
-        const cfg = await readProjectConfig(p.dir);
-        const name = (s) => cfg.labels?.statuses?.[s] ?? s;
-        await beads
-          .commentIssue(id, `状态：${name(before.status)} → ${name(issue.status)}`, { actor })
-          .catch(() => {}); // 留不下痕迹也不影响改单本身
+      if (before) {
+        const parts = [];
+        if (body.status !== undefined && body.status !== before.status) {
+          parts.push(`状态：${statusLabel(before.status)} → ${statusLabel(issue.status)}`);
+        }
+        if (touchedPeople) {
+          const samePeople = (a, b) => JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+          if (!samePeople(before.assignees, issue.assignees)) {
+            parts.push(`负责人：${(issue.assignees ?? []).join('、') || '（未指派）'}`);
+          }
+          if (!samePeople(before.watchers, issue.watchers)) {
+            parts.push(`关注人：${(issue.watchers ?? []).join('、') || '（无）'}`);
+          }
+        }
+        if (parts.length) {
+          await beads.commentIssue(id, parts.join('；'), { actor }).catch(() => {}); // 留不下痕迹也不影响改单本身
+        }
       }
-      if (body.status || body.priority !== undefined || body.addLabels || body.removeLabels) broadcastCard(id);
+      broadcastCard(id);
       return json(res, 200, { issue: withCard(issue, await latestRun(id)) });
     }
     return json(res, 405, { error: 'method not allowed' });

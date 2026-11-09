@@ -71,7 +71,7 @@
           <kbd>/</kbd>
         </label>
         <div class="seg view-switch" role="group" aria-label="看板视图">
-          <button id="viewBoard" class="seg-btn active" type="button" aria-pressed="true" title="卡片按 AI 工作流进度分列">看板</button>
+          <button id="viewBoard" class="seg-btn active" type="button" aria-pressed="true" title="卡片按工单状态分列">看板</button>
           <button id="viewList" class="seg-btn" type="button" aria-pressed="false" title="一行一张单，能看到负责人、创建人、更新时间">列表</button>
         </div>
         <button id="watch" type="button" class="ghost" title="自动流水线">
@@ -104,12 +104,12 @@
       <details class="legend">
         <summary>怎么看这张板</summary>
         <div class="legend-body">
-          <p><b>待接</b> 可以派给 AI。开「自动流水线」或跑 <code>node wf.mjs work</code>。</p>
-          <p><b>执行中</b> AI 已接单，正在执行 / 过门禁。卡片上的徽章会显示具体到哪一步。</p>
-          <p><b>审查中</b> 执行完成，正在跑审查回合。</p>
-          <p><b>已完成</b> 已提交并关闭，点开卡片的「流程」看这一趟怎么走的。</p>
-          <p><b>标签</b> 是工单唯一的自定义分类；状态由 engine 的工作流管理，不再作为工单字段配置。</p>
-          <p><b>看板 / 列表</b> 右上角切换：看板按工作流分列；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
+          <p><b>状态</b> 是工单自己的六段流程：新建 → 开发中 → 策划验收 → 测试验收 → 已完成 → 已归档。人工在工单页手动推进。</p>
+          <p><b>新建</b> 打上 <code>ready-for-agent</code> 后，自动流水线会接单并自动转到「开发中」。</p>
+          <p><b>开发中</b> AI 在执行 / 过门禁 / 审查；卡片上的 AI 徽章显示具体到哪一步。AI 完成后只建 PR，<b>不改状态</b>。</p>
+          <p><b>验收</b> 人工看完 PR 后，在工单页把状态改成「策划验收」，再按测试结果推进到「测试验收 / 已完成」。</p>
+          <p><b>标签</b> 是工单的自定义分类；状态是固定流程，不再由 engine 的 run.json 派生。</p>
+          <p><b>看板 / 列表</b> 右上角切换：看板按状态分列；列表一行一张单，点表头排序、按住表头拖换列序、拖表头右边界改列宽。</p>
           <p><b>筛选</b> 顶栏下面的「筛选」按字段组合过滤，结果同时作用于看板和列表；常看的条件「存为预设」，点一下切回来。列与列宽是列表自己的事，存在你名下（<code>~/.hlwd/prefs/</code>），换项目各是各的。</p>
           <p class="legend-keys"><kbd>/</kbd> 搜索 <kbd>n</kbd> 新建 <kbd>Esc</kbd> 关面板 · 列表点表头排序</p>
         </div>
@@ -187,6 +187,17 @@
           </div>
 
           <aside class="issue-rail">
+            <div class="rail-group">
+              <label>状态<select id="panelStatus"></select></label>
+            </div>
+            <div class="rail-group">
+              <div class="rail-label">负责人</div>
+              <div id="panelAssignees" class="people-field"></div>
+            </div>
+            <div class="rail-group">
+              <div class="rail-label">关注人</div>
+              <div id="panelWatchers" class="people-field"></div>
+            </div>
             <div class="rail-group">
               <div class="rail-label">AI 进度</div>
               <div id="panelWorkflow" class="panel-workflow"></div>
@@ -297,14 +308,14 @@
             <button type="button" data-sec="gate">门禁</button>
             <button type="button" data-sec="access">访问</button>
           </nav>
-          <p class="settings-side-note">工作流状态由 engine 固定管理：待接 → 执行 → 门禁 → 审查 → 完成。它不再作为工单字段配置。</p>
+          <p class="settings-side-note">工单状态是固定六段（新建 / 开发中 / 策划验收 / 测试验收 / 已完成 / 已归档），人工推进；AI 只负责接单、执行和交付。</p>
         </aside>
 
         <div class="settings-main">
           <section class="settings-panel" data-panel="tags">
             <div class="settings-head">
               <h3>标签库</h3>
-              <p class="dialog-note">标签是工单唯一的自定义分类；<code>ready-for-agent</code> 是 engine 的派单开关，受保护。使用数实时从 beads 算，不另外存。</p>
+              <p class="dialog-note">标签是工单的自定义分类；<code>ready-for-agent</code> 是 engine 的派单开关，受保护。使用数实时从 beads 算，不另外存。</p>
             </div>
             <form id="tagAddForm" class="tag-add">
               <input name="name" placeholder="标签名，如 bug / area:web" required maxlength="40" />

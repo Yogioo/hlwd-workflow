@@ -4,8 +4,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** 看板列 = bd 状态。review 是 bd config status.custom 里的自定义状态。 */
-export const STATUSES = ['open', 'in_progress', 'review', 'closed'];
+import { CUSTOM_STATUSES } from './stages.mjs';
+
 export const READY_LABEL = 'ready-for-agent';
 
 export class BeadsError extends Error {
@@ -110,24 +110,89 @@ async function bdJson(args, opts) {
   return parseJson(await run(args, opts), args);
 }
 
+/** bd 的 metadata 值全是字符串；这里把名单（负责人 / 关注人）解析成数组。 */
+function namesFrom(value, fallback = '') {
+  let list = [];
+  if (Array.isArray(value)) list = value;
+  else if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      list = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      list = value.split(/[,，]/);
+    }
+  }
+  const out = [];
+  for (const item of [...list, fallback]) {
+    const name = String(item ?? '').trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+const uniqueNames = (value) => {
+  const out = [];
+  for (const item of Array.isArray(value) ? value : []) {
+    const name = String(item ?? '').trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+};
+
 /** 归一成契约里的最小字段集；只在这里定义字段名。 */
 export function normalize(raw) {
+  const assignee = raw.assignee ?? '';
+  // 负责人 / 关注人都可以多选：bd 的 assignee 只放第一个（兼容 bd 自己的过滤），
+  // 完整名单在 metadata 里；旧数据只有 assignee 时自然退化成单人。
+  const assignees = namesFrom(raw.metadata?.assignees, assignee);
   return {
     id: raw.id,
     title: raw.title ?? '',
     body: raw.description ?? '',
     status: raw.status ?? 'open',
     labels: raw.labels ?? [],
-    assignee: raw.assignee ?? '', // 只认真的指派人；bd 的 owner（git user）不是负责人
+    assignee: assignee || assignees[0] || '', // 只认真的指派人；bd 的 owner（git user）不是负责人
+    assignees,
+    watchers: namesFrom(raw.metadata?.watchers),
     owner: raw.owner ?? '',
     type: raw.issue_type ?? '',
     priority: raw.priority ?? 2,
     commentCount: raw.comment_count ?? 0,
     created: raw.created_at ?? '',
     updated: raw.updated_at ?? '',
+    closed: raw.closed_at ?? '',
     createdBy: raw.created_by ?? '', // bd 原生字段：创建时的 --actor
     parent: raw.parent ?? null,
   };
+}
+
+/**
+ * 把工作流自定义状态补进项目自己的 beads 配置（幂等，只加不改已有项）。
+ * bd 的分类决定 ready / list 的行为：plan_review、test_review 是 active，archived 是 frozen。
+ */
+export async function ensureWorkflowStatuses() {
+  let value = '';
+  try {
+    const raw = await bdJson(['config', 'get', 'status.custom', '--json']);
+    value = String(raw?.value ?? '').trim();
+  } catch {
+    // 老版本 bd 没有 --json 或读不到配置：按空配置处理
+  }
+  const entries = value ? value.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  let changed = false;
+  for (const spec of CUSTOM_STATUSES) {
+    const name = spec.split(':')[0];
+    const at = entries.findIndex((entry) => entry.split(':')[0] === name);
+    if (at < 0) {
+      entries.push(spec);
+      changed = true;
+    } else if (!entries[at].includes(':')) {
+      entries[at] = spec; // 旧式「只写名字」补上分类
+      changed = true;
+    }
+  }
+  if (changed) await run(['config', 'set', 'status.custom', entries.join(',')]);
+  return { statuses: entries, changed };
 }
 
 /** 项目里出现过的标签 + 使用数。bd 自己算，不缓存。 */
@@ -189,25 +254,43 @@ export async function listComments(id) {
   }));
 }
 
-export async function createIssue({ title, description = '', type, priority, labels = [], assignee, actor } = {}) {
+export async function createIssue({ title, description = '', type, priority, labels = [], assignee, assignees, watchers, actor } = {}) {
   if (!title || !title.trim()) throw new BeadsError('title 不能为空');
   let args = ['create', title, '--stdin', '--json'];
   if (type) args.push('-t', type);
   if (priority !== undefined && priority !== '') args.push('-p', String(priority));
   if (labels.length) args.push('-l', labels.join(','));
-  if (assignee) args.push('-a', assignee);
+  const people = uniqueNames(assignees ?? (assignee ? [assignee] : []));
+  if (people.length) args.push('-a', people[0]);
+  const watch = uniqueNames(watchers);
+  const metadata = {};
+  if (people.length) metadata.assignees = JSON.stringify(people);
+  if (watch.length) metadata.watchers = JSON.stringify(watch);
+  if (Object.keys(metadata).length) args.push('--metadata', JSON.stringify(metadata));
   args = withActor(args, actor);
   const raw = await bdJson(args, { input: description });
   return normalize(Array.isArray(raw) ? raw[0] : raw);
 }
 
 export async function updateIssue(id, patch = {}) {
-  const { status, priority, assignee, title, description, addLabels = [], removeLabels = [], actor } = patch;
+  const { status, priority, assignee, assignees, watchers, title, description, addLabels = [], removeLabels = [], actor } = patch;
   let args = ['update', id];
   let input;
   if (status) args.push('--status', status);
   if (priority !== undefined && priority !== '') args.push('--priority', String(priority));
-  if (assignee !== undefined) args.push('--assignee', assignee);
+  // assignees 是完整名单：第一个同步到 bd 的 assignee，其余进 metadata。
+  // 只传 assignee（旧调用方）时保持单人语义。
+  const people = assignees !== undefined ? uniqueNames(assignees) : assignee !== undefined ? uniqueNames([assignee]) : null;
+  if (people !== null) {
+    args.push('--assignee', people[0] ?? '');
+    if (people.length) args.push('--set-metadata', `assignees=${JSON.stringify(people)}`);
+    else args.push('--unset-metadata', 'assignees');
+  }
+  if (watchers !== undefined) {
+    const watch = uniqueNames(watchers);
+    if (watch.length) args.push('--set-metadata', `watchers=${JSON.stringify(watch)}`);
+    else args.push('--unset-metadata', 'watchers');
+  }
   if (title) args.push('--title', title);
   if (description !== undefined) {
     args.push('--stdin');

@@ -56,9 +56,10 @@ async function syncTree(dir) {
   if (pending) await git(dir, ['commit', '-m', 'chore: sync']);
 }
 
-test('收尾：提交 + 推送 + 关单，评论写明做了哪几步', async () => {
+test('收尾：提交 + 推送，状态保持开发中，评论写明做了哪几步', async () => {
   await withProject(async ({ dir, remote, branch, runDir }) => {
     const created = await beads.createIssue({ title: '收尾测试', description: '正文', labels: ['ready-for-agent'] });
+    await beads.updateIssue(created.id, { status: 'in_progress' });
     await fs.writeFile(path.join(dir, 'work.txt'), 'ai 改的东西\n', 'utf8');
 
     const result = await complete({
@@ -74,9 +75,10 @@ test('收尾：提交 + 推送 + 关单，评论写明做了哪几步', async ()
     assert.equal(result.pr, null);
 
     const issue = await issueOf(created.id);
-    assert.equal(issue.status, 'closed');
+    assert.equal(issue.status, 'in_progress', 'AI 交付后不改状态，等人工验收');
     const comments = (await beads.getIssue(created.id)).comments.map((c) => c.text).join('\n');
     assert.match(comments, new RegExp(`已完成：提交 [0-9a-f]+，推送 ${branch}`));
+    assert.match(comments, /等人工验收/);
     // 远端真的收到了这次提交
     assert.equal(await git(remote, ['rev-parse', '--short', branch]), result.commit);
   });
@@ -85,6 +87,7 @@ test('收尾：提交 + 推送 + 关单，评论写明做了哪几步', async ()
 test('收尾：推送失败就不关单，错误里带着已经做到的那一步', async () => {
   await withProject(async ({ dir, branch, runDir }) => {
     const created = await beads.createIssue({ title: '推送失败', description: '', labels: ['ready-for-agent'] });
+    await beads.updateIssue(created.id, { status: 'in_progress' });
     await fs.writeFile(path.join(dir, 'work.txt'), 'x\n', 'utf8');
 
     await assert.rejects(
@@ -105,13 +108,14 @@ test('收尾：推送失败就不关单，错误里带着已经做到的那一�
     );
 
     const issue = await issueOf(created.id);
-    assert.equal(issue.status, 'open', '发布失败不能关单');
+    assert.equal(issue.status, 'in_progress', '发布失败不能改状态');
   });
 });
 
 test('重试发布：这次没有新改动，也照样把上次的提交推出去', async () => {
   await withProject(async ({ dir, remote, branch, runDir }) => {
     const created = await beads.createIssue({ title: '重试发布', description: '', labels: ['ready-for-agent'] });
+    await beads.updateIssue(created.id, { status: 'in_progress' });
     await fs.writeFile(path.join(dir, 'work.txt'), 'ai 改的东西\n', 'utf8');
 
     // 第一次：远端写错，推送失败；错误里要带着已经提交的 commit
@@ -128,7 +132,7 @@ test('重试发布：这次没有新改动，也照样把上次的提交推出�
     assert.ok(firstErr, '推送失败要抛错');
     assert.equal(firstErr.git.failedAt, 'push');
     assert.equal(firstErr.git.push.ok, false);
-    assert.equal((await issueOf(created.id)).status, 'open');
+    assert.equal((await issueOf(created.id)).status, 'in_progress');
 
     // 第二次：修好远端再派单。工作区没有新改动，但上一次的提交还在分支上。
     await syncTree(dir);
@@ -149,7 +153,7 @@ test('重试发布：这次没有新改动，也照样把上次的提交推出�
 
     assert.equal(result.commit, firstErr.git.commit, '沿用上一次的提交，不重新提交');
     assert.equal(result.push.ok, true);
-    assert.equal((await issueOf(created.id)).status, 'closed');
+    assert.equal((await issueOf(created.id)).status, 'in_progress');
     assert.equal(await git(remote, ['rev-parse', '--short', branch]), firstErr.git.commit);
   });
 });
@@ -174,9 +178,10 @@ test('resumablePublish 只认「发布失败」，别的情况不跳过 AI', () 
   assert.deepEqual(got.attempts, [{ attempt: 1 }]);
 });
 
-test('收尾：没有代码改动时不提交也不推送，仍然关单', async () => {
+test('收尾：没有代码改动时不提交也不推送，状态保持开发中', async () => {
   await withProject(async ({ dir, branch, runDir }) => {
     const created = await beads.createIssue({ title: '没改动', description: '', labels: ['ready-for-agent'] });
+    await beads.updateIssue(created.id, { status: 'in_progress' });
     await syncTree(dir); // 建单会顺手改 .beads，先提交掉，才谈得上「没有代码改动」
     const result = await complete({
       cfg: { nodes: { complete: { commit: true, push: true, pr: false, remote: 'origin', base: branch } } },
@@ -187,7 +192,7 @@ test('收尾：没有代码改动时不提交也不推送，仍然关单', async
     });
     assert.equal(result.commit, null);
     assert.equal(result.push, null);
-    assert.equal((await issueOf(created.id)).status, 'closed');
+    assert.equal((await issueOf(created.id)).status, 'in_progress');
     const comments = (await beads.getIssue(created.id)).comments.map((c) => c.text).join('\n');
     assert.match(comments, /无代码改动/);
   });

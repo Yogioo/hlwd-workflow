@@ -1,5 +1,5 @@
-// 单页看板：看 + 建 + 关单/重开 + 评论，全部走 /api/*。
-// 工单只有 open/closed + 标签；看板列是 engine run 的工作流投影。
+// 单页看板：看 + 建 + 改状态/负责人/关注人 + 评论，全部走 /api/*。
+// 看板列 = 工单状态（新建 / 开发中 / 策划验收 / 测试验收 / 已完成 / 已归档）；AI 进度是卡片上的徽章。
 import { esc, md } from './markdown.js';
 import { createGraph } from './graph.js';
 
@@ -7,15 +7,41 @@ const AUTO_REFRESH_MS = 5000;
 const VIEW_KEY = 'hlwd.view';
 const SORT_DESC = new Set(['updated', 'comments']);
 
-// 工作流列是固定的：engine 的状态机不跟项目配置走。
-// 工单本身只有 open/closed + 标签；这些列只是 run.json 的投影。
-const WORKFLOW_FALLBACK = [
-  { id: 'queued', label: '待接', empty: '没有待接的单。' },
-  { id: 'active', label: '执行中', empty: '没有在跑的单。' },
-  { id: 'review', label: '审查中', empty: '没有在审查的单。' },
-  { id: 'done', label: '已完成', empty: '还没有完成的单。' },
+// 工单状态固定六段（服务端 web/stages.mjs 是唯一真相源，这里只是首屏兜底）。
+const STAGE_FALLBACK = [
+  { id: 'new', label: '新建', status: 'open', empty: '没有新建的单。' },
+  { id: 'developing', label: '开发中', status: 'in_progress', empty: '没有在开发的单。' },
+  { id: 'plan_review', label: '策划验收', status: 'plan_review', empty: '没有等待策划验收的单。' },
+  { id: 'test_review', label: '测试验收', status: 'test_review', empty: '没有等待测试验收的单。' },
+  { id: 'done', label: '已完成', status: 'closed', empty: '还没有完成的单。' },
+  { id: 'archived', label: '已归档', status: 'archived', empty: '没有归档的单。' },
 ];
-const WORKFLOW_ORDER = Object.fromEntries(WORKFLOW_FALLBACK.map((c, i) => [c.id, i]));
+const STAGE_BY_STATUS = {
+  open: 'new',
+  in_progress: 'developing',
+  review: 'developing',
+  plan_review: 'plan_review',
+  test_review: 'test_review',
+  closed: 'done',
+  archived: 'archived',
+};
+const STAGE_STATUS_BY_ID = {
+  new: 'open',
+  developing: 'in_progress',
+  plan_review: 'plan_review',
+  test_review: 'test_review',
+  done: 'closed',
+  archived: 'archived',
+};
+const STAGE_ORDER = Object.fromEntries(STAGE_FALLBACK.map((c, i) => [c.id, i]));
+
+// AI 进度：只用来画徽章，不再决定看板列。
+const WORKFLOW_FALLBACK = [
+  { id: 'queued', label: '待接' },
+  { id: 'active', label: '执行中' },
+  { id: 'review', label: '审查中' },
+  { id: 'done', label: '已完成' },
+];
 
 /** 视图是浏览器的偏好，不写进项目：同一个项目换台电脑打开，默认还是看板。 */
 function readView() {
@@ -44,7 +70,8 @@ function readView() {
 const $ = (s) => document.querySelector(s);
 const state = {
   issues: [],
-  workflowColumns: WORKFLOW_FALLBACK,
+  stages: STAGE_FALLBACK,
+  users: [],
   labels: { statuses: {}, priorities: {} },
   tags: [],
   tagCatalog: [],
@@ -80,10 +107,20 @@ const state = {
 const prioLabel = (p) => state.labels.priorities[p] ?? `P${p}`;
 
 const LEGACY_WORKFLOW = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
-const workflowOf = (issue) => issue.workflow ?? { column: LEGACY_WORKFLOW[issue.status] ?? 'queued', label: '', tone: 'idle', detail: '' };
+const workflowOf = (issue) => issue.workflow ?? { column: LEGACY_WORKFLOW[issue.status] ?? 'queued', label: '', tone: 'idle', detail: '', runId: null };
+
+/** 工单的规范化状态；未知状态回落到「新建」。 */
+function stageOf(issue) {
+  if (issue?.stage?.id) return issue.stage;
+  const id = STAGE_BY_STATUS[issue?.status] ?? 'new';
+  const base = STAGE_FALLBACK.find((s) => s.id === id) ?? STAGE_FALLBACK[0];
+  return { ...base, ...(state.stages.find((s) => s.id === id) ?? {}) };
+}
+const stageColumn = (issue) => stageOf(issue).id;
+const stageOrder = (issue) => STAGE_ORDER[stageColumn(issue)] ?? 99;
+const stageName = (id) => (state.stages.find((c) => c.id === id) ?? STAGE_FALLBACK.find((c) => c.id === id))?.label ?? id;
 const workflowColumn = (issue) => workflowOf(issue).column;
-const workflowOrder = (issue) => WORKFLOW_ORDER[workflowColumn(issue)] ?? 99;
-const workflowName = (column) => (state.workflowColumns.find((c) => c.id === column) ?? WORKFLOW_FALLBACK.find((c) => c.id === column))?.label ?? column;
+const workflowName = (column) => WORKFLOW_FALLBACK.find((c) => c.id === column)?.label ?? column;
 
 const tagDef = (name) => state.tags.find((t) => t.name === name) ?? null;
 const tagColorStyle = (name) => {
@@ -93,11 +130,18 @@ const tagColorStyle = (name) => {
 
 const workflowBadge = (issue, { compact = false } = {}) => {
   const wf = workflowOf(issue);
-  if (!wf?.label || wf.column === 'queued' && wf.tone === 'idle') return '';
+  // 没有 AI 运行记录就不显示「AI 进度」：状态列已经说明工单在哪一段。
+  if (!wf?.runId || !wf.label) return '';
   return `<span class="wf wf-${esc(wf.tone ?? 'idle')}${compact ? ' wf-compact' : ''}" title="${esc([wf.label, wf.detail].filter(Boolean).join(' · '))}">
     <i aria-hidden="true"></i><b>${esc(wf.label)}</b>${wf.detail ? `<span class="wf-detail">${esc(wf.detail)}</span>` : ''}
   </span>`;
 };
+/** 工单状态徽章：看板列 / 详情页共用一套颜色变量（data-stage）。 */
+const stageBadge = (issue) => {
+  const stage = stageOf(issue);
+  return `<span class="stage-pill" data-stage="${esc(stage.id)}"><i aria-hidden="true"></i>${esc(stage.label)}</span>`;
+};
+
 // ready-for-agent 对人没意义，直接说「可派给 AI」；其余标签带上颜色。
 const chip = (label) =>
   label === state.readyLabel
@@ -183,12 +227,12 @@ function setView(view) {
   hint(
     view === 'list'
       ? '列表视图：点表头排序，按住表头拖换列序，拖右边界改列宽，点一行打开工单'
-      : '看板视图：列是 AI 工作流进度，卡片上显示标签与当前步骤',
+      : '看板视图：列是工单状态；卡片上的 AI 徽章显示执行到哪一步',
   );
 }
 
 function applyConfig(cfg) {
-  if (Array.isArray(cfg.workflow) && cfg.workflow.length) state.workflowColumns = cfg.workflow;
+  if (Array.isArray(cfg.stages) && cfg.stages.length) state.stages = cfg.stages;
   if (Array.isArray(cfg.tags)) state.tags = cfg.tags;
   if (cfg.labels) {
     state.labels = {
@@ -229,7 +273,7 @@ function applyProject(payload) {
   const cfg = payload.config ?? payload;
   state.tagCatalog = [];
   applyConfig({
-    workflow: WORKFLOW_FALLBACK,
+    stages: STAGE_FALLBACK,
     tags: cfg.tags ?? [],
     labels: cfg.labels,
     readyLabel: cfg.engine?.readyLabel ?? cfg.readyLabel,
@@ -247,7 +291,7 @@ function fillPrioritySelect(select, selected) {
 // 空列不是「—」，是告诉你这一列现在该放什么
 const laneEmpty = (column) => {
   if (hasFilter()) return '没有符合当前筛选的单。';
-  return (state.workflowColumns.find((c) => c.id === column) ?? WORKFLOW_FALLBACK.find((c) => c.id === column))?.empty ?? '这里空着。';
+  return (state.stages.find((c) => c.id === column) ?? STAGE_FALLBACK.find((c) => c.id === column))?.empty ?? '这里空着。';
 };
 const listEmpty = () =>
   hasFilter() ? '没有符合当前筛选的单。' : '还没有工单。点右上角「新建工单」开始。';
@@ -255,7 +299,7 @@ const listEmpty = () =>
 /** 一张卡：标题是主体，id 和类型退到脚注，别抢视线。 */
 function card(issue) {
   const labels = issue.labels.map(chip).join('');
-  return `<article class="card" data-id="${esc(issue.id)}" data-workflow="${esc(workflowColumn(issue))}" tabindex="0" title="打开工单">
+  return `<article class="card" data-id="${esc(issue.id)}" data-stage="${esc(stageColumn(issue))}" tabindex="0" title="打开工单">
     <div class="card-top">
       <div class="card-title">${esc(issue.title)}</div>
       <span class="card-prio mono" data-prio="${esc(issue.priority)}">${esc(prioLabel(issue.priority))}</span>
@@ -276,15 +320,28 @@ function orDash(text) {
 }
 
 /** 列表能摊开的列。id 同时是排序键；w 只是第一次打开时的默认宽度（之后听用户的）。 */
+const peopleText = (list, fallback = '') => {
+  const names = Array.isArray(list) && list.length ? list : fallback ? [fallback] : [];
+  return names.filter(Boolean).join('、');
+};
+
 const COLUMNS = [
   {
-    id: 'workflow',
-    label: '进度',
+    id: 'stage',
+    label: '状态',
     w: 100,
     cls: 'c-status',
-    sort: workflowOrder,
-    attrs: (i) => `data-workflow="${esc(workflowColumn(i))}"`,
-    cell: (i) => `<span class="row-dot" aria-hidden="true"></span>${esc(workflowOf(i).label || workflowName(workflowColumn(i)))}`,
+    sort: stageOrder,
+    attrs: (i) => `data-stage="${esc(stageColumn(i))}"`,
+    cell: (i) => `<span class="row-dot" aria-hidden="true"></span>${esc(stageOf(i).label || stageName(stageColumn(i)))}`,
+  },
+  {
+    id: 'ai',
+    label: 'AI 进度',
+    w: 110,
+    cls: 'c-ai',
+    sort: (i) => workflowOf(i).label || '',
+    cell: (i) => workflowBadge(i, { compact: true }) || dash(),
   },
   {
     id: 'priority',
@@ -302,8 +359,22 @@ const COLUMNS = [
     label: '负责人',
     w: 110,
     cls: 'c-assignee',
-    sort: (i) => i.assignee || '',
-    cell: (i) => `<span title="${esc(i.assignee)}">${orDash(i.assignee)}</span>`,
+    sort: (i) => peopleText(i.assignees, i.assignee),
+    cell: (i) => {
+      const text = peopleText(i.assignees, i.assignee);
+      return `<span title="${esc(text)}">${orDash(text)}</span>`;
+    },
+  },
+  {
+    id: 'watchers',
+    label: '关注人',
+    w: 110,
+    cls: 'c-watchers',
+    sort: (i) => peopleText(i.watchers),
+    cell: (i) => {
+      const text = peopleText(i.watchers);
+      return `<span title="${esc(text)}">${orDash(text)}</span>`;
+    },
   },
   {
     id: 'createdBy',
@@ -338,7 +409,7 @@ const COLUMNS = [
 
 const COLUMN_BY_ID = Object.fromEntries(COLUMNS.map((c) => [c.id, c]));
 /** 和服务端 web/prefs.mjs 的 VISIBLE_DEFAULT 一致：默认还是原来那九列。 */
-const VISIBLE_DEFAULT = new Set(['workflow', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
+const VISIBLE_DEFAULT = new Set(['stage', 'priority', 'type', 'title', 'assignee', 'watchers', 'created', 'updated', 'comments', 'id']);
 
 function defaultColumns() {
   return COLUMNS.map((c) => ({ id: c.id, w: c.w, hidden: !VISIBLE_DEFAULT.has(c.id) }));
@@ -360,8 +431,9 @@ function titleCell(issue) {
   const labels = issue.labels.map(chip).join('');
   const summary = snippet(issue.body);
   const mobile = [
+    `<span>${esc(stageOf(issue).label)}</span>`,
     `<span>${issue.type ? esc(issue.type) : dash()}</span>`,
-    `<span>负责人 ${orDash(issue.assignee)}</span>`,
+    `<span>负责人 ${orDash(peopleText(issue.assignees, issue.assignee))}</span>`,
     `<span>创建人 ${orDash(issue.createdBy)}</span>`,
     `<span>更新 ${esc(fmtAgo(issue.updated))}</span>`,
     `<span>${issue.commentCount ? `${esc(issue.commentCount)} 条评论` : '无评论'}</span>`,
@@ -462,7 +534,7 @@ function listRow(issue) {
   const cells = visibleColumns()
     .map(({ id, cls, align, cell, attrs }) => `<td class="${cls}${align === 'right' ? ' is-right' : ''}"${attrs ? ` ${attrs(issue)}` : ''}>${cell(issue)}</td>`)
     .join('');
-  return `<tr class="list-row" data-id="${esc(issue.id)}" data-workflow="${esc(workflowColumn(issue))}">${cells}<td class="c-fill"></td></tr>`;
+  return `<tr class="list-row" data-id="${esc(issue.id)}" data-stage="${esc(stageColumn(issue))}">${cells}<td class="c-fill"></td></tr>`;
 }
 
 function listTable(issues) {
@@ -493,7 +565,7 @@ function emptyFilter() {
   return {
     q: '',
     ready: false,
-    workflow: [],
+    stage: [],
     priority: [],
     type: [],
     assignee: [],
@@ -503,15 +575,18 @@ function emptyFilter() {
   };
 }
 
-const LEGACY_WORKFLOW_VALUE = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
-const filterWorkflow = (f) =>
-  Array.isArray(f?.workflow) ? f.workflow : (Array.isArray(f?.status) ? f.status : []).map((s) => LEGACY_WORKFLOW_VALUE[s] ?? s);
+// 旧预设按 AI 进度筛选；现在按工单状态。尽量把旧值折成新状态，折不出来的丢掉。
+const LEGACY_STAGE_VALUE = { queued: 'new', active: 'developing', review: 'developing', done: 'done', open: 'new', in_progress: 'developing', closed: 'done' };
+const filterStage = (f) =>
+  (Array.isArray(f?.stage) ? f.stage : Array.isArray(f?.workflow) ? f.workflow : Array.isArray(f?.status) ? f.status : [])
+    .map((s) => LEGACY_STAGE_VALUE[s] ?? s)
+    .filter((s) => STAGE_FALLBACK.some((c) => c.id === s));
 
 const normFilter = (f) =>
   JSON.stringify({
     q: f.q ?? '',
     ready: Boolean(f.ready),
-    workflow: filterWorkflow(f),
+    stage: filterStage(f),
     priority: (f.priority ?? []).map(Number).sort((a, b) => a - b),
     type: f.type ?? [],
     assignee: f.assignee ?? [],
@@ -526,7 +601,7 @@ function normalizeFilter(input = {}) {
   return {
     q: String(f.q ?? ''),
     ready: Boolean(f.ready),
-    workflow: filterWorkflow(f),
+    stage: filterStage(f),
     priority: arr(f.priority).map(Number),
     type: arr(f.type),
     assignee: arr(f.assignee),
@@ -540,7 +615,7 @@ function hasFilter(f = state.filter) {
   return Boolean(
     (f.q ?? '') ||
       f.ready ||
-      f.workflow?.length ||
+      f.stage?.length ||
       f.priority?.length ||
       f.type?.length ||
       f.assignee?.length ||
@@ -568,10 +643,11 @@ function updatedWindow(u) {
 
 function matchesFilter(issue, f = state.filter) {
   if (f.ready && !issue.labels.includes(state.readyLabel)) return false;
-  if (f.workflow.length && !f.workflow.includes(workflowColumn(issue))) return false;
+  if (f.stage.length && !f.stage.includes(stageColumn(issue))) return false;
   if (f.priority.length && !f.priority.includes(Number(issue.priority))) return false;
   if (f.type.length && !f.type.includes(issue.type || '')) return false;
-  if (f.assignee.length && !f.assignee.includes(issue.assignee || '')) return false;
+  const owners = issue.assignees?.length ? issue.assignees : [issue.assignee].filter(Boolean);
+  if (f.assignee.length && !owners.some((name) => f.assignee.includes(name)) && !(f.assignee.includes('') && !owners.length)) return false;
   if (f.createdBy.length && !f.createdBy.includes(issue.createdBy || '')) return false;
   if (f.labels.length && !f.labels.every((l) => issue.labels.includes(l))) return false;
   const win = updatedWindow(f.updated);
@@ -745,10 +821,13 @@ function sortedUnique(values) {
 function filterOptions() {
   const issues = state.issues;
   return {
-    workflow: state.workflowColumns.map((s) => ({ v: s.id, label: s.label })),
+    stage: state.stages.map((s) => ({ v: s.id, label: s.label })),
     priority: [0, 1, 2, 3, 4].map((p) => ({ v: String(p), label: prioLabel(p) })),
     type: sortedUnique(issues.map((i) => i.type)).map((v) => ({ v, label: v })),
-    assignee: ['', ...sortedUnique(issues.map((i) => i.assignee))].map((v) => ({ v, label: v || '未指派' })),
+    assignee: ['', ...sortedUnique(issues.flatMap((i) => (i.assignees?.length ? i.assignees : [i.assignee])))].map((v) => ({
+      v,
+      label: v || '未指派',
+    })),
     createdBy: sortedUnique(issues.map((i) => i.createdBy)).map((v) => ({ v, label: v })),
     labels: sortedUnique(issues.flatMap((i) => i.labels)).map((v) => ({ v, label: v === state.readyLabel ? '可派给 AI' : v })),
   };
@@ -781,7 +860,7 @@ function openFilterPanel() {
   panel.innerHTML = `<div class="popover-head"><b>筛选</b><span class="popover-sub">看板和列表共用</span><button type="button" class="ghost tiny" data-close>关闭</button></div>
     <div class="popover-body">
       <div class="fgroup"><div class="fgroup-head">关键词</div><input id="fq" class="fq" placeholder="标题、描述、评论" value="${esc(f.q)}"></div>
-      ${group('workflow', '进度', opts.workflow)}
+      ${group('stage', '状态', opts.stage)}
       ${group('priority', '优先级', opts.priority)}
       ${group('type', '类型', opts.type)}
       ${group('assignee', '负责人', opts.assignee)}
@@ -880,10 +959,10 @@ function renderBoard(issues) {
   const prev = new Map();
   for (const el of board.querySelectorAll('.card')) prev.set(el.dataset.id, el.getBoundingClientRect());
 
-  board.innerHTML = state.workflowColumns
+  board.innerHTML = state.stages
     .map((column, i) => {
-      const list = issues.filter((issue) => workflowColumn(issue) === column.id);
-      return `<section class="col" data-workflow="${esc(column.id)}" style="--i:${i}">
+      const list = issues.filter((issue) => stageColumn(issue) === column.id);
+      return `<section class="col" data-stage="${esc(column.id)}" style="--i:${i}">
         <div class="col-head">
           <h2 class="col-name">${esc(column.label)}</h2>
           <span class="col-count mono">${list.length}</span>
@@ -915,9 +994,9 @@ function renderSkeleton() {
     board.innerHTML = `<div class="list-view"><table class="list-table" style="min-width:${cols.reduce((n, c) => n + c.w, 0)}px"><colgroup>${cols.map((c) => `<col style="width:${c.w}px">`).join('')}<col></colgroup>${listHead(cols)}<tbody><tr class="list-empty-row"><td colspan="${(cols.length || 1) + 1}">读取工单…</td></tr></tbody></table></div>`;
     return;
   }
-  board.innerHTML = state.workflowColumns
+  board.innerHTML = state.stages
     .map(
-      (column, i) => `<section class="col" data-workflow="${esc(column.id)}" style="--i:${i}">
+      (column, i) => `<section class="col" data-stage="${esc(column.id)}" style="--i:${i}">
         <div class="col-head">
           <h2 class="col-name">${esc(column.label)}</h2>
           <span class="col-count mono">·</span>
@@ -1027,7 +1106,7 @@ async function openIssue(id, { keepTab = false } = {}) {
   $('#filterbar').hidden = true;
   closePanels();
   $('#issuePage').hidden = false;
-  $('#issuePage').dataset.workflow = workflowColumn(issue); // 顶部那道进度线
+  $('#issuePage').dataset.stage = stageColumn(issue); // 顶部那道状态线
   $('#panelId').textContent = issue.id;
   $('#panelTitle').textContent = issue.title;
   renderIssueMeta(issue);
@@ -1049,16 +1128,22 @@ async function openIssue(id, { keepTab = false } = {}) {
 }
 
 function renderIssueMeta(issue) {
+  const owners = peopleText(issue.assignees, issue.assignee);
   $('#panelMeta').innerHTML = [
+    `<span class="meta-item"><i>状态</i>${stageBadge(issue)}</span>`,
     `<span class="meta-item"><i>类型</i>${esc(issue.type)}</span>`,
-    issue.createdBy ? `<span class="meta-item"><i>创建</i>${esc(issue.createdBy)}</span>` : '',
-    `<span class="meta-item"><i>负责人</i>${esc(issue.assignee || '—')}</span>`,
+    issue.createdBy ? `<span class="meta-item"><i>创建人</i>${esc(issue.createdBy)}</span>` : '',
+    `<span class="meta-item"><i>创建时间</i><time datetime="${esc(issue.created)}">${esc(fmtTime(issue.created))}</time></span>`,
+    issue.closed ? `<span class="meta-item"><i>完成时间</i><time datetime="${esc(issue.closed)}">${esc(fmtTime(issue.closed))}</time></span>` : '',
+    `<span class="meta-item"><i>负责人</i>${owners ? esc(owners) : '—'}</span>`,
     `<span class="meta-item"><i>更新</i>${esc(fmtTime(issue.updated))}</span>`,
   ].join('');
 }
 
-/** 工作流进度 / 优先级 / 派单 / 关单：别人改了也要跟着变，但正在操作的那个控件不打扰。 */
+/** 状态 / 负责人 / 关注人 / AI 进度 / 优先级 / 派单 / 归档：别人改了也要跟着变，但正在操作的那个控件不打扰。 */
 function renderIssueFields(issue) {
+  renderPanelStatus(issue);
+  renderPanelPeople(issue);
   renderPanelWorkflow(issue);
   renderPanelLabels(issue);
   const prio = $('#panelPriority');
@@ -1066,6 +1151,103 @@ function renderIssueFields(issue) {
   renderDispatch(issue);
   renderCloseButton(issue);
   renderComposer(issue);
+}
+
+/** 状态下拉：六段固定，改完由服务端校验并留一条状态变更评论。 */
+function renderPanelStatus(issue) {
+  const sel = $('#panelStatus');
+  if (!sel) return;
+  if (sel.dataset.ready !== '1') {
+    sel.innerHTML = state.stages
+      .map((s) => `<option value="${esc(s.status ?? STAGE_STATUS_BY_ID[s.id] ?? s.id)}">${esc(s.label)}</option>`)
+      .join('');
+    sel.dataset.ready = '1';
+  }
+  sel.value = stageOf(issue).status;
+}
+
+/** 负责人 / 关注人：都可以多选，选中的名字存进工单（bd metadata），第一个负责人同步到 bd assignee。 */
+function peopleCandidateNames(field, selected) {
+  const fromUsers = state.users.map((u) => u.display || u.name);
+  const fromIssues = state.issues.flatMap((i) =>
+    field === 'assignees' ? (i.assignees?.length ? i.assignees : [i.assignee]) : i.watchers ?? [],
+  );
+  const current = state.current
+    ? field === 'assignees'
+      ? state.current.assignees ?? [state.current.assignee]
+      : state.current.watchers ?? []
+    : [];
+  return sortedUnique([...fromUsers, ...fromIssues, ...current, ...selected].filter(Boolean));
+}
+
+function peopleRole(name) {
+  const user = state.users.find((u) => (u.display || u.name) === name);
+  return user ? (user.role === 'owner' ? '管理员' : '成员') : '';
+}
+
+function renderPanelPeople(issue) {
+  const assignees = issue.assignees?.length ? issue.assignees : issue.assignee ? [issue.assignee] : [];
+  renderPeopleField($('#panelAssignees'), 'assignees', assignees);
+  renderPeopleField($('#panelWatchers'), 'watchers', issue.watchers ?? []);
+}
+
+function renderPeopleField(host, field, selected) {
+  if (!host) return;
+  const open = host.querySelector('details')?.open;
+  const label = field === 'assignees' ? '负责人' : '关注人';
+  const candidates = peopleCandidateNames(field, selected);
+  const chips = selected.length
+    ? selected
+        .map(
+          (name) => `<span class="person-chip"><span>${esc(name)}</span><button type="button" data-person-remove="${field}" data-name="${esc(name)}" aria-label="移除 ${esc(name)}" title="移除">×</button></span>`,
+        )
+        .join('')
+    : `<span class="dash">${field === 'assignees' ? '未指派' : '还没有关注人'}</span>`;
+  const options = candidates.length
+    ? candidates
+        .map(
+          (name) => `<label class="people-opt"><input type="checkbox" data-person-toggle="${field}" value="${esc(name)}"${selected.includes(name) ? ' checked' : ''}><span>${esc(name)}</span>${peopleRole(name) ? `<i>${esc(peopleRole(name))}</i>` : ''}</label>`,
+        )
+        .join('')
+    : '<span class="people-empty">还没有可选的人，直接输入名字添加</span>';
+  host.innerHTML = `<div class="people-chips">${chips}</div>
+    <details class="people-picker">
+      <summary class="ghost tiny">选择${label}</summary>
+      <div class="people-menu">
+        ${options}
+        <div class="people-free">
+          <input data-person-input="${field}" placeholder="其他名字，回车添加" maxlength="32" />
+          <button type="button" data-person-add="${field}">添加</button>
+        </div>
+      </div>
+    </details>`;
+  const box = host.querySelector('details');
+  if (box) box.open = Boolean(open);
+}
+
+async function savePeople(field, list) {
+  const issue = state.current;
+  if (!issue) return;
+  try {
+    const { issue: saved } = await api(`/api/issues/${encodeURIComponent(issue.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ [field]: list }),
+    });
+    state.current = saved;
+    renderIssueMeta(saved);
+    renderIssueFields(saved);
+    hint(field === 'assignees' ? '负责人已更新' : '关注人已更新');
+    if (document.body.dataset.mode === 'board') load().catch(() => {});
+  } catch (err) {
+    hint(`改动失败：${err.message}`, true);
+    if (state.current) renderPanelPeople(state.current);
+  }
+}
+
+function currentPeople(field) {
+  const issue = state.current;
+  if (!issue) return [];
+  return field === 'assignees' ? issue.assignees ?? (issue.assignee ? [issue.assignee] : []) : issue.watchers ?? [];
 }
 
 function renderPanelLabels(issue) {
@@ -1350,6 +1532,10 @@ state.combos.create = mountLabelCombo({
 
 function renderPanelWorkflow(issue) {
   const wf = workflowOf(issue);
+  if (!wf.runId) {
+    $('#panelWorkflow').innerHTML = '<span class="dash">还没有 AI 运行记录</span>';
+    return;
+  }
   const label = wf.label || workflowName(wf.column);
   const detail = wf.detail ? `<span class="wf-detail">${esc(wf.detail)}</span>` : '';
   let when = '';
@@ -1363,15 +1549,15 @@ function renderCloseButton(issue) {
   const btn = $('#panelClose');
   const hint = $('#panelCloseHint');
   if (!btn || !hint) return;
-  const closed = issue.status === 'closed';
-  btn.textContent = closed ? '重新打开工单' : '关闭工单';
-  btn.className = closed ? 'ghost' : 'ghost danger';
+  const archived = issue.status === 'archived';
+  btn.textContent = archived ? '恢复工单' : '归档工单';
+  btn.className = archived ? 'ghost' : 'ghost danger';
   const wf = workflowOf(issue);
-  hint.textContent = closed
-    ? '重开后不会自动派单；需要时再点「让 AI 干这个」。'
+  hint.textContent = archived
+    ? '恢复后回到「新建」；需要 AI 时再点「让 AI 干这个」。'
     : wf.active
-      ? 'AI 还在跑。关单只是归档，不会中断这一轮。'
-      : '关闭 = 归档；不是验收通过。';
+      ? 'AI 还在跑。归档不会中断这一轮。'
+      : '归档 = 从日常看板收起；不是验收通过。';
 }
 
 const commentKey = (c) => `${c.author}|${c.created}|${String(c.text ?? '').slice(0, 24)}`;
@@ -1425,7 +1611,11 @@ function applyLiveIssue(issue, comments) {
   const prev = state.current;
   if (!prev) return;
   const changed = [];
-  if (issue.status !== prev.status) changed.push(issue.status === 'closed' ? '工单已关闭' : '工单已重新打开');
+  const stageA = stageOf(prev);
+  const stageB = stageOf(issue);
+  if (stageA.id !== stageB.id) changed.push(`状态：${stageA.label} → ${stageB.label}`);
+  if (peopleText(prev.assignees, prev.assignee) !== peopleText(issue.assignees, issue.assignee)) changed.push('负责人变了');
+  if (peopleText(prev.watchers) !== peopleText(issue.watchers)) changed.push('关注人变了');
   const wfA = workflowOf(prev);
   const wfB = workflowOf(issue);
   if (wfA.column !== wfB.column || wfA.label !== wfB.label) changed.push(`AI 进度：${wfB.label || workflowName(wfB.column)}`);
@@ -1473,15 +1663,15 @@ function renderDispatch(issue) {
   const btn = $('#panelDispatch');
   const hintEl = $('#panelDispatchHint');
   const wf = workflowOf(issue);
-  // 已关闭的单优先给「重开」：即使它身上还留着可派标签，也不该显示成「取消派单」。
-  if (issue.status === 'closed') {
+  // 已结束的单优先给「重开」：即使它身上还留着可派标签，也不该显示成「取消派单」。
+  if (issue.status === 'closed' || issue.status === 'archived') {
     btn.textContent = '重开并派给 AI';
     btn.className = 'primary';
-    hintEl.textContent = `会重新打开并打上 ${state.readyLabel}`;
+    hintEl.textContent = `会改回「新建」并打上 ${state.readyLabel}`;
     return;
   }
-  // 上一轮没跑完（需要人 / 已中断）：给一个明确的重派入口，而不是「取消派单」。
-  if (wf.column === 'active' && !wf.active) {
+  // 上一轮没跑完（需要人 / 已中断 / 已交付等人验收）：给一个明确的重派入口，而不是「取消派单」。
+  if (issue.status !== 'open' && !wf.active) {
     // 只是发布没做完：重派只重跑收尾，不会再叫 AI 干一遍活
     if (wf.retry === 'publish') {
       btn.textContent = '重试发布';
@@ -1491,7 +1681,7 @@ function renderDispatch(issue) {
     }
     btn.textContent = '重新派给 AI';
     btn.className = 'primary';
-    hintEl.textContent = '会把工单改回待接并保留可派标签；下一轮会重新接单';
+    hintEl.textContent = '会把工单改回「新建」并保留可派标签；下一轮会重新接单';
     return;
   }
   if (issue.labels.includes(state.readyLabel)) {
@@ -1500,7 +1690,7 @@ function renderDispatch(issue) {
     hintEl.textContent =
       issue.status === 'open'
         ? `已标 ${state.readyLabel}：${state.watch?.running ? '自动流水线会自己接它' : '点右上角「自动流水线」或 node wf.mjs work'}`
-        : `已标 ${state.readyLabel}，但工单不是待接（${wf.label || workflowName(wf.column)}）——engine 只接 open + 可派`;
+        : `已标 ${state.readyLabel}，但工单不在「新建」（${stageOf(issue).label}）——engine 只接新建 + 可派`;
     return;
   }
   btn.textContent = '让 AI 干这个';
@@ -1515,7 +1705,7 @@ async function dispatchCurrent() {
   if (!issue || state.dispatching) return;
   const ready = issue.labels.includes(state.readyLabel);
   const wf = workflowOf(issue);
-  const reopening = issue.status === 'closed' || (issue.status !== 'open' && !wf.active);
+  const reopening = issue.status === 'closed' || issue.status === 'archived' || (issue.status !== 'open' && !wf.active);
   const body = reopening
     ? { status: 'open', addLabels: [state.readyLabel] }
     : ready
@@ -1535,9 +1725,9 @@ async function dispatchCurrent() {
     renderDispatch(saved);
     hint(
       reopening && wf.retry === 'publish'
-        ? '已改回待接：下一轮只重试收尾（提交 / 推送 / PR），不会再调 AI'
+        ? '已改回「新建」：下一轮只重试收尾（提交 / 推送 / PR），不会再调 AI'
         : reopening
-          ? `已重新打开并标 ${state.readyLabel}`
+          ? `已改回「新建」并标 ${state.readyLabel}`
           : ready
             ? '已取消派单'
             : `已标 ${state.readyLabel}：终端跑 node wf.mjs work 就开始干`,
@@ -1721,7 +1911,9 @@ async function selectGraphRun(runId) {
 // 时间统一按本地时区展示（run.json 存的是 UTC，直接渲染会和「几点跑的」差一截）
 const fmtTime = (at) => {
   const d = new Date(at ?? '');
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false }).slice(0, 16);
+  if (Number.isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const fmtMs = (ms) => (ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
 
@@ -2107,8 +2299,8 @@ async function sendComment() {
     if (revise) {
       hint(
         state.watch?.running
-          ? '已退回待接：自动流水线会接着跑，下一轮 AI 会看到这条修正意见'
-          : '已退回待接：跑 node wf.mjs work（或开自动流水线），下一轮 AI 会看到这条修正意见',
+          ? '已退回「新建」：自动流水线会接着跑，下一轮 AI 会看到这条修正意见'
+          : '已退回「新建」：跑 node wf.mjs work（或开自动流水线），下一轮 AI 会看到这条修正意见',
       );
     } else {
       hint('评论已发送');
@@ -2216,6 +2408,8 @@ function setAuthMode(mode) {
 
 function applyAuth(me) {
   state.auth = { mail: false, ...(me ?? {}) };
+  if (Array.isArray(me?.users)) state.users = me.users;
+  else if (me?.user && !state.users.some((u) => u.name === me.user.name)) state.users = [...state.users, me.user];
   const authed = Boolean(me?.auth && me.user);
   const needsLogin = Boolean(me?.auth && !me.user);
   state.authed = authed;
@@ -2492,7 +2686,7 @@ async function saveEngine(event) {
   try {
     const saved = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
     state.tags = saved.config.tags ?? state.tags;
-    applyConfig({ workflow: state.workflowColumns, tags: state.tags, labels: saved.config.labels, engine: saved.config.engine });
+    applyConfig({ tags: state.tags, labels: saved.config.labels, engine: saved.config.engine });
     await loadTagCatalog();
     renderTagList();
     if (document.body.dataset.mode === 'board') await load();
@@ -2861,7 +3055,7 @@ $('#board').addEventListener('keydown', (e) => {
   location.assign(`/issue/${encodeURIComponent(el.dataset.id)}`);
 });
 
-// 看板不再支持拖拽改状态：工作流进度由 engine 写，人工只能关单/重开。
+// 看板不再支持拖拽改状态：状态在工单页手动切换；AI 进度由 engine 写。
 // —— 搜索 / 筛选条 / 预设 ——
 
 $('#q').addEventListener('input', (e) => {
@@ -3129,9 +3323,62 @@ $('#sessionThink').addEventListener('change', applyThinkFilter);
 $('#panelClose').addEventListener('click', async () => {
   const issue = state.current;
   if (!issue) return;
-  const next = issue.status === 'closed' ? 'open' : 'closed';
+  const next = issue.status === 'archived' ? 'open' : 'archived';
   const ok = await patch({ status: next });
-  if (ok) hint(next === 'closed' ? '工单已关闭（归档）' : '工单已重新打开；要派单再点「让 AI 干这个」');
+  if (ok) hint(next === 'archived' ? '工单已归档；不是验收通过' : '工单已恢复为「新建」；要派单再点「让 AI 干这个」');
+});
+
+$('#panelStatus').addEventListener('change', async (e) => {
+  const status = e.target.value;
+  const issue = state.current;
+  if (!issue) return;
+  const label = state.stages.find((s) => s.status === status)?.label ?? status;
+  const ok = await patch({ status });
+  if (ok) hint(`状态已改为「${label}」`);
+  else if (state.current) renderPanelStatus(state.current);
+});
+
+// 负责人 / 关注人：勾选、移除、手输名字都走同一条 PATCH。
+document.addEventListener('change', (e) => {
+  const box = e.target.closest?.('input[data-person-toggle]');
+  if (!box || document.body.dataset.mode !== 'issue') return;
+  const field = box.dataset.personToggle;
+  const current = currentPeople(field);
+  const next = box.checked ? [...current, box.value] : current.filter((name) => name !== box.value);
+  savePeople(field, next);
+});
+
+document.addEventListener('click', (e) => {
+  const remove = e.target.closest?.('[data-person-remove]');
+  if (remove && document.body.dataset.mode === 'issue') {
+    const field = remove.dataset.personRemove;
+    savePeople(
+      field,
+      currentPeople(field).filter((name) => name !== remove.dataset.name),
+    );
+    return;
+  }
+  const add = e.target.closest?.('[data-person-add]');
+  if (add && document.body.dataset.mode === 'issue') {
+    const field = add.dataset.personAdd;
+    const input = add.parentElement?.querySelector('[data-person-input]');
+    const name = String(input?.value ?? '').trim();
+    if (!name) return;
+    if (!currentPeople(field).includes(name)) savePeople(field, [...currentPeople(field), name]);
+    if (input) input.value = '';
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || document.body.dataset.mode !== 'issue') return;
+  const input = e.target.closest?.('[data-person-input]');
+  if (!input) return;
+  e.preventDefault();
+  const field = input.dataset.personInput;
+  const name = String(input.value ?? '').trim();
+  if (!name) return;
+  if (!currentPeople(field).includes(name)) savePeople(field, [...currentPeople(field), name]);
+  input.value = '';
 });
 $('#watch').addEventListener('click', toggleWatch);
 $('#panelDispatch').addEventListener('click', dispatchCurrent);

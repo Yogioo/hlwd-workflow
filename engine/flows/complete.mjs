@@ -116,9 +116,12 @@ export async function complete({ cfg, workdir, issue, runDir, checks = [], git: 
   if (result.commit) bits.push(`提交 ${result.commit}`);
   if (result.push?.ok) bits.push(`推送 ${result.push.branch}`);
   if (result.pr?.url) bits.push(`PR ${result.pr.url}`);
-  await beads.updateIssue(issue.id, { status: 'closed' });
-  await beads.commentIssue(issue.id, bits.length ? `AI 已完成：${bits.join('，')}。` : 'AI 已完成（无代码改动）。');
-  log(`关闭 ${issue.id}`);
+  // 状态不在这里推进：AI 停在「开发中」，由人验收后手动改成「策划验收」。
+  await beads.commentIssue(
+    issue.id,
+    bits.length ? `AI 已完成：${bits.join('，')}。等人工验收。` : 'AI 已完成（无代码改动）。等人工验收。',
+  );
+  log(`交付 ${issue.id}（状态保持开发中，等人工验收）`);
   void checks;
   return result;
 }
@@ -126,7 +129,7 @@ export async function complete({ cfg, workdir, issue, runDir, checks = [], git: 
 /** 退回：执行失败回 open（可以重派），审查不通过或发布失败留在 in_progress（需要人看）。 */
 export async function handback({ issue, reason, status, head = '' }) {
   await beads.updateIssue(issue.id, { status });
-  const title = head || (status === 'open' ? 'AI 执行中断，已退回待接' : 'AI 审查未通过，留待人工处理');
+  const title = head || (status === 'open' ? 'AI 执行中断，已退回新建' : 'AI 审查未通过，留在开发中待人工处理');
   await beads.commentIssue(issue.id, `${title}：${oneLine(reason)}`);
-  log(`回退 ${issue.id} → ${status}`);
+  log(`回退 ${issue.id} → ${status === 'open' ? '新建' : '开发中'}`);
 }

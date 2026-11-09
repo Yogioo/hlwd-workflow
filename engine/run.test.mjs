@@ -73,14 +73,14 @@ async function seedPublishFailed({ dir, branch, issue }) {
   return { runId, commit };
 }
 
-test('发布失败后重派：只重跑收尾，直接推送并关单，不调用 AI', async () => {
+test('发布失败后重派：只重跑收尾，直接推送并交付，不调用 AI', async () => {
   await withProject(async ({ dir, remote, branch }) => {
     await saveProjectConfig(dir, {
       engine: { nodes: { complete: { commit: true, push: true, pr: false, remote: 'origin', base: branch } } },
     });
     const created = await beads.createIssue({ title: '重试发布', description: '', labels: ['ready-for-agent'] });
     const seeded = await seedPublishFailed({ dir, branch, issue: created });
-    // 现场是「已接单但没交付」：改回待接，让它能被再派一次
+    // 现场是「已接单但没交付」：改回新建，让它能被再派一次
     await beads.updateIssue(created.id, { status: 'open' });
 
     const { stdout } = await exec(process.execPath, [RUN, '--project', dir, '--id', created.id], {
@@ -102,12 +102,13 @@ test('发布失败后重派：只重跑收尾，直接推送并关单，不调�
     assert.equal(run.mode, 'publish', '这一趟是发布重试，不是完整运行');
     assert.equal(run.resumedFrom, seeded.runId, '记下是从哪一次接着做的');
     assert.equal(run.attempts.length, 1, '上一轮的执行/审查记录要带过来，看板才画得出流程');
-    assert.equal(run.outcome, 'closed');
+    assert.equal(run.outcome, 'delivered');
     assert.equal(run.push.ok, true);
     assert.equal(run.commit, head, '记的是推出去的那个提交');
 
     const after = await beads.getIssue(created.id);
-    assert.equal(after.issue.status, 'closed');
+    assert.equal(after.issue.status, 'in_progress', '交付后停在开发中，等人工验收');
     assert.match(after.comments.map((c) => c.text).join('\n'), /重试发布/);
+    assert.match(after.comments.map((c) => c.text).join('\n'), /等人工验收/);
   });
 });

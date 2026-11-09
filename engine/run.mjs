@@ -80,6 +80,8 @@ async function main() {
   const info = await ensureProject(workdir);
   beads.setWorkdir(workdir);
   setProjectDir(workdir);
+  // 新项目第一次跑时把验收/归档状态补进 bd 配置；已存在就什么都不写。
+  await beads.ensureWorkflowStatuses().catch((err) => log(`状态配置没补上：${err.message}`));
   log(`项目 ${workdir}${info.created.length ? `（补齐 ${info.created.join('、')}）` : ''}`);
 
   const cfg = await loadConfig(workdir);
@@ -156,7 +158,7 @@ async function main() {
       const result = await complete({ cfg, workdir, issue, runDir, checks: [], git: cardGit, prior: resume });
       manifest.push = result.push;
       manifest.pr = result.pr;
-      await finish(manifest, save, journal, { outcome: 'closed', commit: result.commit });
+      await finish(manifest, save, journal, { outcome: 'delivered', commit: result.commit });
       return 0;
     } catch (err) {
       const reason = `收尾失败：${err.message}`;
@@ -241,7 +243,7 @@ async function main() {
         const result = await complete({ cfg, workdir, issue, runDir, checks: verdict.checks, git: cardGit });
         manifest.push = result.push;
         manifest.pr = result.pr;
-        await finish(manifest, save, journal, { outcome: 'closed', commit: result.commit });
+        await finish(manifest, save, journal, { outcome: 'delivered', commit: result.commit });
         return 0;
       } catch (err) {
         // 收尾失败也要留下痕迹，别让单卡在 in_progress 里没人知道为什么；

@@ -6,16 +6,20 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { STAGE_IDS } from './stages.mjs';
+
 const ROOT = path.join(os.homedir(), '.hlwd', 'prefs');
 const VERSION = 1;
 
 /** 列表认得的列。id 同时是前端排序键；加列要同时改 app.js 的 COLUMNS。 */
 export const COLUMN_IDS = [
-  'workflow',
+  'stage',
+  'ai',
   'priority',
   'type',
   'title',
   'assignee',
+  'watchers',
   'createdBy',
   'created',
   'updated',
@@ -25,11 +29,13 @@ export const COLUMN_IDS = [
   'id',
 ];
 const DEFAULT_W = {
-  workflow: 100,
+  stage: 100,
+  ai: 110,
   priority: 62,
   type: 64,
   title: 300,
   assignee: 110,
+  watchers: 110,
   createdBy: 110,
   created: 96,
   updated: 96,
@@ -38,8 +44,19 @@ const DEFAULT_W = {
   ready: 64,
   id: 78,
 };
-// 和改版前的九列一致：新加的「创建时间 / 标签 / 可派」默认收起来
-const VISIBLE_DEFAULT = new Set(['workflow', 'priority', 'type', 'title', 'assignee', 'createdBy', 'updated', 'comments', 'id']);
+// 默认看到「状态 / 创建时间 / 关注人」；AI 进度、标签、可派默认收起来。
+const VISIBLE_DEFAULT = new Set([
+  'stage',
+  'priority',
+  'type',
+  'title',
+  'assignee',
+  'watchers',
+  'created',
+  'updated',
+  'comments',
+  'id',
+]);
 const MIN_W = 56;
 const MAX_W = 720;
 const MAX_PRESETS = 30;
@@ -56,7 +73,7 @@ export function emptyFilter() {
   return {
     q: '',
     ready: false,
-    workflow: [],
+    stage: [],
     priority: [],
     type: [],
     assignee: [],
@@ -70,12 +87,14 @@ export function emptyFilter() {
 function cleanFilter(input = {}) {
   const f = input && typeof input === 'object' ? input : {};
   const u = f.updated && typeof f.updated === 'object' ? f.updated : {};
-  const LEGACY = { open: 'queued', in_progress: 'active', review: 'review', closed: 'done' };
-  const workflow = f.workflow !== undefined ? list(f.workflow) : list(f.status).map((s) => LEGACY[s] ?? s);
+  // 旧版按 AI 进度筛（queued/active/review/done）；现在按工单状态筛。
+  const LEGACY = { queued: 'new', active: 'developing', review: 'developing', done: 'done', open: 'new', in_progress: 'developing', closed: 'done' };
+  const rawStage = f.stage !== undefined ? f.stage : f.workflow !== undefined ? f.workflow : f.status;
+  const stage = list(rawStage).map((s) => LEGACY[s] ?? s).filter((s) => STAGE_IDS.includes(s));
   return {
     q: str(f.q, 120),
     ready: f.ready === true,
-    workflow,
+    stage,
     priority: Array.isArray(f.priority)
       ? [...new Set(f.priority.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 4))].sort((a, b) => a - b)
       : [],
@@ -95,8 +114,8 @@ function cleanColumns(input) {
   const seen = new Set();
   const out = [];
   for (const c of Array.isArray(input) ? input : []) {
-    // 旧版把这一列叫 status；迁移时保留原来的宽度与顺序。
-    const id = c?.id === 'status' ? 'workflow' : c?.id;
+    // 旧版把这一列叫 status / workflow；迁移时保留原来的宽度与顺序。
+    const id = c?.id === 'status' || c?.id === 'workflow' ? 'stage' : c?.id;
     if (!COLUMN_IDS.includes(id) || seen.has(id)) continue;
     seen.add(id);
     const w = Number(c.w);
@@ -114,7 +133,7 @@ function cleanColumns(input) {
 }
 
 const cleanSort = (s) => {
-  const key = s?.key === 'status' ? 'workflow' : s?.key;
+  const key = s?.key === 'status' || s?.key === 'workflow' ? 'stage' : s?.key;
   return { key: COLUMN_IDS.includes(key) ? key : 'updated', dir: s?.dir === 'asc' ? 'asc' : 'desc' };
 };
 

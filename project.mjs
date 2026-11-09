@@ -198,11 +198,20 @@ const TAG_DESC_MAX = 200;
 const TAG_COLOR = /^#[0-9a-f]{6}$/i;
 
 export const DEFAULT_CONFIG = {
+  // 状态名是固定的（web/stages.mjs）；这几个字段只为旧配置/旧客户端保留。
   labels: {
-    statuses: { open: '待接', in_progress: '执行中', review: '待审', closed: '已完成' },
+    statuses: {
+      open: '新建',
+      in_progress: '开发中',
+      plan_review: '策划验收',
+      test_review: '测试验收',
+      closed: '已完成',
+      archived: '已归档',
+      review: '开发中',
+    },
     priorities: { 0: '紧急', 1: '高', 2: '中', 3: '低', 4: '最低' },
   },
-  columns: ['open', 'in_progress', 'review', 'closed'],
+  columns: ['open', 'in_progress', 'plan_review', 'test_review', 'closed', 'archived'],
   // 标签目录只存展示信息（颜色/说明/归档）；哪些单有什么标签仍从 beads 读。
   tags: [],
   engine: {
@@ -780,9 +789,8 @@ export async function ensureProject(inputDir) {
     if (missing.length) await fsp.writeFile(hlwdIgnore, `${currentIgnore.replace(/\n?$/, '\n')}${missing.join('\n')}\n`, 'utf8');
   }
 
-  // review 只为旧数据兼容保留：新流程把审查阶段放在 run.json 里，不再写这个工单状态。
-  await bd(['config', 'set', 'status.custom', 'review:wip'], dir).catch(() => {});
-
+  // 工单状态（plan_review / test_review / archived）由 web/beads.mjs 的
+  // ensureWorkflowStatuses() 在打开项目时注册；ensureProject 不再碰 status.custom。
   const config = await readProjectConfig(dir);
   return { dir, created, config };
 }
