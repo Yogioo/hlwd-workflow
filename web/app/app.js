@@ -100,6 +100,10 @@ const state = {
   newComments: new Set(), // 页面开着期间新进来的评论（一直标记，刷新才清）
   auth: { auth: false, user: null, firstRun: false, mail: false },
   share: null, // 看板绑定与内网地址（/api/meta 的 share；设置 → 访问 用）
+  update: null, // 工具自更新状态（/api/update）
+  updateBusy: false,
+  updateAction: '',
+  updatePending: false, // 已发起重启，等页面重新加载时不再把按钮放开
   authed: false,
   timer: null,
 };
@@ -2524,14 +2528,16 @@ function showSettingsSection(name) {
 }
 
 async function openSettings() {
-  const [{ config: cfg, prompts, gate, graph }, tagResult] = await Promise.all([
+  const [{ config: cfg, prompts, gate, graph }, tagResult, update] = await Promise.all([
     api('/api/settings'),
     api('/api/tags')
       .then((payload) => ({ tags: payload.tags ?? [] }))
       .catch((error) => ({ error })),
     // 设置 → 访问要显示「现在绑在哪、同事该用哪个地址」，顺手刷一次
     api('/api/meta').then(applyConfig).catch(() => {}),
+    api('/api/update').catch((error) => ({ error: error.message })),
   ]);
+  state.update = update;
   state.gate = gate ?? { path: '', exists: false };
   state.tagCatalog = tagResult.tags ?? [];
   state.tagError = tagResult.error ?? null;
@@ -2567,6 +2573,7 @@ async function openSettings() {
   renderTagList();
   renderPresetList();
   renderAccess();
+  renderUpdate();
   showSettingsSection('tags');
   $('#settingsDialog').showModal();
 }
@@ -2619,6 +2626,169 @@ function renderAccess() {
   $('#accessHint').textContent = loopback
     ? '点一下切到 0.0.0.0；当前 127.0.0.1 的页面不会断。'
     : '当前已对内网开放；收回后，从内网地址打开的页面会断开。';
+}
+
+/** 设置 → 更新：只读展示工具仓库现状；检查 / 更新按钮走 /api/update。 */
+function renderUpdate() {
+  const payload = state.update ?? {};
+  const repo = payload.repo ?? {};
+  const busy = state.updateBusy || state.updatePending;
+
+  $('#updateRoot').textContent = repo.root || '—';
+  $('#updateRoot').title = repo.root || '';
+  $('#updateVersion').textContent = repo.branch
+    ? `${repo.branch}${repo.commit ? ` @ ${repo.commit}` : ''}`
+    : repo.commit || '—';
+  $('#updateVersion').title = repo.subject ? `${repo.commit}  ${repo.subject}` : '';
+  $('#updateRemote').textContent = repo.remote
+    ? `${repo.remote}${repo.upstream ? ` · ${repo.upstream}` : ''}`
+    : '—';
+  $('#updateDirty').textContent = repo.git ? (repo.dirty ? '有未提交改动' : '干净') : '—';
+  $('#updateChecked').textContent = payload.checkedAt ? `检查于 ${fmtTime(payload.checkedAt)}` : '';
+
+  let text = '';
+  let tone = '';
+  if (payload.error && !repo.git) {
+    text = `读不到更新状态：${payload.error}`;
+    tone = 'err';
+  } else if (!repo.git) {
+    text = repo.reason || '工具目录不是 git 仓库，无法自动更新。';
+    tone = 'warn';
+  } else if (!repo.ownRepo) {
+    text = repo.reason || '工具目录不是独立的 git 仓库，已禁用自动更新。';
+    tone = 'warn';
+  } else if (!repo.branch) {
+    text = repo.reason || '当前不在任何分支上，无法快进更新。';
+    tone = 'warn';
+  } else if (repo.dirty) {
+    text = repo.reason || '工具仓库有未提交的改动，自动更新不会覆盖本地文件。';
+    tone = 'warn';
+  } else if (payload.error) {
+    text = payload.error;
+    tone = 'err';
+  } else if (!repo.remote) {
+    text = repo.reason || '没有配置 git remote，无法获取最新版本。';
+    tone = 'warn';
+  } else if (repo.ahead > 0 && repo.behind > 0) {
+    text = repo.reason || '本地和远端已分叉，快进合并不了，需要人工处理。';
+    tone = 'warn';
+  } else if (!repo.targetExists) {
+    text = repo.checkedAt
+      ? `远端没有分支 ${repo.target || repo.branch}，无法更新。`
+      : '还没检查远端；点「检查更新」确认远端分支和最新提交。';
+    tone = 'warn';
+  } else if (repo.behind > 0) {
+    text = payload.checkedAt
+      ? `远端有 ${repo.behind} 个新提交。点「更新并重启」拉下来。`
+      : `上次看到远端有 ${repo.behind} 个新提交；点「检查更新」确认一下。`;
+    tone = 'ok';
+  } else if (payload.checkedAt) {
+    text = `已经是最新版本（${repo.commit || '当前提交'}）。`;
+    tone = 'ok';
+  } else {
+    text = '点「检查更新」去远端看一眼；也可以直接「更新并重启」。';
+  }
+
+  $('#updateState').textContent = text;
+  $('#updateState').className = `update-state${tone ? ` is-${tone}` : ''}`;
+
+  const canCheck = Boolean(repo.git && repo.ownRepo) && !busy;
+  const canApply =
+    Boolean(repo.git && repo.ownRepo && repo.branch && repo.remote && !repo.dirty) &&
+    !(repo.ahead > 0 && repo.behind > 0) &&
+    !busy;
+  const check = $('#updateCheck');
+  const apply = $('#updateApply');
+  check.disabled = !canCheck;
+  apply.disabled = !canApply;
+  check.textContent = state.updateBusy && state.updateAction === 'check' ? '检查中…' : '检查更新';
+  apply.textContent = state.updatePending
+    ? '重启中…'
+    : state.updateBusy && state.updateAction === 'apply'
+      ? '更新中…'
+      : '更新并重启';
+  apply.title = canApply ? '' : repo.reason || '当前不能更新';
+}
+
+async function refreshUpdate() {
+  const payload = await api('/api/update');
+  state.update = payload;
+  renderUpdate();
+  return payload;
+}
+
+async function checkToolUpdate() {
+  if (state.updateBusy || state.updatePending) return;
+  state.updateBusy = true;
+  state.updateAction = 'check';
+  renderUpdate();
+  try {
+    const out = await api('/api/update', { method: 'POST', body: JSON.stringify({ action: 'check' }) });
+    state.update = out;
+    renderUpdate();
+    if (out.error) hint(`检查失败：${out.error}`, true);
+    else if (out.repo?.behind > 0) hint(`远端有 ${out.repo.behind} 个新提交，可以更新`);
+    else hint('已经是最新版本');
+  } catch (err) {
+    hint(`检查失败：${err.message}`, true);
+    await refreshUpdate().catch(() => {});
+  } finally {
+    state.updateBusy = false;
+    state.updateAction = '';
+    renderUpdate();
+  }
+}
+
+/** 等新看板起来：旧进程仍可能回包，必须看到接口返回的 boot id 才算重启完成。 */
+async function waitForRestart(boot, timeoutMs = 30000) {
+  if (!boot) throw new Error('服务端没有给出重启标识，无法确认新看板已启动');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      const res = await fetch('/api/meta', { cache: 'no-store' });
+      if (!res.ok) continue;
+      const meta = await res.json();
+      if (meta.boot === boot) return meta;
+    } catch {
+      // 旧进程关了、新进程还没监听
+    }
+  }
+  throw new Error('看板没有在 30 秒内重启回来；看 ~/.hlwd/board.log，或手动 node wf.mjs board --bg');
+}
+
+async function applyToolUpdate() {
+  if (state.updateBusy || state.updatePending) return;
+  const repo = state.update?.repo ?? {};
+  const where = repo.remote ? `${repo.remote}${repo.branch ? `/${repo.branch}` : ''}` : '远端';
+  if (!window.confirm(`从 ${where} 拉取最新代码并重启看板？当前页面会短暂断开，然后自动重新加载。`)) return;
+
+  state.updateBusy = true;
+  state.updateAction = 'apply';
+  renderUpdate();
+  try {
+    const out = await api('/api/update', { method: 'POST', body: JSON.stringify({ action: 'apply' }) });
+    state.update = { repo: out.repo, checkedAt: out.checkedAt };
+    if (!out.restarting) {
+      hint(out.message || '已经是最新版本');
+      return;
+    }
+    state.updatePending = true;
+    renderUpdate();
+    $('#updateState').textContent = `已更新到 ${out.to || '最新版本'}，看板正在重启；页面会自动重新加载…`;
+    $('#updateState').className = 'update-state is-ok';
+    hint('看板正在重启，页面会自动重新加载…');
+    await waitForRestart(out.boot);
+    location.reload();
+  } catch (err) {
+    state.updatePending = false;
+    hint(`更新失败：${err.message}`, true);
+    await refreshUpdate().catch(() => {});
+  } finally {
+    state.updateBusy = false;
+    state.updateAction = '';
+    if (!state.updatePending) renderUpdate();
+  }
 }
 
 /** 剪贴板：从内网 http 地址打开时没有 navigator.clipboard，退回 execCommand。 */
@@ -3596,6 +3766,10 @@ async function bindBoard(lan) {
 
 $('#accessOpen').addEventListener('click', () => bindBoard(true));
 $('#accessClose').addEventListener('click', () => bindBoard(false));
+
+// 设置 → 更新：检查远端 / 快进更新 + 重启看板
+$('#updateCheck').addEventListener('click', () => checkToolUpdate());
+$('#updateApply').addEventListener('click', () => applyToolUpdate());
 
 // 弹窗：点背景或右上角 × 就能关，不必滚到底部找「取消」
 for (const dialog of document.querySelectorAll('dialog.dialog')) {

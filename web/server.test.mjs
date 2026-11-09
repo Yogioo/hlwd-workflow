@@ -71,6 +71,26 @@ async function withServer(fn, { auth = false, beads = false, env = {} } = {}) {
   }
 }
 
+test('更新接口：GET 报告工具仓库与 boot，未知 action 400', async () => {
+  await withServer(async ({ base }) => {
+    const t = `?token=${TOKEN}`;
+    const res = await fetch(`${base}/api/update${t}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.repo, '要带回工具仓库现状');
+    assert.equal(typeof body.repo.git, 'boolean');
+    assert.equal(typeof body.repo.root, 'string');
+    assert.equal(body.server.pid > 0, true);
+    assert.match(body.server.boot, /[0-9a-f-]{8,}/);
+
+    const bad = await fetch(`${base}/api/update${t}`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'nope' }),
+    });
+    assert.equal(bad.status, 400);
+  });
+});
+
 test('设了 WF_TOKEN：没口令 401，带口令 200 并记 cookie', async () => {
   await withServer(async ({ base }) => {
     const denied = await fetch(`${base}/api/meta`);

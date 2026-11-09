@@ -14,7 +14,7 @@
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `beads`（`bd`） | 工单存储与状态，每个项目一份 | 不跑 AI、不判验收 |
-| `web` | 看板、建单、改单、状态/负责人/关注人、标签库、归档/恢复、改项目配置、切项目；起停自动流水线 | 不跑 AI、不写 git、不绕开适配层 |
+| `web` | 看板、建单、改单、状态/负责人/关注人、标签库、归档/恢复、改项目配置、切项目；起停自动流水线；更新工具自身并重启看板 | 不跑 AI、不写项目 git、不绕开适配层 |
 | `engine` | 接单 → 执行 → 门禁 → 审查 → 交付 PR、回写结论；`watch.mjs` 常驻循环自动接单 | 不渲染页面、不定义工单字段、不替人做验收 |
 | `project.mjs` | 打开项目：补齐 `.hlwd/`（配置/提示词/门禁）、缺 `.beads/` 就 `bd init` | 不存状态、不调 AI |
 
@@ -187,6 +187,23 @@ resumablePublish(run) -> {runId, commit, git, attempts} | null   # run.json 里 
   执行与审查的记录原样带进新的 run（`mode=publish`、`resumedFrom=<旧 runId>`）。上次的提交没丢，重试时没有新改动就沿用它的 sha 继续推送。
   看板上的按钮会变成「重试发布」。`node wf.mjs work --fresh` 可以强制忽略这个捷径、从头再跑一遍。
 
+**SelfUpdate**（`update.mjs`，只有 web 用；更新的是工具自身，不是当前项目）
+
+```
+readStatus(root) -> {root, git, ownRepo, branch, remote, upstream, target,
+                     commit, subject, date, dirty, ahead, behind, targetExists,
+                     canUpdate, reason}
+checkUpdates(root) -> {repo, checkedAt, error}          # git fetch --prune <remote>，只动远端跟踪引用
+applyUpdates(root) -> {ok, updated, from, to, repo, error?, code?}
+```
+
+- **只更新工具仓库**：`root` 必须是独立的 git 仓库（`rev-parse --show-toplevel` 等于它本身）；否则禁用，避免把父仓库当成工具更新。
+- 工作区有未提交改动、detached HEAD、没有 remote、远端分支不存在、或本地与远端分叉时一律拒绝；不做 `reset` / `checkout --force`。
+- 合并只走 `git merge --ff-only`：能快进就更新，不能就停下来报原因，本地提交和文件都不丢。
+- 成功后由 `web/server.mjs` 关掉监听、用同样的项目 / 端口 / 监听地址 / 口令拉起新进程，并写回 `board.json` 的 pid。
+- HTTP 面：`GET /api/update`（现状 + 本进程 boot）、`POST /api/update {action: check|apply}`。apply 成功时返回新进程的 boot id；页面轮询 `/api/meta` 的 `boot` 确认新看板真的接管后才刷新。
+- 这是 web 唯一会跑 git 的地方，且只对工具仓库；项目 git（分支 / 提交 / PR）仍然只属于 engine。
+
 **验收归 engine。** 是否通过由 §5 状态机 + 门禁结论 + 执行产物（commit/测试输出）决定，不由 runner 退出码决定。
 
 **RunTrace**（`web` 只读）
@@ -282,6 +299,7 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 AGENTS.md
 wf.mjs             # 唯一入口：board / stop / work / trace / new，只做分发
 project.mjs        # 项目层：打开目录、补齐 .hlwd/、配置与提示词读写
+update.mjs         # 工具自更新：检查远端 / 快进合并（只对工具仓库；不碰项目 git）
 package.json       # 只有 scripts，没有依赖
 .hlwd/ .beads/     # 本仓库自己作为项目时的配置与工单
 web/               # 页面 + beads 适配层
@@ -341,6 +359,7 @@ node wf.mjs --project D:\code\foo ...   # 任何动词都可以指定项目
 - 列表视图：表头点一下排序、按住表头拖换列序、拖右边界改列宽；「列」里勾选显示哪些列（含「状态 / AI 进度 / 关注人 / 创建时间」），「筛选」按字段组合过滤（同时作用于看板和列表），常看的条件「存为预设」。这些都存在 `~/.hlwd/prefs/<你>.json` 的项目那一段，换项目各是各的。
 - **要不要开自动流水线**：开了就不用守终端——看板上点一下（或 `watch --bg`），之后只要有「新建 + 可派」的单就自己开干；关闭看板不影响流水线，`node wf.mjs stop` 两个一起停。
 - 想连“点一下”也省了：设置里勾「看板启动时自动开自动流水线」（`engine.autoWatch=true`），看板一启动就把流水线拉起来。
+- **升级工具**：看板「设置 → 更新」点「检查更新」看远端，点「更新并重启」执行 `git fetch` + `git merge --ff-only` 并重启看板；只更新工具仓库，不动项目。不是独立 git 仓库 / 有未提交改动 / 已分叉时会被拒绝，并说明原因。
 
 **内网分享**（给同网段的同事看/建/改单）
 

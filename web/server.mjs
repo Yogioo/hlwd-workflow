@@ -1,7 +1,9 @@
 // web 黑盒：把「当前项目」的 beads 适配层暴露成 HTTP JSON 接口 + 单页看板。
-// 不跑 AI、不写 git、不碰 .beads 里的数据文件；项目可以随时切换。
+// 不跑 AI、不写项目 git、不碰 .beads 里的数据文件；项目可以随时切换。
+// 唯一的 git 例外是「工具自更新」：只对工具自己的仓库做 fetch + 快进，不碰当前项目。
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +26,7 @@ import {
   saveProjectConfig,
   savePrompts,
 } from '../project.mjs';
+import { applyUpdates, checkUpdates, readStatus as readUpdateStatus } from '../update.mjs';
 import * as beads from './beads.mjs';
 import { prefsFor, savePrefs } from './prefs.mjs';
 import { createTag, deleteTag, listTags, updateTag } from './tags.mjs';
@@ -51,17 +54,24 @@ import { VerifyError, consumeCode, issueCode } from './verify.mjs';
 import { getRun, latestRun, latestRuns, listRuns, readRunFile, setProjectDir } from './runs.mjs';
 import { listTurns, readTurn, setProjectDir as setSessionsDir, tailFrom } from './sessions.mjs';
 
-const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'app');
-const ENGINE_WATCH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'engine', 'watch.mjs');
+const SERVER_FILE = fileURLToPath(import.meta.url);
+const TOOL_ROOT = path.resolve(path.dirname(SERVER_FILE), '..');
+const APP_DIR = path.join(path.dirname(SERVER_FILE), 'app');
+const ENGINE_WATCH = path.join(path.dirname(SERVER_FILE), '..', 'engine', 'watch.mjs');
 // 全局运行期信息（看板 / 流水线的进程信息）：跟账号一样属于这台机器
 const HOME_DIR = process.env.HLWD_HOME ? path.resolve(process.env.HLWD_HOME) : path.join(os.homedir(), '.hlwd');
 const WATCH_LOG = path.join(HOME_DIR, 'watch.log');
+const BOARD_LOG = path.join(HOME_DIR, 'board.log');
 const BOARD_FILE = path.join(HOME_DIR, 'board.json');
 const PORT = Number(process.env.PORT ?? 3100);
 // 监听地址可以在运行时切换（设置 → 访问），所以是 let；进程不重启
 let HOST = process.env.HOST ?? '127.0.0.1';
 // 可选的全站口令：内网按可信处理不需要；只用于把看板临时暴露到内网之外（?token= 记成 cookie）
 const TOKEN = String(process.env.WF_TOKEN ?? '').trim();
+// 每次启动一个 boot id：更新页据此判断「新看板真的起来了」，不会把旧进程的响应当成重启成功
+const BOOT = process.env.WF_BOOT || randomUUID();
+// 同一时间只允许一个更新（fetch / merge / 重启都有先后顺序）
+let updating = false;
 // 账号登录：部署在没人守的机器上、同事从内网访问时默认开。单机自用可以 WF_AUTH=off 关掉。
 const AUTH = String(process.env.WF_AUTH ?? 'on').toLowerCase() !== 'off';
 const AUTH_OPEN = new Set(['/api/auth/me', '/api/auth/login', '/api/auth/register', '/api/auth/code', '/api/auth/reset']);
@@ -708,7 +718,52 @@ async function route(req, res, url) {
       readyLabel: cfg.engine.readyLabel,
       workspace: p.dir,
       share: { host: HOST, port: PORT, token: Boolean(TOKEN), lan: lanUrls(PORT) },
+      // 进程启动标识：更新页轮询它，确认重启后的新看板已经接管
+      boot: BOOT,
     });
+  }
+
+  // 设置 → 更新：工具仓库自更新。只动工具自己的 git，更新成功后重启看板（不碰项目）。
+  // GET 只看现状；POST {action:check} 去远端看一眼；POST {action:apply} 快进 + 准备重启。
+  if (pathname === '/api/update') {
+    if (req.method === 'GET') {
+      return json(res, 200, {
+        repo: await readUpdateStatus(TOOL_ROOT),
+        server: { pid: process.pid, boot: BOOT, host: HOST, port: PORT },
+      });
+    }
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    const body = await readBody(req);
+    const action = body.action;
+    if (action !== 'check' && action !== 'apply') {
+      return json(res, 400, { error: 'action 必须是 check 或 apply' });
+    }
+    if (updating) return json(res, 409, { error: '另一个更新正在进行，稍等' });
+    updating = true;
+    try {
+      if (action === 'check') {
+        return json(res, 200, await checkUpdates(TOOL_ROOT));
+      }
+      const out = await applyUpdates(TOOL_ROOT);
+      if (!out.ok) {
+        return json(res, out.code ?? 409, { error: out.error, repo: out.repo, checkedAt: out.checkedAt });
+      }
+      let boot = null;
+      if (out.updated) boot = planRestart(current?.dir ?? process.env.HLWD_PROJECT ?? process.cwd());
+      return json(res, 200, {
+        ok: true,
+        updated: out.updated,
+        from: out.from,
+        to: out.to,
+        repo: out.repo,
+        checkedAt: out.checkedAt,
+        restarting: Boolean(boot),
+        boot,
+        message: out.updated ? `已更新到 ${out.to}` : '已经是最新版本',
+      });
+    } finally {
+      updating = false;
+    }
   }
 
   // 设置 → 访问：就地换监听地址（127.0.0.1 ⇄ 0.0.0.0），不重启进程、不用填 IP
@@ -1155,6 +1210,110 @@ async function rememberBind(host) {
   } catch {
     // 前台启动没有 board.json：不记也不影响
   }
+}
+
+
+/**
+ * 更新成功后准备重启：先让更新接口回包写完，再由 restartBoard 关监听、拉起新进程。
+ * 返回新进程的 boot id，页面轮询 /api/meta 确认「新看板」接管（旧进程的响应不算）。
+ */
+function planRestart(projectDir) {
+  const nextBoot = randomUUID();
+  setTimeout(() => {
+    restartBoard(projectDir, nextBoot).catch((err) => {
+      console.error(`看板重启失败：${err.message}`);
+      process.exit(1);
+    });
+  }, 900);
+  return nextBoot;
+}
+
+/** 关掉监听和现有连接；超时兜底，别让一个挂着的 SSE 卡住重启。 */
+function closeForRestart() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 5000);
+    timer.unref?.();
+    try {
+      server.closeAllConnections?.();
+    } catch {
+      // 已经开始关了
+    }
+    server.close(() => finish());
+  });
+}
+
+/** 等新看板监听：200 或 401 都说明端口已经接上了。 */
+function waitForBoard(port, timeoutMs = 5000) {
+  const probeHost = !HOST || HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST;
+  const hostPart = probeHost.includes(':') ? `[${probeHost}]` : probeHost;
+  const url = `http://${hostPart}:${port}/api/meta`;
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = async () => {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(400) });
+        if (res.status === 200 || res.status === 401) {
+          resolve(true);
+          return;
+        }
+      } catch {
+        // 还没监听
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(tick, 150);
+    };
+    tick();
+  });
+}
+
+/**
+ * 用同样的项目 / 端口 / 监听地址 / 口令拉起一个新看板，然后退出旧进程。
+ * 更新拉下来的是工具代码，项目数据（beads、.hlwd）没有动。
+ */
+async function restartBoard(projectDir, nextBoot) {
+  await closeForRestart();
+
+  const env = { ...process.env, HLWD_PROJECT: projectDir, HOST, PORT: String(PORT), WF_BOOT: nextBoot };
+  if (TOKEN) env.WF_TOKEN = TOKEN;
+  else delete env.WF_TOKEN;
+
+  await fs.mkdir(HOME_DIR, { recursive: true });
+  const log = await fs.open(BOARD_LOG, 'a');
+  let child;
+  try {
+    child = spawn(process.execPath, [SERVER_FILE], {
+      cwd: projectDir,
+      env,
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', log.fd, log.fd],
+    });
+  } finally {
+    await log.close().catch(() => {});
+  }
+  if (!child.pid) throw new Error(`没能启动新看板进程，看日志 ${BOARD_LOG}`);
+  child.unref();
+
+  const info = { pid: child.pid, port: PORT, host: HOST, token: TOKEN, startedAt: new Date().toISOString() };
+  // board.json 写不进去只影响 `wf stop` 找 pid，不影响新看板已经跑起来
+  await fs
+    .writeFile(BOARD_FILE, `${JSON.stringify(info, null, 2)}\n`, 'utf8')
+    .catch((err) => console.error(`board.json 没写回：${err.message}`));
+  if (!(await waitForBoard(PORT))) {
+    throw new Error(`新看板 5 秒内没有监听 ${HOST}:${PORT}，看日志 ${BOARD_LOG}`);
+  }
+  console.log(`看板已重启：pid ${process.pid} → ${child.pid}（${HOST}:${PORT}，boot ${nextBoot}）`);
+  process.exit(0);
 }
 
 server.on('error', (err) => {
