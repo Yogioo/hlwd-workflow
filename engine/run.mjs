@@ -224,7 +224,8 @@ async function main() {
       engine: engineOf(reviewCfg),
     };
     await save();
-    const verdict = await review({ cfg: reviewCfg, workdir, issue, runDir, attempt });
+    // 评论一并交给审查端：人工的修正意见也算验收标准
+    const verdict = await review({ cfg: reviewCfg, workdir, issue, runDir, attempt, comments });
     record.review = {
       ...record.review,
       ms: Date.now() - reviewStart,
