@@ -41,7 +41,7 @@ async function waitUp(base) {
  * 起一个只绑 loopback 的 server，跑完就杀。auth=true 时开账号登录（默认关着，测老契约）。
  * beads=true 时建真项目（.beads 由 bd init 初始化），跑读写工单的用例要它。
  */
-async function withServer(fn, { auth = false, beads = false } = {}) {
+async function withServer(fn, { auth = false, beads = false, env = {} } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hlwd-server-'));
   if (beads) await ensureProject(dir);
   else await fs.mkdir(path.join(dir, '.beads'), { recursive: true }); // 免得走 bd init
@@ -57,6 +57,7 @@ async function withServer(fn, { auth = false, beads = false } = {}) {
       HLWD_HOME: path.join(dir, 'home'), // 账号/会话写到临时目录，别碰本机真账号
       HLWD_PROJECT: dir,
       WF_NO_OPEN: '1',
+      ...env,
     },
     stdio: 'ignore',
   });
@@ -100,6 +101,138 @@ test('静态页也要口令（否则页面能开、接口 401 会莫名其妙）
     assert.equal((await fetch(`${base}/index.html`)).status, 401);
     assert.equal((await fetch(`${base}/index.html?token=${TOKEN}`)).status, 200);
   });
+});
+
+/** 本地假 SMTP：只够验证「发码 → 收码 → 注册」这条链，不连真邮箱。 */
+async function fakeSmtp() {
+  const received = [];
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {});
+    let buf = '';
+    let dataMode = false;
+    let data = '';
+    socket.write('220 test ready\r\n');
+    socket.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      let idx;
+      while ((idx = buf.indexOf('\r\n')) >= 0) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (dataMode) {
+          if (line === '.') {
+            dataMode = false;
+            received.push(data);
+            data = '';
+            socket.write('250 queued\r\n');
+          } else {
+            data += line + '\r\n';
+          }
+          continue;
+        }
+        const cmd = line.toUpperCase();
+        if (cmd.startsWith('EHLO')) socket.write('250-test\r\n250-AUTH PLAIN\r\n250 OK\r\n');
+        else if (cmd.startsWith('AUTH PLAIN')) socket.write('235 ok\r\n');
+        else if (cmd.startsWith('MAIL FROM') || cmd.startsWith('RCPT TO')) socket.write('250 ok\r\n');
+        else if (cmd === 'DATA') {
+          dataMode = true;
+          socket.write('354 go\r\n');
+        } else if (cmd === 'QUIT') {
+          socket.write('221 bye\r\n');
+          socket.end();
+        } else socket.write('250 ok\r\n');
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    port: server.address().port,
+    received,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+test('邮箱注册：发码 → 从邮件里取码 → 注册并登录（假 SMTP）', async () => {
+  const smtp = await fakeSmtp();
+  try {
+    await withServer(
+      async ({ base }) => {
+        const t = `?token=${TOKEN}`;
+        const me0 = await (await fetch(`${base}/api/auth/me${t}`)).json();
+        assert.equal(me0.mail, true, '配了 SMTP 就该走邮箱注册');
+
+        const codeRes = await fetch(`${base}/api/auth/code${t}`, {
+          method: 'POST',
+          body: JSON.stringify({ email: 'newbie@hellowd.net' }),
+        });
+        assert.equal(codeRes.status, 200);
+        assert.equal(smtp.received.length, 1);
+
+        const raw = smtp.received[0];
+        const body = raw.split('\r\n\r\n')[1].replace(/\s+/g, '');
+        const mailText = Buffer.from(body, 'base64').toString('utf8');
+        const code = /验证码：(\d{6})/.exec(mailText)[1];
+
+        const reg = await fetch(`${base}/api/auth/register${t}`, {
+          method: 'POST',
+          body: JSON.stringify({ email: 'newbie@hellowd.net', code, display: '新同事', password: 'secret1' }),
+        });
+        assert.equal(reg.status, 201);
+        const { user } = await reg.json();
+        assert.equal(user.name, 'newbie@hellowd.net');
+        assert.equal(user.role, 'owner');
+        // 注册响应会同时种口令 cookie 和会话 cookie，get('set-cookie') 只看得到第一个
+        const cookies = reg.headers.getSetCookie?.() ?? [reg.headers.get('set-cookie') ?? ''];
+        const session = cookies.find((c) => c.startsWith('wf_session=')) ?? '';
+        assert.match(session, /^wf_session=[0-9a-f]{64}/);
+        const cookie = session.split(';')[0];
+
+        const me = await (await fetch(`${base}/api/auth/me${t}`, { headers: { cookie } })).json();
+        assert.equal(me.user.display, '新同事');
+        assert.equal(me.firstRun, false);
+      },
+      {
+        auth: true,
+        env: {
+          WF_SMTP_HOST: '127.0.0.1',
+          WF_SMTP_PORT: String(smtp.port),
+          WF_SMTP_SECURE: 'false',
+          WF_SMTP_USER: 'bot@hellowd.net',
+          WF_SMTP_PASS: 'x',
+          WF_SMTP_FROM: 'HLWD <bot@hellowd.net>',
+        },
+      },
+    );
+  } finally {
+    await smtp.close();
+  }
+});
+
+test('没配发信邮箱：/api/auth/me 说 mail:false，注册退回用户名；发码接口明确报没配好', async () => {
+  await withServer(
+    async ({ base }) => {
+      const t = `?token=${TOKEN}`;
+      const me = await (await fetch(`${base}/api/auth/me${t}`)).json();
+      assert.equal(me.auth, true);
+      assert.equal(me.mail, false);
+
+      const code = await fetch(`${base}/api/auth/code${t}`, {
+        method: 'POST',
+        body: JSON.stringify({ email: 'someone@hellowd.net' }),
+      });
+      assert.equal(code.status, 503);
+      assert.match((await code.json()).error, /没配好发信邮箱/);
+
+      const reg = await fetch(`${base}/api/auth/register${t}`, {
+        method: 'POST',
+        body: JSON.stringify({ name: 'bob', password: 'secret1' }),
+      });
+      assert.equal(reg.status, 201);
+      const { user } = await reg.json();
+      assert.equal(user.name, 'bob');
+      assert.equal(user.role, 'owner');
+    },
+    { auth: true },
+  );
 });
 
 test('附件：粘进评论的图只留在评论里，不进附件列表', async () => {

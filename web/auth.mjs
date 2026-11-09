@@ -21,6 +21,8 @@ let sessionsFile = path.join(storeDir, 'sessions.json');
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 记住 30 天，局域网自用够了
 const MIN_PASSWORD = 6;
 const NAME_RE = /^[\w.\-\u4e00-\u9fa5]{2,24}$/; // 字母数字下划线中文点横线，2~24
+// 只认常规邮箱字符：name 会当文件名（~/.hlwd/prefs/<name>.json），不能让斜杠之类的混进来
+const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 
 export const SESSION_COOKIE = 'wf_session';
 export const SESSION_MAX_AGE_S = Math.floor(SESSION_TTL_MS / 1000);
@@ -101,27 +103,47 @@ export async function listUsers() {
   return (await loadUsers()).map(publicUser);
 }
 
+export const normalizeEmail = (value) => String(value ?? '').trim().toLowerCase();
+
+/** 按用户名或邮箱找人（大小写不敏感）：登录框两种都能填。 */
 export async function findUser(name) {
   const key = String(name ?? '').trim().toLowerCase();
   if (!key) return null;
-  return (await loadUsers()).find((u) => u.name.toLowerCase() === key) ?? null;
+  return (
+    (await loadUsers()).find(
+      (u) => u.name.toLowerCase() === key || (u.email && u.email.toLowerCase() === key),
+    ) ?? null
+  );
 }
 
 /**
  * 注册。第一个账号自动是 owner。
- * 用户名大小写不敏感（登录时不折腾），但显示时保留原样。
+ * 有 email 走邮箱注册：name 就是邮箱（唯一、大小写不敏感），验证码由 verify.mjs 先验过。
+ * 没 email 时保留老的「用户名 + 密码」注册（没配发信邮箱时的退路）。
  */
-export async function register({ name, display, password } = {}) {
-  const login = String(name ?? '').trim();
-  if (!NAME_RE.test(login)) throw new AuthError('用户名要 2~24 位，只能是字母、数字、下划线、点、横线或中文');
+export async function register({ name, email, display, password } = {}) {
   const pass = String(password ?? '');
   if (pass.length < MIN_PASSWORD) throw new AuthError(`密码至少 ${MIN_PASSWORD} 位`);
   const users = await loadUsers();
-  if (users.some((u) => u.name.toLowerCase() === login.toLowerCase())) throw new AuthError('这个用户名已经被注册了');
+
+  const addr = email == null || email === '' ? '' : normalizeEmail(email);
+  let login;
+  if (addr) {
+    if (!EMAIL_RE.test(addr)) throw new AuthError('邮箱格式不对');
+    if (users.some((u) => u.name.toLowerCase() === addr || (u.email && u.email.toLowerCase() === addr))) {
+      throw new AuthError('这个邮箱已经注册过了，直接登录就行', 409);
+    }
+    login = addr;
+  } else {
+    login = String(name ?? '').trim();
+    if (!NAME_RE.test(login)) throw new AuthError('用户名要 2~24 位，只能是字母、数字、下划线、点、横线或中文');
+    if (users.some((u) => u.name.toLowerCase() === login.toLowerCase())) throw new AuthError('这个用户名已经被注册了');
+  }
 
   const salt = crypto.randomBytes(16).toString('hex');
   const user = {
     name: login,
+    ...(addr ? { email: addr } : {}),
     display: String(display ?? '').trim().slice(0, 32) || login,
     salt,
     hash: await scryptHash(pass, salt),
@@ -181,6 +203,26 @@ export async function dropSession(token) {
   if (!sessions[token]) return;
   delete sessions[token];
   await saveSessions(sessions);
+}
+
+/** 重置密码（忘记密码走邮箱验证码）：改完把这个人的所有会话都踢掉。 */
+export async function resetPassword(name, newPassword) {
+  const users = await loadUsers();
+  const user = users.find((u) => u.name.toLowerCase() === String(name ?? '').toLowerCase());
+  if (!user) throw new AuthError('账号不存在', 404);
+  const pass = String(newPassword ?? '');
+  if (pass.length < MIN_PASSWORD) throw new AuthError(`密码至少 ${MIN_PASSWORD} 位`);
+  const salt = crypto.randomBytes(16).toString('hex');
+  user.salt = salt;
+  user.hash = await scryptHash(pass, salt);
+  await saveUsers(users);
+
+  const sessions = { ...(await loadSessions()) };
+  for (const token of Object.keys(sessions)) {
+    if (sessions[token].name.toLowerCase() === user.name.toLowerCase()) delete sessions[token];
+  }
+  await saveSessions(sessions);
+  return publicUser(user);
 }
 
 /** 改密码（顺手踢掉其他设备：旧会话全作废，除了当前这个）。 */

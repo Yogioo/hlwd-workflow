@@ -17,6 +17,7 @@ import {
   readSession,
   register,
   renameUser,
+  resetPassword,
   setStoreDir,
   verify,
 } from './auth.mjs';
@@ -155,5 +156,32 @@ test('改显示名：不影响登录名，也不接受空', async () => {
     assert.equal((await renameUser('alice', '  ')).display, 'alice', '空名字回落到登录名');
     assert.equal((await listUsers()).length, 1);
     await assert.rejects(() => renameUser('nobody', 'x'), /账号不存在/);
+  });
+});
+
+test('邮箱注册：name 就是邮箱（小写），登录填邮箱也能找到人', async () => {
+  await withStore(async () => {
+    const user = await register({ email: 'PengYunJie@Hellowd.net', display: '彭云洁', password: 'secret1' });
+    assert.equal(user.name, 'pengyunjie@hellowd.net');
+    assert.equal(user.role, 'owner', '第一个账号还是管理员');
+    await assert.rejects(() => register({ email: 'pengyunjie@hellowd.net', password: 'secret2' }), /已经注册过/);
+    assert.equal((await verify({ name: 'PENGYUNJIE@hellowd.net', password: 'secret1' })).display, '彭云洁');
+    assert.equal((await findUser('pengyunjie@hellowd.net')).email, 'pengyunjie@hellowd.net');
+  });
+});
+
+test('重置密码：换掉旧密码，并踢掉这个人的全部会话（别人不受影响）', async () => {
+  await withStore(async () => {
+    await register({ email: 'a@hellowd.net', password: 'secret1' });
+    await register({ email: 'b@hellowd.net', password: 'secret2' });
+    const tokenA = await createSession('a@hellowd.net');
+    const tokenB = await createSession('b@hellowd.net');
+
+    await resetPassword('a@hellowd.net', 'secret3');
+    assert.equal(await readSession(tokenA), null, '被重置的人要重新登录');
+    assert.ok(await readSession(tokenB), '别人的会话不动');
+    assert.equal((await verify({ name: 'a@hellowd.net', password: 'secret3' })).name, 'a@hellowd.net');
+    await assert.rejects(() => verify({ name: 'a@hellowd.net', password: 'secret1' }), /不对/);
+    await assert.rejects(() => resetPassword('nobody@hellowd.net', 'secret4'), /账号不存在/);
   });
 });

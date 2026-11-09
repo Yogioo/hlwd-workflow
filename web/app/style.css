@@ -3758,6 +3758,38 @@ body.needs-auth .panel {
   margin-top: 4px;
   font-size: 13.5px;
 }
+/* 验证码一行：输入框 + 获取按钮 */
+.auth-code {
+  display: flex;
+  gap: 8px;
+}
+.auth-code input {
+  flex: 1;
+  min-width: 0;
+}
+.auth-code .ghost {
+  flex: none;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.auth-link {
+  align-self: center;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.auth-link:hover {
+  color: var(--bone);
+}
+
 .auth-error {
   padding: 7px 10px;
   border-radius: 7px;
