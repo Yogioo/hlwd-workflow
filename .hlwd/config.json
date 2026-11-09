@@ -20,6 +20,7 @@
     "review",
     "closed"
   ],
+  "tags": [],
   "engine": {
     "runner": "pi",
     "model": "",
@@ -29,7 +30,30 @@
     "actor": "ai",
     "readyLabel": "ready-for-agent",
     "timeoutMs": 1800000,
-    "gitCommit": true,
-    "autoWatch": true
+    "autoWatch": true,
+    "presets": [
+      {
+        "id": "default",
+        "name": "默认",
+        "runner": "pi",
+        "model": "",
+        "thinking": ""
+      }
+    ],
+    "nodes": {
+      "execute": {
+        "preset": "default"
+      },
+      "review": {
+        "preset": "default"
+      },
+      "complete": {
+        "commit": true,
+        "push": true,
+        "pr": true,
+        "remote": "origin",
+        "base": "main"
+      }
+    }
   }
 }
