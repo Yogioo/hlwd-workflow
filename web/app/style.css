@@ -1890,6 +1890,21 @@ body[data-mode='issue'] {
 .composer button {
   align-self: flex-end;
 }
+/* 「这是修正意见」开关：勾上 = 发送后顺手把单退回待接，评论进下一轮提示词 */
+.composer-revise {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+}
+.composer-revise input {
+  margin-top: 2px;
+  accent-color: var(--run);
+}
 
 /* 流程：节点图。卡片页看回放，设置页改节点；拓扑固定，所以布局写死在 graph.js 里。 */
 .graph-top {

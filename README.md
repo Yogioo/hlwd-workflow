@@ -424,9 +424,21 @@ node wf.mjs board --lan --token 口令
 提示词在 `.hlwd/prompts/execute.md` 与 `review.md`（缺省回落到工具自带的 `engine/prompts/`）：
 
 - execute：`{{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}}`
-- review：`{{ID}} {{TITLE}} {{BODY}} {{VERDICT}}`（`{{VERDICT}}` 是它必须写出的 JSON 文件路径）
+- review：`{{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{VERDICT}}`（`{{VERDICT}}` 是它必须写出的 JSON 文件路径）
 
 想让它「先写测试再动手」「必须改哪几个文件」，改提示词，不要改引擎。
+
+**AI 干得不对，人怎么补一句（纠偏）**
+
+修正提示词没有单独的输入框：**写在工单评论里**，它就是下一轮的 `{{HISTORY}}`，执行端和审查端都会照着看。
+
+1. 工单页评论区写清「哪里不对、期望什么样、怎么验收」，勾上「这是修正意见」。
+2. 点「发送并重新派给 AI」= 一条评论 + 把工单改回待接 + 保留可派标签（等价 `POST /api/issues/<id>/revise`）。
+   这一轮还在跑时会拒绝（提示词已经写死了，现在写的意见它看不到）；点「重新派给 AI」也行，只是要自己先发评论。
+3. 下一轮的执行/审查提示词里就能看到这条意见（流程节点里点「看渲染后的提示词」核对）。
+
+两个例外：**发布失败**的单重派只重跑收尾、不叫 AI，要按意见重做用 `node wf.mjs work --id <卡片> --fresh`；
+上一轮 AI 的改动还留在工作区时，engine 会以「工作区不干净」拒绝，先提交或加 `--allow-dirty`（脏改动会算进这张单的提交）。
 
 **收尾节点：提交 → 推送 → 建 PR**
 

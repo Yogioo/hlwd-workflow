@@ -898,7 +898,7 @@ async function route(req, res, url) {
     return hit ? json(res, 200, hit) : json(res, 404, { error: '没有这个文件' });
   }
 
-  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/attachments)?$/);
+  const m = pathname.match(/^\/api\/issues\/([^/]+)(\/comments|\/runs|\/attachments|\/revise)?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     if (m[2] === '/attachments') {
@@ -928,6 +928,30 @@ async function route(req, res, url) {
       const comments = await beads.commentIssue(id, body.text, { actor: actorOf(user) });
       broadcastCard(id); // 正在看这张卡的人立刻看到，不用等下一次轮询
       return json(res, 200, { comments });
+    }
+    if (m[2] === '/revise') {
+      // 人工纠偏：一条修正意见 + 退回待接。评论会进下一轮执行/审查的 {{HISTORY}}。
+      if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+      const body = await readBody(req);
+      const text = String(body.text ?? '').trim();
+      if (!text) return json(res, 400, { error: '修正意见不能为空' });
+      const current = await beads.getIssue(id);
+      const run = await latestRun(id);
+      // 正在跑的这一轮，提示词在接单时就已经写死了：现在写的意见它看不到，别假装退回成功。
+      if (workflowOf(current.issue, run).active) {
+        return json(res, 409, { error: '这张单还在跑：等这一轮结束再退回（或先停自动流水线）' });
+      }
+      const p = await project();
+      const cfg = await readProjectConfig(p.dir);
+      const actor = actorOf(user);
+      await beads.commentIssue(id, text, { actor });
+      // 退回 = 重新打开 + 保留可派标签。engine 接单时会把整段评论带进提示词。
+      const issue = await beads.updateIssue(id, { status: 'open', addLabels: [cfg.engine.readyLabel], actor });
+      broadcastCard(id);
+      return json(res, 200, {
+        issue: withCard(issue, await latestRun(id)),
+        comments: await beads.listComments(id),
+      });
     }
     if (m[2] === '/runs') return json(res, 200, { runs: await listRuns(id) });
     if (req.method === 'GET') {

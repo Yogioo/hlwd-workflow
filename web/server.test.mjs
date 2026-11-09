@@ -37,10 +37,14 @@ async function waitUp(base) {
   throw new Error('server 没起来');
 }
 
-/** 起一个只绑 loopback 的 server，跑完就杀。auth=true 时开账号登录（默认关着，测老契约）。 */
-async function withServer(fn, { auth = false } = {}) {
+/**
+ * 起一个只绑 loopback 的 server，跑完就杀。auth=true 时开账号登录（默认关着，测老契约）。
+ * beads=true 时建真项目（.beads 由 bd init 初始化），跑读写工单的用例要它。
+ */
+async function withServer(fn, { auth = false, beads = false } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hlwd-server-'));
-  await fs.mkdir(path.join(dir, '.beads'), { recursive: true }); // 免得走 bd init
+  if (beads) await ensureProject(dir);
+  else await fs.mkdir(path.join(dir, '.beads'), { recursive: true }); // 免得走 bd init
   const port = await freePort();
   const proc = spawn(process.execPath, [SERVER], {
     cwd: dir,
@@ -607,3 +611,52 @@ test('设置：AI 预设与节点引用一起保存，挂在节点上的预设�
   });
 });
 
+
+test('退回并附修正意见：评论 + 改回待接 + 打上可派标签；跑着的单拒绝', async () => {
+  await withServer(
+    async ({ base, dir }) => {
+      const t = `?token=${TOKEN}`;
+      const post = (p, body) =>
+        fetch(`${base}${p}${t}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+      const created = await post('/api/issues', { title: '按钮位置不对', description: '把按钮放右边' });
+      assert.equal(created.status, 201);
+      const { issue } = await created.json();
+      assert.ok(!issue.labels.includes('ready-for-agent'), '先是不带可派标签的普通单');
+
+      // 人工退回：一条修正意见 = 下一轮 AI 的纠偏提示词
+      const revised = await post(`/api/issues/${issue.id}/revise`, { text: '按钮应该在右边，不是左边。' });
+      assert.equal(revised.status, 200);
+      const body = await revised.json();
+      assert.equal(body.issue.status, 'open');
+      assert.ok(body.issue.labels.includes('ready-for-agent'), '退回要顺手把单变成可派');
+      assert.match(body.comments.map((c) => c.text).join('\n'), /按钮应该在右边/);
+
+      // 空意见不接
+      assert.equal((await post(`/api/issues/${issue.id}/revise`, { text: '   ' })).status, 400);
+
+      // 正在跑的单不受理：写一份 outcome=running 的 run（pid 是本进程，算活着）
+      const runId = `${issue.id}-1700000000000`;
+      const runDir = path.join(dir, '.hlwd', 'runs', runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(
+        path.join(runDir, 'run.json'),
+        JSON.stringify({
+          runId,
+          card: { id: issue.id },
+          outcome: 'running',
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+          attempts: [{ attempt: 1, execute: { startedAt: new Date().toISOString(), ms: null, ok: null } }],
+        }),
+      );
+      const busy = await post(`/api/issues/${issue.id}/revise`, { text: '再改一版' });
+      assert.equal(busy.status, 409, '这一轮的提示词已经写死了，别假装退回成功');
+    },
+    { beads: true },
+  );
+});

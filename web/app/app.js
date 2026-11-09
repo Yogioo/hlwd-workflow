@@ -1063,6 +1063,7 @@ function renderIssueFields(issue) {
   if (document.activeElement !== prio) fillPrioritySelect(prio, issue.priority);
   renderDispatch(issue);
   renderCloseButton(issue);
+  renderComposer(issue);
 }
 
 function renderPanelLabels(issue) {
@@ -2069,20 +2070,49 @@ async function patch(fields, id = state.current?.id) {
   }
 }
 
+/**
+ * 评论区的「修正意见」开关：只有在下一轮真会重跑 AI 时才给。
+ * 正在跑的那一轮提示词早就写死了，写意见它看不到；发布失败重派只重跑收尾（要重跑 AI 得 --fresh）。
+ */
+function renderComposer(issue) {
+  const wrap = $('#panelReviseWrap');
+  if (!wrap) return;
+  const wf = workflowOf(issue);
+  wrap.hidden = wf.active || wf.retry === 'publish';
+  if (wrap.hidden) $('#panelRevise').checked = false;
+  syncComposerButton();
+}
+
+function syncComposerButton() {
+  const btn = $('#panelCommentSend');
+  if (!btn) return;
+  const revise = !$('#panelReviseWrap').hidden && $('#panelRevise').checked;
+  btn.textContent = revise ? '发送并重新派给 AI' : '发送';
+}
+
 async function sendComment() {
   const box = $('#panelComment');
   const text = box.value.trim();
   if (!text || !state.current) return;
+  const revise = !$('#panelReviseWrap').hidden && $('#panelRevise').checked;
   try {
-    await api(`/api/issues/${encodeURIComponent(state.current.id)}/comments`, {
+    await api(`/api/issues/${encodeURIComponent(state.current.id)}/${revise ? 'revise' : 'comments'}`, {
       method: 'POST',
       body: JSON.stringify({ text }),
     });
     box.value = '';
     await openIssue(state.current.id, { keepTab: true });
-    hint('评论已发送');
+    if (revise) {
+      hint(
+        state.watch?.running
+          ? '已退回待接：自动流水线会接着跑，下一轮 AI 会看到这条修正意见'
+          : '已退回待接：跑 node wf.mjs work（或开自动流水线），下一轮 AI 会看到这条修正意见',
+      );
+    } else {
+      hint('评论已发送');
+    }
   } catch (e) {
-    hint(`评论失败：${e.message}`, true);
+    hint(`${revise ? '退回' : '评论'}失败：${e.message}`, true);
   }
 }
 
@@ -3012,6 +3042,7 @@ $('#panelLabels').addEventListener('click', async (e) => {
 
 $('#panelLabelAdd').addEventListener('click', () => state.combos.issue?.submitText());
 $('#panelCommentSend').addEventListener('click', sendComment);
+$('#panelRevise').addEventListener('change', syncComposerButton);
 $('#panelComment').addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') sendComment();
 });

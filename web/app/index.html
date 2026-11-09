@@ -137,6 +137,10 @@
               <div id="panelComments" class="comments"></div>
               <div class="composer">
                 <textarea id="panelComment" rows="3" placeholder="写评论（cmd/ctrl+enter 发送；截图可以直接粘进来）"></textarea>
+                <label id="panelReviseWrap" class="composer-revise" hidden>
+                  <input id="panelRevise" type="checkbox" />
+                  <span id="panelReviseText">这是修正意见：发送后把工单退回待接，下一轮 AI 会看到它</span>
+                </label>
                 <button id="panelCommentSend" type="button" class="primary">发送</button>
               </div>
             </div>

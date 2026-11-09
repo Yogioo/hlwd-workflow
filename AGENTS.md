@@ -216,6 +216,7 @@ config.json: tags[]（name/color/desc/archived）/ labels.priorities / engine.*�
 # 旧版的 engine.stages / engine.{runner,model,thinking} 只在**读取时**折成预设（stages 各成一份，全局三个字段成「默认」）；
 # 旧版的 engine.gitCommit 折成 nodes.complete.commit。保存后这些旧字段都不再写回。
 prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} {{HISTORY}} {{FEEDBACK}} / {{VERDICT}}
+                                          # 两端都拿 {{HISTORY}}：人工写在评论里的修正意见，执行与审查同一口径
 ```
 
 - 写方是 `web`（看板「设置」→ `PUT /api/settings`，标签走 `/api/tags`）；读方是 `engine`（每次运行开始时读）。
@@ -243,6 +244,10 @@ prompts/execute.md, prompts/review.md     # 占位符 {{ID}} {{TITLE}} {{BODY}} 
 - `ready-for-agent` 用 label 表达，与状态机正交：它回答「能不能派给 AI」。接单候选是 `open + ready`，看板不会把已有活跃 run 的卡再派一次。
 - 进度不是新状态库：`run.json` 是运行记录，删掉只丢追溯；工作流阶段从 `attempts[].execute/gate/review` 的未完成步骤推导。
 - 每次迁移留一条评论，**只写一句 AI 结论**（例：`AI 已完成并提交 1a2b3c4。`）；验证命令、耗时、原始事件进 `run.json` / 流程图的节点抽屉。人工关单/重开补一条工单开关评论。
+- **人工纠偏只有一个入口：工单评论。** 评论在**接单那一刻**抓一次快照，执行与审查的 `{{HISTORY}}` 都用它——所以运行中写的意见这一轮看不到，写它是给下一轮。
+  `POST /api/issues/<id>/revise {text}`（看板评论框勾「这是修正意见」）把「一条评论 + 改回 open + 保留可派标签」合成一步；run 还活着时返回 409，不假装退回成功。
+  `{{FEEDBACK}}` 是 engine 自己的回灌（同一次运行里门禁/审查没过），人工不直接写它。
+  发布失败（`publish_failed`）时重派只重跑收尾、不叫 AI：要按意见重做必须 `node wf.mjs work --id <卡片> --fresh`。
 - **谁改的**：人工操作由登录用户记 `--actor`；engine 的迁移用 `cfg.actor`，评论由各阶段写。
 - **状态名和列不再可配置**：`labels.statuses` / `columns` 只为旧配置兼容保留；改工作流阶段要改代码契约，不改项目配置。旧项目里已有的 `in_progress` / `review` 仍按 legacy 映射显示，新流程不再写 `review`。
 - **节点图（只读投影）**：`web/workflow.mjs` 的 `TOPOLOGY` 是拓扑的唯一声明，`graphOf(issue, run)` 把一次 run 投影成节点状态与回边（门禁/审查未过 → 回到执行）。拓扑只读：要改流程改 `engine/run.mjs`，不提供连线编辑器；点节点只能改它自己的配置（AI 节点的提示词与预设、收尾节点的提交/推送/PR 与基准分支），不能改拓扑。没有 run 时这张图就是模板形状（全 idle），设置页与卡片页共用同一张图。
